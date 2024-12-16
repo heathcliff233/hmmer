@@ -130,7 +130,7 @@ select_i(ESL_RANDOMNESS *rng, const P7_OPROFILE *om, const P7_OMX *ox, int i, in
 {
   int     Q     = p7O_NQF_AVX512(ox->M);
   int     q    = (k-1) % Q;		/* (q,r) is position of the current DP cell D(i,k) */
-  int     r    = (k-1) / Q;
+   int     r    = (k-1) / Q;
   __m512  mpv  = ox->dpf_avx512[i-1][q*3 + p7X_M];
   __m512  ipv  = ox->dpf_avx512[i-1][q*3 + p7X_I];
   __m512 *tp   = om->tfv_avx512 + 7*q + p7O_MI;
@@ -194,25 +194,30 @@ select_e(ESL_RANDOMNESS *rng, const P7_OPROFILE *om, const P7_OMX *ox, int i, in
   double sum   = 0.0;
   double roll  = esl_random(rng);
   double norm  = 1.0 / ox->xmx[i*p7X_NXCELLS+p7X_E];
-  __m512 xEv   = _mm512_set1_ps(norm); /* all M, D already scaled exactly the same */
-  union { __m512 v; float p[16]; } u;
-  int    q,r;
+  int    q;
 
   while (1) {
-    for (q = 0; q < Q; q++)
-      {
-	u.v = _mm512_mul_ps(ox->dpf_avx512[i][q*3 + p7X_M], xEv);
-	for (r = 0; r < 16; r++) {
-	  sum += u.p[r];
-	  if (roll < sum) { *ret_k = r*Q + q + 1; return p7T_M;}
-	}
+    for (q = 0; q < ox->M; q++){ // Start with the D path
 
-	u.v = _mm512_mul_ps(ox->dpf_avx512[i][q*3 + p7X_D], xEv);
-	for (r = 0; r < 16; r++) {
-	  sum += u.p[r];
-	  if (roll < sum) { *ret_k = r*Q + q + 1; return p7T_D;}
-	}
-      }
+      float *row = (float *) ox->dpf_avx512[i];
+      int vector = q % Q;
+      int within_vector = q /Q;
+      int index = (((vector * 3)+p7X_D) * 16)+within_vector;
+      double val = row[index] * norm;
+      sum += val;
+      if (roll < sum) { *ret_k = q + 1; return p7T_D;}
+    }   
+    for (q = 0; q < ox->M; q++){ // Start with the D path
+
+      float *row = (float *) ox->dpf_avx512[i];
+      int vector = q % Q;
+      int within_vector = q /Q;
+      int index = (((vector * 3)+p7X_M) * 16)+within_vector;
+      double val = row[index] * norm;
+      sum += val;
+      if (roll < sum) { *ret_k = q + 1; return p7T_M;}
+
+    }
     ESL_DASSERT1((sum > 0.99));
   }
   /*UNREACHED*/

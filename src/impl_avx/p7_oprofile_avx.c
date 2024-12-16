@@ -287,6 +287,7 @@ p7_oprofile_Create_avx(int allocM, const ESL_ALPHABET *abc)
   om->tfv_mem_avx   = NULL;
   om->rfv_avx       = NULL;
   om->tfv_avx       = NULL;
+  om->clone =0;
    /* level 1 */
   ESL_ALLOC(om->rbv_mem_avx, sizeof(__m256i) * nqb_avx  * abc->Kp          +31); /* +31 is for manual 32-byte alignment */
   ESL_ALLOC(om->sbv_mem_avx, sizeof(__m256i) * nqs_avx  * abc->Kp          +31); 
@@ -784,11 +785,11 @@ p7_oprofile_Copy_avx(P7_OPROFILE *om1)
 int
 p7_oprofile_UpdateFwdEmissionScores_test_sse_avx(P7_OPROFILE *om, P7_BG *bg, float *fwd_emissions, float *sc_arr)
 {
-  int     M   = om->M;    /* length of the query                                          */
-  int     k, q, x, z;
-  int     nq  = p7O_NQF(M);     /* segment length; total # of striped vectors needed            */
-  int     K   = om->abc->K;
-  int     Kp  = om->abc->Kp;
+  //  int     M   = om->M;    /* length of the query                                          */
+  // int     k, q, x, z;
+  //int     nq  = p7O_NQF(M);     /* segment length; total # of striped vectors needed            */
+  //int     K   = om->abc->K;
+  //int     Kp  = om->abc->Kp;
 
   p7_Die("p7_oprofileUpdateFwdEmissionScores_test_sse_avx has not been implemented yet.  If you are not Nick C., you should complain to him about this.\n");
 
@@ -815,11 +816,11 @@ p7_oprofile_UpdateFwdEmissionScores_test_sse_avx(P7_OPROFILE *om, P7_BG *bg, flo
 int
 p7_oprofile_UpdateFwdEmissionScores_avx(P7_OPROFILE *om, P7_BG *bg, float *fwd_emissions, float *sc_arr)
 {
-  int     M   = om->M;    /* length of the query                                          */
-  int     k, q, x, z;
-  int     nq  = p7O_NQF(M);     /* segment length; total # of striped vectors needed            */
-  int     K   = om->abc->K;
-  int     Kp  = om->abc->Kp;
+  //int     M   = om->M;    /* length of the query                                          */
+  //int     k, q, x, z;
+  //int     nq  = p7O_NQF(M);     /* segment length; total # of striped vectors needed            */
+  //int     K   = om->abc->K;
+  //int     Kp  = om->abc->Kp;
 
   p7_Die("p7_oprofileUpdateFwdEmissionScores_avx has not been implemented yet.  If you are not Nick C., you should complain to him about this.\n");
 
@@ -846,12 +847,12 @@ p7_oprofile_UpdateFwdEmissionScores_avx(P7_OPROFILE *om, P7_BG *bg, float *fwd_e
 int
 p7_oprofile_UpdateVitEmissionScores_avx(P7_OPROFILE *om, P7_BG *bg, float *fwd_emissions, float *sc_arr)
 {
-  int     M   = om->M;    /* length of the query                                          */
-  int     k, q, x, z;
-  int     nq  = p7O_NQW(M);     /* segment length; total # of striped vectors needed            */
-  int     K   = om->abc->K;
-  int     Kp  = om->abc->Kp;
-  int     idx;
+  //int     M   = om->M;    /* length of the query                                          */
+  //int     k, q, x, z;
+  //int     nq  = p7O_NQW(M);     /* segment length; total # of striped vectors needed            */
+  //int     K   = om->abc->K;
+  //int     Kp  = om->abc->Kp;
+  //int     idx;
   
    p7_Die("p7_oprofileUpdateVitEmissionScores_avx has not been implemented yet.  If you are not Nick C., you should complain to him about this.\n");
 
@@ -1016,7 +1017,7 @@ int p7_oprofile_sf_Conversion_avx(P7_OPROFILE *om)
  int p7_oprofile_mf_Conversion_avx(const P7_PROFILE *gm, P7_OPROFILE *om)
 {
   int     M   = gm->M;		/* length of the query                                          */
-  int     nq  = p7O_NQB(M);     /* segment length; total # of striped vectors needed            */
+  int     nq_avx  = p7O_NQB_AVX(M);     /* segment length; total # of striped vectors needed            */
   float   max = 0.0;		/* maximum residue score: used for unsigned emission score bias */
   int     x;			/* counter over residues                                        */
   int     q;			/* q counts over total # of striped vectors, 0..nq-1            */
@@ -1037,7 +1038,6 @@ int p7_oprofile_sf_Conversion_avx(P7_OPROFILE *om)
   om->tec_b = unbiased_byteify(om, logf(0.5f));                                       /* constant multihit E->C = E->J */
   om->tjb_b = unbiased_byteify(om, logf(3.0f / (float) (gm->L+3))); /* this adopts the L setting of the parent profile */
 
-  int     nq_avx  = p7O_NQB_AVX(M);     /* segment length; total # of striped vectors needed    */   
   union { __m256i v; uint8_t i[32]; } tmp_avx; /* used to align and load simd minivectors        */        
 
   max = 0.0;		/* maximum residue score: used for unsigned emission score bias */
@@ -1073,7 +1073,7 @@ int p7_oprofile_sf_Conversion_avx(P7_OPROFILE *om)
 int p7_oprofile_vf_Conversion_avx(const P7_PROFILE *gm, P7_OPROFILE *om)
 {
   int     M   = gm->M;		/* length of the query                                          */
-  int     nq  = p7O_NQW(M);     /* segment length; total # of striped vectors needed            */
+  int     nq_avx  = p7O_NQW_AVX(M);     /* segment length; total # of striped vectors needed            */
   int     x;			/* counter over residues                                        */
   int     q;			/* q counts over total # of striped vectors, 0..nq-1            */
   int     k;			/* the usual counter over model nodes 1..M                      */
@@ -1086,7 +1086,7 @@ int p7_oprofile_vf_Conversion_avx(const P7_PROFILE *gm, P7_OPROFILE *om)
   int16_t  maxval;		/* used to prevent zero cost II                                 */
   int16_t  val;
 
-  int     nq_avx  = p7O_NQW_AVX(M);     /* segment length; total # of striped vectors ne\eded            */
+
   union { __m256i v; int16_t i[16]; } tmp_avx; /* used to align and load simd minivecto\rs            */
   if (nq_avx > om->allocQ8_avx) ESL_EXCEPTION(eslEINVAL, "optimized profile is too small to hold conversion");
 
@@ -2018,6 +2018,19 @@ p7_oprofile_Compare_avx(const P7_OPROFILE *om1, const P7_OPROFILE *om2, float to
 
    return eslOK;
 }
+
+/* retrieve match odds ratio [k][x]
+ * this gets used in p7_alidisplay.c, when we're deciding if a residue is conserved or not */
+float 
+p7_oprofile_FGetEmission_avx(const P7_OPROFILE *om, int k, int x)
+{
+  union { __m256 v; float p[8]; } u;
+  int   Q = p7O_NQF_AVX(om->M);
+  int   q = ((k-1) % Q);
+  int   r = (k-1)/Q;
+  u.v = om->rfv_avx[x][q];
+  return u.p[r];
+}
 #endif
 
 //Stubs for compilers that can't handle AVX
@@ -2518,6 +2531,14 @@ int
 p7_oprofile_Compare_avx(const P7_OPROFILE *om1, const P7_OPROFILE *om2, float tol, char *errmsg)
 {
    return eslEUNSUPPORTEDISA;
+}
+
+/* retrieve match odds ratio [k][x]
+ * this gets used in p7_alidisplay.c, when we're deciding if a residue is conserved or not */
+static inline float 
+p7_oprofile_FGetEmission_avx(const P7_OPROFILE *om, int k, int x)
+{
+  return (eslINFINITY);
 }
 #endif
 /*------------ end, P7_OPROFILE debugging tools  ----------------*/

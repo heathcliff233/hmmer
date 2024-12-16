@@ -29,7 +29,6 @@
 
 #include <stdio.h>
 #include <math.h>
-#include <immintrin.h>   // AVX2
 #include "easel.h"
 #ifdef eslENABLE_AVX
 #include "esl_avx.h"

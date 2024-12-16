@@ -248,6 +248,8 @@ open_engine(const char *filename, char *env, P7_HMMFILE **ret_hfp, int do_ascii_
   hfp->parser       = NULL;
   hfp->efp          = NULL;
   hfp->ffp          = NULL;
+  hfp->ffp256       = NULL;
+  hfp->ffp512       = NULL;
   hfp->pfp          = NULL;
   hfp->ssi          = NULL;
   hfp->errbuf[0]    = '\0';
@@ -363,6 +365,16 @@ open_engine(const char *filename, char *env, P7_HMMFILE **ret_hfp, int do_ascii_
     else if (status != eslOK)        ESL_XFAIL(eslEFORMAT,   errbuf, "Opened %s, a pressed HMM file; but failed to open its .h3i file", hfp->fname);
 
     free(dbfile); dbfile = NULL;
+
+    /* Now, try the 256- and 512-bit versions of the MSV*/
+    if ((status = esl_sprintf(&dbfile, "%s256", hfp->fname) != eslOK)) ESL_XFAIL(status, errbuf, "esl_sprintf() failed; shouldn't happen");
+    dbfile[n-1] ='f';  // h3m->h3f
+    if ((hfp->ffp256 = fopen(dbfile, "rb")) == NULL) ESL_XFAIL(eslENOTFOUND, errbuf, "Opened %s, a pressed HMM file; but no .h3f256 file found", hfp->fname);
+    free(dbfile); dbfile = NULL;
+    if ((status = esl_sprintf(&dbfile, "%s512", hfp->fname) != eslOK)) ESL_XFAIL(status, errbuf, "esl_sprintf() failed; shouldn't happen");
+    dbfile[n-1] ='f'; // h3m->h3f
+    if ((hfp->ffp512 = fopen(dbfile, "rb")) == NULL) ESL_XFAIL(eslENOTFOUND, errbuf, "Opened %s, a pressed HMM file; but no .h3f512 file found", hfp->fname);
+    free(dbfile); dbfile = NULL;
   }
   else
   {
@@ -437,6 +449,8 @@ p7_hmmfile_Close(P7_HMMFILE *hfp)
 #endif
   if (!hfp->do_gzip && !hfp->do_stdin && hfp->f != NULL) fclose(hfp->f);
   if (hfp->ffp   != NULL) fclose(hfp->ffp);
+  if (hfp->ffp256   != NULL) fclose(hfp->ffp256);
+  if (hfp->ffp512   != NULL) fclose(hfp->ffp512);
   if (hfp->pfp   != NULL) fclose(hfp->pfp);
   if (hfp->fname != NULL) free(hfp->fname);
   if (hfp->efp   != NULL) esl_fileparser_Destroy(hfp->efp);
@@ -1006,7 +1020,7 @@ p7_hmmfile_WriteBinary(FILE *fp, int format, P7_HMM *hmm)
   if (hmm->acc  == NULL) hmm->flags &= ~p7H_ACC;   else hmm->flags |= p7H_ACC;
 
   /* ye olde magic number */
-  if      (format == p7_HMMFILE_3f) { if (fwrite((char *) &(v3f_magic), sizeof(uint32_t), 1, fp) != 1) ESL_EXCEPTION_SYS(eslEWRITE, "hmm binary write failed"); }
+  if (format == p7_HMMFILE_3f) { if (fwrite((char *) &(v3f_magic), sizeof(uint32_t), 1, fp) != 1) ESL_EXCEPTION_SYS(eslEWRITE, "hmm binary write failed"); }
   else if (format == p7_HMMFILE_3e) { if (fwrite((char *) &(v3e_magic), sizeof(uint32_t), 1, fp) != 1) ESL_EXCEPTION_SYS(eslEWRITE, "hmm binary write failed"); }
   else if (format == p7_HMMFILE_3d) { if (fwrite((char *) &(v3d_magic), sizeof(uint32_t), 1, fp) != 1) ESL_EXCEPTION_SYS(eslEWRITE, "hmm binary write failed"); }
   else if (format == p7_HMMFILE_3c) { if (fwrite((char *) &(v3c_magic), sizeof(uint32_t), 1, fp) != 1) ESL_EXCEPTION_SYS(eslEWRITE, "hmm binary write failed"); }

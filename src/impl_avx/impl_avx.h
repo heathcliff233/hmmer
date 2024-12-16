@@ -18,12 +18,13 @@
 #include <immintrin.h>  /* AVX*/
 #endif
 #ifdef eslENABLE_AVX512
-#include <x86intrin.h>  /* AVX512 */
+//#include <x86intrin.h>  /* AVX512 */
 #endif
 
 #ifdef __SSE3__
 #include <pmmintrin.h>   /* DENORMAL_MODE */
 #endif
+
 #include "hmmer.h"
 
 /* In calculating Q, the number of vectors we need in a row, we have
@@ -215,18 +216,8 @@ typedef struct {
   P7_OPROFILE  **list;        /* array of <P7_OPROFILE> objects               */
 } P7_OM_BLOCK;
 
-/* retrieve match odds ratio [k][x]
- * this gets used in p7_alidisplay.c, when we're deciding if a residue is conserved or not */
-static inline float 
-p7_oprofile_FGetEmission(const P7_OPROFILE *om, int k, int x)
-{
-  union { __m128 v; float p[4]; } u;
-  int   Q = p7O_NQF(om->M);
-  int   q = ((k-1) % Q);
-  int   r = (k-1)/Q;
-  u.v = om->rfv[x][q];
-  return u.p[r];
-}
+
+
 
 /*****************************************************************
  * 2. P7_OMX: a one-row dynamic programming matrix
@@ -509,6 +500,12 @@ extern int          p7_oprofile_GetFwdEmissionArray_test_sse_avx(const P7_OPROFI
 extern int          p7_oprofile_GetFwdEmissionArray_test_all(const P7_OPROFILE *om, P7_BG *bg, float *arr );
 extern int          (*p7_oprofile_GetFwdEmissionArray)(const P7_OPROFILE *om, P7_BG *bg, float *arr );
 
+/* retrieve match odds ratio [k][x]
+ * this gets used in p7_alidisplay.c, when we're deciding if a residue is conserved or not */
+extern float (* p7_oprofile_FGetEmission)(const P7_OPROFILE *om, int k, int x);
+extern float p7_oprofile_FGetEmission_sse(const P7_OPROFILE *om, int k, int x);
+extern float p7_oprofile_FGetEmission_avx(const P7_OPROFILE *om, int k, int x);
+extern float p7_oprofile_FGetEmission_avx512(const P7_OPROFILE *om, int k, int x);
 /* decoding.c */
 extern int (*p7_Decoding)      (const P7_OPROFILE *om, const P7_OMX *oxf,       P7_OMX *oxb, P7_OMX *pp);
 extern int p7_DomainDecoding(const P7_OPROFILE *om, const P7_OMX *oxf, const P7_OMX *oxb, P7_DOMAINDEF *ddef);
@@ -539,11 +536,23 @@ extern int p7_BackwardParser_avx512 (const ESL_DSQ *dsq, int L, const P7_OPROFIL
 
 
 /* io.c */
-extern int p7_oprofile_Write(FILE *ffp, FILE *pfp, P7_OPROFILE *om);
-extern int p7_oprofile_ReadMSV (P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om);
+extern int p7_oprofile_Write_old(FILE *ffp, FILE *pfp, P7_OPROFILE *om);
+extern int (*p7_oprofile_Write)(P7_HMMFILE *hfp, P7_OPROFILE *om);
+extern int p7_oprofile_Write_sse(P7_HMMFILE *hfp, P7_OPROFILE *om);
+extern int p7_oprofile_Write_avx(P7_HMMFILE *hfp, P7_OPROFILE *om);
+extern int p7_oprofile_Write_avx512(P7_HMMFILE *hfp, P7_OPROFILE *om);
+extern int (* p7_oprofile_ReadMSV) (P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om);
+extern int p7_oprofile_ReadMSV_old (P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om);
+extern int p7_oprofile_ReadMSV_sse (P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om);
+extern int p7_oprofile_ReadMSV_avx (P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om);
+extern int p7_oprofile_ReadMSV_avx512 (P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om);
 extern int p7_oprofile_ReadInfoMSV(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om);
 extern int p7_oprofile_ReadBlockMSV(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OM_BLOCK *hmmBlock);
-extern int p7_oprofile_ReadRest(P7_HMMFILE *hfp, P7_OPROFILE *om);
+extern int (* p7_oprofile_ReadRest)(P7_HMMFILE *hfp, P7_OPROFILE *om);
+extern int p7_oprofile_ReadRest_old(P7_HMMFILE *hfp, P7_OPROFILE *om);
+extern int p7_oprofile_ReadRest_sse(P7_HMMFILE *hfp, P7_OPROFILE *om);
+extern int p7_oprofile_ReadRest_avx(P7_HMMFILE *hfp, P7_OPROFILE *om);
+extern int p7_oprofile_ReadRest_avx512(P7_HMMFILE *hfp, P7_OPROFILE *om);
 extern int p7_oprofile_Position(P7_HMMFILE *hfp, off_t offset);
 
 extern P7_OM_BLOCK *p7_oprofile_CreateBlock(int size);
@@ -640,6 +649,7 @@ impl_Init(void)
   _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 #endif
 }
+
 #endif /* P7_IMPL_avx_INCLUDED */
 
 

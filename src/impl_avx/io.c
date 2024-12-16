@@ -35,13 +35,11 @@
 #include <pthread.h>
 #endif
 
-#include <xmmintrin.h>		/* SSE  */
-#include <emmintrin.h>		/* SSE2 */
-
 #include "easel.h"
-
+#include "esl_cpu.h"
 #include "hmmer.h"
 #include "impl_avx.h"
+
 
 static uint32_t  v3f_fmagic = 0xb3e6e6f3; /* 3/f binary MSV file, SSE:     "3ffs" = 0x 33 66 66 73  + 0x80808080 */
 static uint32_t  v3f_pmagic = 0xb3e6f0f3; /* 3/f binary profile file, SSE: "3fps" = 0x 33 66 70 73  + 0x80808080 */
@@ -60,8 +58,6 @@ static uint32_t  v3b_pmagic = 0xb3e2f0f3; /* 3/b binary profile file, SSE: "3bps
 
 static uint32_t  v3a_fmagic = 0xe8b3e6f3; /* 3/a binary MSV file, SSE:     "h3fs" = 0x 68 33 66 73  + 0x80808080 */
 static uint32_t  v3a_pmagic = 0xe8b3f0f3; /* 3/a binary profile file, SSE: "h3ps" = 0x 68 33 70 73  + 0x80808080 */
-
-
 /*****************************************************************
  *# 1. Writing optimized profiles to two files.
  *****************************************************************/
@@ -83,9 +79,46 @@ static uint32_t  v3a_pmagic = 0xe8b3f0f3; /* 3/a binary profile file, SSE: "h3ps
  * Throws:    <eslEWRITE> on any write failure, such as filling
  *            the disk.
  */
-int
-p7_oprofile_Write(FILE *ffp, FILE *pfp, P7_OPROFILE *om)
+
+static int p7_oprofile_Write_dispatcher(P7_HMMFILE *hfp, P7_OPROFILE *om);
+// SSV Filter function pointer.  Starts out pointing to the dispatcher, gets updated to
+// point at the best-available SIMD implementation on first call
+int (*p7_oprofile_Write)(P7_HMMFILE *hfp, P7_OPROFILE *om) = p7_oprofile_Write_dispatcher;
+
+
+static int p7_oprofile_Write_dispatcher(P7_HMMFILE *hfp, P7_OPROFILE *om)
 {
+#ifdef eslENABLE_AVX512  // Fastest first.
+  if (esl_cpu_has_avx512())
+    {
+      p7_oprofile_Write = p7_oprofile_Write_avx512;
+      return p7_oprofile_Write_avx512(hfp, om);
+    }
+#endif
+
+#ifdef eslENABLE_AVX
+  if (esl_cpu_has_avx())
+    {
+      p7_oprofile_Write = p7_oprofile_Write_avx;
+      return p7_oprofile_Write_avx(hfp, om);
+    }
+#endif
+
+#ifdef eslENABLE_SSE
+  if (esl_cpu_has_sse())
+    {
+      p7_oprofile_Write = p7_oprofile_Write_sse;
+      return p7_oprofile_Write_sse(hfp, om);
+    }
+#endif
+
+  p7_Die("(p7_oprofile_Write_dispatcher found no vector implementation - that shouldn't happen.");
+  return eslFAIL;
+}
+
+int
+p7_oprofile_Write_old(FILE *ffp, FILE *pfp, P7_OPROFILE *om)
+{ // legacy version until we're sure the new stuff works
   int Q4   = p7O_NQF(om->M);
   int Q8   = p7O_NQW(om->M);
   int Q16  = p7O_NQB(om->M);
@@ -225,9 +258,47 @@ p7_oprofile_Write(FILE *ffp, FILE *pfp, P7_OPROFILE *om)
  *
  * Throws:    <eslEMEM> on allocation error.
  */
-int
-p7_oprofile_ReadMSV(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om)
+
+static int p7_oprofile_ReadMSV_dispatcher(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om);
+// SSV Filter function pointer.  Starts out pointing to the dispatcher, gets updated to
+// point at the best-available SIMD implementation on first call
+int (* p7_oprofile_ReadMSV)(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om) = p7_oprofile_ReadMSV_dispatcher;
+
+
+static int
+p7_oprofile_ReadMSV_dispatcher(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om)
 {
+#ifdef eslENABLE_AVX512  // Fastest first.
+  if (esl_cpu_has_avx512())
+    {
+      p7_oprofile_ReadMSV = p7_oprofile_ReadMSV_avx512;
+      return p7_oprofile_ReadMSV_avx512(hfp, byp_abc, ret_om);
+    }
+#endif
+
+#ifdef eslENABLE_AVX
+  if (esl_cpu_has_avx())
+    {
+      p7_oprofile_ReadMSV = p7_oprofile_ReadMSV_avx;
+      return p7_oprofile_ReadMSV_avx(hfp, byp_abc, ret_om);
+    }
+#endif
+
+#ifdef eslENABLE_SSE
+  if (esl_cpu_has_sse())
+    {
+      p7_oprofile_ReadMSV = p7_oprofile_ReadMSV_sse;
+      return p7_oprofile_ReadMSV_sse(hfp, byp_abc, ret_om);
+    }
+#endif
+
+  p7_Die("(p7_oprofile_ReadMSV_dispatcher found no vector implementation - that shouldn't happen.");
+  return eslFAIL;
+}
+
+int
+p7_oprofile_ReadMSV_old(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om)
+{ // legacy version
   P7_OPROFILE  *om = NULL;
   ESL_ALPHABET *abc = NULL;
   uint32_t      magic;
@@ -270,8 +341,6 @@ p7_oprofile_ReadMSV(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_o
   if ((om = p7_oprofile_Create(M, abc)) == NULL)         ESL_XFAIL(eslEMEM, hfp->errbuf, "allocation failed: oprofile");
   om->M = M;
   om->roff = roff;
-  int byte_vector_length = p7O_NQB(M) * 16; // # of 128-bit vectors required to hold M bytes * 16 bytes/vector, because HMM pressed with 128-bit vects.
-  int padded_byte_vector_length = (p7O_NQB(M) + p7O_EXTRA_SB) * 16; // # of 128-bit vectors required to hold M bytes + extras * 16 bytes/vector
   if (! fread((char *) &n,               sizeof(int),     1,           hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read name length");
   ESL_ALLOC(om->name, sizeof(char) * (n+1));
   if (! fread((char *) om->name,         sizeof(char),    n+1,         hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read name");
@@ -314,6 +383,8 @@ p7_oprofile_ReadMSV(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_o
 }
 
 
+
+
 /* Function:  p7_oprofile_ReadInfoMSV()
  * Synopsis:  Read MSV filter info, but not the scores.
  *
@@ -353,7 +424,7 @@ p7_oprofile_ReadMSV(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_o
  */
 int
 p7_oprofile_ReadInfoMSV(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE **ret_om)
-{
+{ // legacy version
   P7_OPROFILE  *om = NULL;
   ESL_ALPHABET *abc = NULL;
   uint32_t      magic;
@@ -497,8 +568,46 @@ p7_oprofile_ReadBlockMSV(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OM_BLOCK *h
  *            
  *            <eslEMEM> on allocation error.
  */
+
+static int p7_oprofile_ReadRest_dispatcher(P7_HMMFILE *hfp, P7_OPROFILE *om);
+// SSV Filter function pointer.  Starts out pointing to the dispatcher, gets updated to
+// point at the best-available SIMD implementation on first call
+int (* p7_oprofile_ReadRest)(P7_HMMFILE *hfp, P7_OPROFILE *om) = p7_oprofile_ReadRest_dispatcher;
+
+
+static int
+p7_oprofile_ReadRest_dispatcher(P7_HMMFILE *hfp, P7_OPROFILE *om)
+{
+#ifdef eslENABLE_AVX512  // Fastest first.
+  if (esl_cpu_has_avx512())
+    {
+      p7_oprofile_ReadRest = p7_oprofile_ReadRest_avx512;
+      return p7_oprofile_ReadRest_avx512( hfp, om);
+    }
+#endif
+
+#ifdef eslENABLE_AVX
+  if (esl_cpu_has_avx())
+    {
+      p7_oprofile_ReadRest = p7_oprofile_ReadRest_avx;
+      return p7_oprofile_ReadRest_avx( hfp, om);
+    }
+#endif
+
+#ifdef eslENABLE_SSE
+  if (esl_cpu_has_sse())
+    {
+      p7_oprofile_ReadRest = p7_oprofile_ReadRest_sse;
+      return p7_oprofile_ReadRest_sse( hfp, om);
+    }
+#endif
+
+  p7_Die("(p7_oprofile_ReadMSV_dispatcher found no vector implementation - that shouldn't happen.");
+  return eslFAIL;
+}
+
 int
-p7_oprofile_ReadRest(P7_HMMFILE *hfp, P7_OPROFILE *om)
+p7_oprofile_ReadRest_old(P7_HMMFILE *hfp, P7_OPROFILE *om)
 {
   uint32_t      magic;
   int           M, Q4, Q8;
@@ -516,8 +625,6 @@ p7_oprofile_ReadRest(P7_HMMFILE *hfp, P7_OPROFILE *om)
       if (pthread_mutex_lock (&hfp->readMutex) != 0) ESL_EXCEPTION(eslESYS, "mutex lock failed");
     }
 #endif  
-  int short_vector_length = p7O_NQW_AVX(om->M) * 16;  // # of 126-bit vectors required t\o hold M shorts * 8 shorts/vector
-  int float_vector_length = p7O_NQF_AVX(om->M) * 8;  // # of 126-bit vectors required to\ hold M floats * 4 shorts/vector
 
   hfp->rr_errbuf[0] = '\0';
   if (hfp->pfp == NULL) ESL_XFAIL(eslEFORMAT, hfp->rr_errbuf, "no MSV profile file; hmmpress probably wasn't run");
@@ -615,6 +722,7 @@ p7_oprofile_ReadRest(P7_HMMFILE *hfp, P7_OPROFILE *om)
   if (name != NULL) free(name);
   return status;
 }
+
 /*----------- end, reading optimized profiles -------------------*/
 
 

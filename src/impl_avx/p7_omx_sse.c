@@ -64,7 +64,7 @@ p7_omx_Create_sse(int allocM, int allocL, int allocXL)
 int
 p7_omx_GrowTo_sse(P7_OMX *ox, int allocM, int allocL, int allocXL)
 {
-  printf("p7_omx_GrowTo_sse, allocM = %d, allocL = %d, allocXL = %d\n", allocM, allocL, allocXL);
+  
 
   void   *p;
   int     nqf    = p7O_NQF(allocM);	   /* segment length; total # of striped vectors for uchar */

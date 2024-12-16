@@ -195,8 +195,7 @@ select_e(ESL_RANDOMNESS *rng, const P7_OPROFILE *om, const P7_OMX *ox, int i, in
   double sum   = 0.0;
   double roll  = esl_random(rng);
   double norm  = 1.0 / ox->xmx[i*p7X_NXCELLS+p7X_E];
-  union { __m128 v; float p[4]; } u;
-  int    q,r;
+  int    q;
 
   while (1) {
     for (q = 0; q < ox->M; q++){ // Start with the D path
@@ -225,6 +224,7 @@ select_e(ESL_RANDOMNESS *rng, const P7_OPROFILE *om, const P7_OMX *ox, int i, in
   /*UNREACHED*/
   ESL_EXCEPTION(-1, "unreached code was reached. universe collapses.");
 } 
+
 
 /* B(i) is reached from N(i) or J(i). */
 static inline int

@@ -973,8 +973,44 @@ p7_oprofile_GetFwdEmissionArray_Dispatcher(const P7_OPROFILE *om, P7_BG *bg, flo
   return eslFAIL;
 }
 
+/* retrieve match odds ratio [k][x]
+ * this gets used in p7_alidisplay.c, when we're deciding if a residue is conserved or not */
+static float
+p7_oprofile_FGetEmission_Dispatcher(const P7_OPROFILE *om, int k, int x);
 
+float (* p7_oprofile_FGetEmission)(const P7_OPROFILE *om, int k, int x ) = p7_oprofile_FGetEmission_Dispatcher;
 
+static float
+p7_oprofile_FGetEmission_Dispatcher(const P7_OPROFILE *om, int k, int x)
+{
+
+#ifdef eslENABLE_AVX512  // Fastest first.
+ if (esl_cpu_has_avx512())
+   {
+     p7_oprofile_FGetEmission= p7_oprofile_FGetEmission_avx512;
+     return p7_oprofile_FGetEmission_avx512(om, k, x);
+   }
+#endif
+
+#ifdef eslENABLE_AVX
+  if (esl_cpu_has_avx())
+    {
+     p7_oprofile_GetFwdEmissionArray = p7_oprofile_GetFwdEmissionArray_avx;
+     return p7_oprofile_FGetEmission_avx(om, k, x); 
+    }
+#endif
+
+#ifdef eslENABLE_SSE
+  if (esl_cpu_has_sse())
+    {
+      p7_oprofile_GetFwdEmissionArray = p7_oprofile_GetFwdEmissionArray_sse;
+      return p7_oprofile_FGetEmission_sse(om, k, x);
+    }
+#endif
+
+  p7_Die("p7_oprofile_FGetEmission_dispatcher found no vector implementation - that shouldn't happen.");
+  return eslFAIL;
+}
 /*------------ end, conversions from P7_OPROFILE ------------------*/
 
 

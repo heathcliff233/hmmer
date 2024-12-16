@@ -9,8 +9,9 @@
 #include <stdio.h>
 #include <math.h>
 
-#include <x86intrin.h>
-
+//#include <x86intrin.h>
+#include <xmmintrin.h>		/* SSE  */
+#include <emmintrin.h>		/* SSE2 */
 #include "easel.h"
 #include "esl_sse.h"
 

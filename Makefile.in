@@ -53,14 +53,11 @@ man1ext     = .1
 
 # Compiler configuration
 #
+# Note: CFLAGS for SIMD instruction sets removed, as all SIMD code should
+# be in the relevant impl_foo directory
 CC             = @CC@
 CFLAGS         = @CFLAGS@
 PTHREAD_CFLAGS = @PTHREAD_CFLAGS@
-NEON_CFLAGS    = @NEON_CFLAGS@
-SSE_CFLAGS     = @SSE_CFLAGS@
-AVX_CFLAGS     = @AVX_CFLAGS@
-AVX512_CFLAGS     = @AVX512_CFLAGS@
-VMX_CFLAGS     = @VMX_CFLAGS@
 LDFLAGS        = -static @LDFLAGS@
 CPPFLAGS       = @CPPFLAGS@
 

@@ -68,10 +68,12 @@
 
 #define p7_NEVPARAM 6	/* number of statistical parameters stored in models                      */
 #define p7_NCUTOFFS 6	/* number of Pfam score cutoffs stored in models                          */
-#define p7_NOFFSETS 3	/* number of disk offsets stored in models for hmmscan's fast model input */
+#define p7_NOFFSETS 5	/* number of disk offsets stored in models for hmmscan's fast model input */
 enum p7_evparams_e {    p7_MMU  = 0, p7_MLAMBDA = 1,     p7_VMU = 2,  p7_VLAMBDA = 3, p7_FTAU = 4, p7_FLAMBDA = 5 };
 enum p7_cutoffs_e  {     p7_GA1 = 0,     p7_GA2 = 1,     p7_TC1 = 2,      p7_TC2 = 3,  p7_NC1 = 4,     p7_NC2 = 5 };
-enum p7_offsets_e  { p7_MOFFSET = 0, p7_FOFFSET = 1, p7_POFFSET = 2 };
+enum p7_offsets_e  { p7_MOFFSET = 0, p7_FOFFSET = 1, p7_POFFSET = 2, p7_FOFFSET256 = 3, p7_FOFFSET512 = 4 };
+// add the 256- and 512-bit SIMD versions at the end to prevent issues if there's code somewhere that doesn't use 
+// this enum
 
 #define p7_EVPARAM_UNSET -99999.0f  /* if evparam[0] is unset, then all unset                         */
 #define p7_CUTOFF_UNSET  -99999.0f  /* if cutoff[XX1] is unset, then cutoff[XX2] unset, XX={GA,TC,NC} */
@@ -408,7 +410,7 @@ enum p7_hmmfile_formats_e {
   p7_HMMFILE_3c = 3,
   p7_HMMFILE_3d = 4,
   p7_HMMFILE_3e = 5,
-  p7_HMMFILE_3f = 6,
+  p7_HMMFILE_3f = 6
 };
 
 typedef struct p7_hmmfile_s {
@@ -426,7 +428,10 @@ typedef struct p7_hmmfile_s {
   ESL_FILEPARSER *efp;
 
   /* If <is_pressed>, we can read optimized profiles directly, via:  */
-  FILE         *ffp;		/* MSV part of the optimized profile */
+  FILE         *ffp;		/* MSV part of the optimized profile, 128-bit version.  
+  Retains old name to limit the impact of supporting wider SIMD */
+  FILE         *ffp256; /* MSV part, 256-bit SIMD version*/
+  FILE         *ffp512; /* MSV part, 512-bit SIMD version*/
   FILE         *pfp;		/* rest of the optimized profile     */
 
 #ifdef HMMER_THREADS

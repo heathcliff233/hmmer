@@ -52,6 +52,7 @@ BASE_OBJS =  decoding.o\
 
 SSE_OBJS = decoding_sse.o\
 	   fwdback_sse.o\
+		 io_sse.o\
 	   ssvfilter_sse.o\
 	   msvfilter_sse.o\
 	   vitfilter_sse.o\
@@ -63,6 +64,7 @@ SSE_OBJS = decoding_sse.o\
 
 AVX_OBJS = decoding_avx.o\
 	   fwdback_avx.o\
+		 io_avx.o\
 	   ssvfilter_avx.o\
 	   msvfilter_avx.o\
 	   vitfilter_avx.o\
@@ -74,6 +76,7 @@ AVX_OBJS = decoding_avx.o\
 
 AVX512_OBJS = decoding_avx512.o\
 	      fwdback_avx512.o\
+				io_avx512.o\
 	      ssvfilter_avx512.o\
 	      msvfilter_avx512.o\
 	      vitfilter_avx512.o\

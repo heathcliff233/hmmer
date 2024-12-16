@@ -1616,6 +1616,18 @@ p7_oprofile_Compare_sse(const P7_OPROFILE *om1, const P7_OPROFILE *om2, float to
    return eslOK;
 }
 
+/* retrieve match odds ratio [k][x]
+ * this gets used in p7_alidisplay.c, when we're deciding if a residue is conserved or not */
+float p7_oprofile_FGetEmission_sse(const P7_OPROFILE *om, int k, int x)
+{
+  union { __m128 v; float p[4]; } u;
+  int   Q = p7O_NQF(om->M);
+  int   q = ((k-1) % Q);
+  int   r = (k-1)/Q;
+  u.v = om->rfv[x][q];
+  return u.p[r];
+}
+
 /*------------ end, P7_OPROFILE debugging tools  ----------------*/
 
 

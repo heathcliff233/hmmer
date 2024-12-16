@@ -120,6 +120,7 @@ p7_oprofile_Create_avx512(int allocM, const ESL_ALPHABET *abc)
   om->tfv_mem_avx512   = NULL;
   om->rfv_avx512       = NULL;
   om->tfv_avx512       = NULL;
+  om->clone = 0;
    /* level 1 */
   ESL_ALLOC(om->rbv_mem_avx512, sizeof(__m512i) * nqb_avx512  * abc->Kp          +63);
   /* +63 is for manual 32-byte alignment */
@@ -183,8 +184,7 @@ p7_oprofile_Create_avx512(int allocM, const ESL_ALPHABET *abc)
   return NULL;
 }
 
-P7_OPROFILE *
-p7_oprofile_Create_test_all(int allocM, const ESL_ALPHABET *abc)
+P7_OPROFILE *p7_oprofile_Create_test_all(int allocM, const ESL_ALPHABET *abc)
 {
   int          status;
   P7_OPROFILE *om  = NULL;
@@ -2366,12 +2366,25 @@ p7_oprofile_Compare_avx512(const P7_OPROFILE *om1, const P7_OPROFILE *om2, float
 
    return eslOK;
 }
+
+/* retrieve match odds ratio [k][x]
+ * this gets used in p7_alidisplay.c, when we're deciding if a residue is conserved or not */
+float 
+p7_oprofile_FGetEmission_avx512(const P7_OPROFILE *om, int k, int x)
+{
+  union { __m512 v; float p[16]; } u;
+  int   Q = p7O_NQF_AVX512(om->M);
+  int   q = ((k-1) % Q);
+  int   r = (k-1)/Q;
+  u.v = om->rfv_avx512[x][q];
+  return u.p[r];
+}
 #endif
 /*------------ end, P7_OPROFILE debugging tools  ----------------*/
 
 
 // Stubs in case the compiler can't handle AVX-512
-#ifdef eslENABLE_AVX512
+#ifndef eslENABLE_AVX512
 extern P7_OPROFILE *p7_oprofile_Create_test_all(int M, const ESL_ALPHABET *abc){
   return NULL;
 }
@@ -2480,5 +2493,10 @@ extern int          p7_oprofile_GetFwdEmissionArray_avx512(const P7_OPROFILE *om
 extern int          p7_oprofile_GetFwdEmissionArray_test_all(const P7_OPROFILE *om, P7_BG *bg, float *arr ){
   return eslEUNSUPPORTEDISA;
 }
-
+/* retrieve match odds ratio [k][x]
+ * this gets used in p7_alidisplay.c, when we're deciding if a residue is conserved or not */
+float p7_oprofile_FGetEmission_avx512(const P7_OPROFILE *om, int k, int x)
+{
+  return eslINFINITY;
+}
 #endif

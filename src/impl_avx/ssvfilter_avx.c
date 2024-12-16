@@ -14,14 +14,14 @@
 #include <math.h>
 #ifdef eslENABLE_AVX
 #include <immintrin.h>   // AVX2
+#include "esl_avx.h"
 #endif
 #include "easel.h"
 #include "esl_gumbel.h"
 
-
 #include "hmmer.h"
 
-#ifdef eslENABLE_AVX
+
 /* Note that some ifdefs below has to be changed if these values are
    changed. These values are chosen based on some simple speed
    tests. Apparently, two registers are generally used for something
@@ -33,6 +33,7 @@
 #define  MAX_BANDS 6
 #endif
 
+#ifdef eslENABLE_AVX
 
 #define STEP_SINGLE(sv)                         \
   sv   = _mm256_subs_epi8(sv, *rsc); rsc++;        \

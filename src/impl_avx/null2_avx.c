@@ -17,10 +17,11 @@
 #include <emmintrin.h>		/* SSE2 */
 
 #include "easel.h"
-#include "esl_sse.h"
+#include "esl_avx.h"
 #include "esl_vectorops.h"
 
 #include "hmmer.h"
+#ifdef eslENABLE_AVX
 #include "impl_avx.h"
 
 /*****************************************************************
@@ -45,11 +46,11 @@ p7_Null2_ByExpectation_avx(const P7_OPROFILE *om, const P7_OMX *pp, float *null2
 {
   int      M    = om->M;
   int      Ld   = pp->L;
-  int      Q    = p7O_NQF(M);
+  int      Q    = p7O_NQF_AVX(M);
   float   *xmx  = pp->xmx;	/* enables use of XMXo(i,s) macro */
   float    norm;
-  __m128  *rp;
-  __m128   sv;
+  __m256  *rp;
+  __m256   sv;
   float    xfactor;
   int      i,q,x;
   
@@ -57,7 +58,7 @@ p7_Null2_ByExpectation_avx(const P7_OPROFILE *om, const P7_OMX *pp, float *null2
    * in generating the Ld residues in this domain.
    * The 0 row in <wrk> is used to hold these numbers.
    */
-  memcpy(pp->dpf[0], pp->dpf[1], sizeof(__m128) * 3 * Q);
+  memcpy(pp->dpf_avx[0], pp->dpf_avx[1], sizeof(__m256) * 3 * Q);
   XMXo(0,p7X_N) = XMXo(1,p7X_N);
   XMXo(0,p7X_C) = XMXo(1,p7X_C); /* 0.0 */
   XMXo(0,p7X_J) = XMXo(1,p7X_J); /* 0.0 */
@@ -66,8 +67,8 @@ p7_Null2_ByExpectation_avx(const P7_OPROFILE *om, const P7_OMX *pp, float *null2
     {
       for (q = 0; q < Q; q++)
 	{
-	  pp->dpf[0][q*3 + p7X_M] = _mm_add_ps(pp->dpf[i][q*3 + p7X_M], pp->dpf[0][q*3 + p7X_M]);
-	  pp->dpf[0][q*3 + p7X_I] = _mm_add_ps(pp->dpf[i][q*3 + p7X_I], pp->dpf[0][q*3 + p7X_I]);
+	  pp->dpf_avx[0][q*3 + p7X_M] = _mm256_add_ps(pp->dpf_avx[i][q*3 + p7X_M], pp->dpf_avx[0][q*3 + p7X_M]);
+	  pp->dpf_avx[0][q*3 + p7X_I] = _mm256_add_ps(pp->dpf_avx[i][q*3 + p7X_I], pp->dpf_avx[0][q*3 + p7X_I]);
 	}
       XMXo(0,p7X_N) += XMXo(i,p7X_N);
       XMXo(0,p7X_C) += XMXo(i,p7X_C); 
@@ -76,11 +77,11 @@ p7_Null2_ByExpectation_avx(const P7_OPROFILE *om, const P7_OMX *pp, float *null2
 
   /* Convert those expected #'s to frequencies, to use as posterior weights. */
   norm = 1.0 / (float) Ld;
-  sv   = _mm_set1_ps(norm);
+  sv   = _mm256_set1_ps(norm);
   for (q = 0; q < Q; q++)
     {
-      pp->dpf[0][q*3 + p7X_M] = _mm_mul_ps(pp->dpf[0][q*3 + p7X_M], sv);
-      pp->dpf[0][q*3 + p7X_I] = _mm_mul_ps(pp->dpf[0][q*3 + p7X_I], sv);
+      pp->dpf_avx[0][q*3 + p7X_M] = _mm256_mul_ps(pp->dpf_avx[0][q*3 + p7X_M], sv);
+      pp->dpf_avx[0][q*3 + p7X_I] = _mm256_mul_ps(pp->dpf_avx[0][q*3 + p7X_I], sv);
     }
   XMXo(0,p7X_N) *= norm;
   XMXo(0,p7X_C) *= norm;
@@ -92,15 +93,15 @@ p7_Null2_ByExpectation_avx(const P7_OPROFILE *om, const P7_OMX *pp, float *null2
   xfactor = XMXo(0, p7X_N) + XMXo(0, p7X_C) + XMXo(0, p7X_J); 
   for (x = 0; x < om->abc->K; x++)
     {
-      sv = _mm_setzero_ps();
-      rp = om->rfv[x];
+      sv = _mm256_setzero_ps();
+      rp = om->rfv_avx[x];
       for (q = 0; q < Q; q++)
 	{
-	  sv = _mm_add_ps(sv, _mm_mul_ps(pp->dpf[0][q*3 + p7X_M], *rp)); rp++;
-	  sv = _mm_add_ps(sv,            pp->dpf[0][q*3 + p7X_I]);              /* insert odds implicitly 1.0 */
-	  //	  sv = _mm_add_ps(sv, _mm_mul_ps(pp->dpf[0][q*3 + p7X_I], *rp)); rp++; 
+	  sv = _mm256_add_ps(sv, _mm256_mul_ps(pp->dpf_avx[0][q*3 + p7X_M], *rp)); rp++;
+	  sv = _mm256_add_ps(sv,            pp->dpf_avx[0][q*3 + p7X_I]);              /* insert odds implicitly 1.0 */
+	  //	  sv = _mm256_add_ps(sv, _mm256_mul_ps(pp->dpf[0][q*3 + p7X_I], *rp)); rp++; 
 	}
-      esl_sse_hsum_ps(sv, &(null2[x]));
+      esl_avx_hsum_ps(sv, &(null2[x]));
       null2[x] += xfactor;
     }
   /* now null2[x] = \frac{f_d(x)}{f_0(x)} for all x in alphabet,
@@ -130,14 +131,14 @@ p7_Null2_ByExpectation_avx(const P7_OPROFILE *om, const P7_OMX *pp, float *null2
 int
 p7_Null2_ByTrace_avx(const P7_OPROFILE *om, const P7_TRACE *tr, int zstart, int zend, P7_OMX *wrk, float *null2)
 {
-  union { __m128 v; float p[4]; } u;
-  int    Q  = p7O_NQF(om->M);
+  union { __m256 v; float p[4]; } u;
+  int    Q  = p7O_NQF_AVX(om->M);
   int    Ld = 0;
   float *xmx = wrk->xmx;	/* enables use of XMXo macro */
   float  norm;
   float  xfactor;
-  __m128 sv;
-  __m128 *rp;
+  __m256 sv;
+  __m256 *rp;
   int    q, r;
   int    x;
   int    z;
@@ -145,8 +146,8 @@ p7_Null2_ByTrace_avx(const P7_OPROFILE *om, const P7_TRACE *tr, int zstart, int 
   /* We'll use the i=0 row in wrk for working space: dp[0][] and xmx[][0]. */
   for (q = 0; q < Q; q++)
     {
-      wrk->dpf[0][q*3 + p7X_M] = _mm_setzero_ps();
-      wrk->dpf[0][q*3 + p7X_I] = _mm_setzero_ps();
+      wrk->dpf_avx[0][q*3 + p7X_M] = _mm256_setzero_ps();
+      wrk->dpf_avx[0][q*3 + p7X_I] = _mm256_setzero_ps();
     }
   XMXo(0,p7X_N) =  0.0;
   XMXo(0,p7X_C) =  0.0;
@@ -162,9 +163,9 @@ p7_Null2_ByTrace_avx(const P7_OPROFILE *om, const P7_TRACE *tr, int zstart, int 
 	  // s = ( (tr->st[z] == p7T_M) ?  p7X_M : p7X_I);  // We don't need the state type <s>, but this is how you'd get it.
 	  q = p7X_NSCELLS * ( (tr->k[z] - 1) % Q) + p7X_M;
 	  r = (tr->k[z] - 1) / Q;
-	  u.v            = wrk->dpf[0][q];
+	  u.v            = wrk->dpf_avx[0][q];
 	  u.p[r]        += 1.0;	/* all this to increment a count by one! */
-	  wrk->dpf[0][q] = u.v;
+	  wrk->dpf_avx[0][q] = u.v;
 
 	}
       else /* emitted an x_i with no k; must be an N,C,J */
@@ -177,11 +178,11 @@ p7_Null2_ByTrace_avx(const P7_OPROFILE *om, const P7_TRACE *tr, int zstart, int 
 	}
     }
   norm = 1.0 / (float) Ld;
-  sv = _mm_set1_ps(norm);
+  sv = _mm256_set1_ps(norm);
   for (q = 0; q < Q; q++)
     {
-      wrk->dpf[0][q*3 + p7X_M] = _mm_mul_ps(wrk->dpf[0][q*3 + p7X_M], sv);
-      wrk->dpf[0][q*3 + p7X_I] = _mm_mul_ps(wrk->dpf[0][q*3 + p7X_I], sv);
+      wrk->dpf_avx[0][q*3 + p7X_M] = _mm256_mul_ps(wrk->dpf_avx[0][q*3 + p7X_M], sv);
+      wrk->dpf_avx[0][q*3 + p7X_I] = _mm256_mul_ps(wrk->dpf_avx[0][q*3 + p7X_I], sv);
     }
   XMXo(0,p7X_N) *= norm;
   XMXo(0,p7X_C) *= norm;
@@ -193,15 +194,15 @@ p7_Null2_ByTrace_avx(const P7_OPROFILE *om, const P7_TRACE *tr, int zstart, int 
   xfactor =  XMXo(0,p7X_N) + XMXo(0,p7X_C) + XMXo(0,p7X_J);
   for (x = 0; x < om->abc->K; x++)
     {
-      sv = _mm_setzero_ps();
-      rp = om->rfv[x];
+      sv = _mm256_setzero_ps();
+      rp = om->rfv_avx[x];
       for (q = 0; q < Q; q++)
 	{
-	  sv = _mm_add_ps(sv, _mm_mul_ps(wrk->dpf[0][q*3 + p7X_M], *rp)); rp++;
-	  sv = _mm_add_ps(sv,            wrk->dpf[0][q*3 + p7X_I]); /* insert emission odds implicitly 1.0 */
-	  //	  sv = _mm_add_ps(sv, _mm_mul_ps(wrk->dpf[0][q*3 + p7X_I], *rp)); rp++;
+	  sv = _mm256_add_ps(sv, _mm256_mul_ps(wrk->dpf_avx[0][q*3 + p7X_M], *rp)); rp++;
+	  sv = _mm256_add_ps(sv,            wrk->dpf_avx[0][q*3 + p7X_I]); /* insert emission odds implicitly 1.0 */
+	  //	  sv = _mm256_add_ps(sv, _mm256_mul_ps(wrk->dpf[0][q*3 + p7X_I], *rp)); rp++;
 	}
-      esl_sse_hsum_ps(sv, &(null2[x]));
+      esl_avx_hsum_ps(sv, &(null2[x]));
       null2[x] += xfactor;
     }
   /* now null2[x] = \frac{f_d(x)}{f_0(x)} for all x in alphabet,
@@ -218,3 +219,17 @@ p7_Null2_ByTrace_avx(const P7_OPROFILE *om, const P7_TRACE *tr, int zstart, int 
   return eslOK;
 }
 
+#endif
+#ifndef eslENABLE_AVX  // stubs for compilers that can't handle AVX
+int
+p7_Null2_ByExpectation_avx(const P7_OPROFILE *om, const P7_OMX *pp, float *null2)
+{
+  return eslEUNSUPPORTEDISA;
+}
+
+int
+p7_Null2_ByTrace_avx(const P7_OPROFILE *om, const P7_TRACE *tr, int zstart, int zend, P7_OMX *wrk, float *null2)
+{
+  return eslEUNSUPPORTEDISA;
+}
+#endif
