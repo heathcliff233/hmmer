@@ -92,8 +92,6 @@ p7_oprofile_Write_avx512(P7_HMMFILE *hfp, P7_OPROFILE *om)
 {
   int Q16  = p7O_NQB(om->M);
   int Q16x = p7O_NQB(om->M) + p7O_EXTRA_SB;
-  int Q4_AVX   = p7O_NQF_AVX(om->M);
-  int Q8_AVX   = p7O_NQW_AVX(om->M);
   int Q16_AVX  = p7O_NQB_AVX(om->M);
   int Q16x_AVX = p7O_NQB_AVX(om->M) + p7O_EXTRA_SB;
   int Q4_AVX512   = p7O_NQF_AVX512(om->M);
@@ -526,19 +524,19 @@ p7_oprofile_ReadMSV_avx512(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE 
   ESL_ALPHABET *abc = NULL;
   uint32_t      magic;
   off_t         roff;
-  int           M, Q16_AVX, Q16x_AVX;
+  int           M, Q16_AVX512, Q16x_AVX512;
   int           x,n;
   int           alphatype;
   int           status;
 
   hfp->errbuf[0] = '\0';  // do NOT touch rr_errbuf[]. In thread parallelization, master is exclusively using ReadMSV, workers are using ReadRest
-  if (hfp->ffp == NULL) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "no MSV profile file; hmmpress probably wasn't run");
-  if (feof(hfp->ffp))   { status = eslEOF; goto ERROR; }	/* normal EOF: no more profiles */
+  if (hfp->ffp512 == NULL) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "no MSV profile file; hmmpress probably wasn't run");
+  if (feof(hfp->ffp512))   { status = eslEOF; goto ERROR; }	/* normal EOF: no more profiles */
   
   /* keep track of the starting offset of the MSV model */
-  roff = ftello(hfp->ffp);
+  roff = ftello(hfp->ffp512);
 
-  if (! fread( (char *) &magic,     sizeof(uint32_t), 1, hfp->ffp)) { status = eslEOF; goto ERROR; }
+  if (! fread( (char *) &magic,     sizeof(uint32_t), 1, hfp->ffp512)) { status = eslEOF; goto ERROR; }
   if (magic == v3a_fmagic)  ESL_XFAIL(eslEFORMAT, hfp->errbuf, "binary auxfiles are in an outdated HMMER format (3/a); please hmmpress your HMM file again");
   if (magic == v3b_fmagic)  ESL_XFAIL(eslEFORMAT, hfp->errbuf, "binary auxfiles are in an outdated HMMER format (3/b); please hmmpress your HMM file again");
   if (magic == v3c_fmagic)  ESL_XFAIL(eslEFORMAT, hfp->errbuf, "binary auxfiles are in an outdated HMMER format (3/c); please hmmpress your HMM file again");
@@ -547,10 +545,10 @@ p7_oprofile_ReadMSV_avx512(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE 
   if (magic == v3f_fmagic)  ESL_XFAIL(eslEFORMAT, hfp->errbuf, "binary auxfiles are in an outdated HMMER format (3/f); please hmmpress your HMM file again");
   if (magic != v3g_fmagic)  ESL_XFAIL(eslEFORMAT, hfp->errbuf, "bad magic; not an HMM database?");
 
-  if (! fread( (char *) &M,         sizeof(int),      1, hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read model size M");
-  if (! fread( (char *) &alphatype, sizeof(int),      1, hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read alphabet type");  
-  Q16_AVX  = p7O_NQB_AVX(M);
-  Q16x_AVX = p7O_NQB_AVX(M) + p7O_EXTRA_SB;
+  if (! fread( (char *) &M,         sizeof(int),      1, hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read model size M");
+  if (! fread( (char *) &alphatype, sizeof(int),      1, hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read alphabet type");  
+  Q16_AVX512  = p7O_NQB_AVX512(M);
+  Q16x_AVX512 = p7O_NQB_AVX512(M) + p7O_EXTRA_SB;
   /* Set or verify alphabet. */
   if (byp_abc == NULL || *byp_abc == NULL)	{	/* alphabet unknown: whether wanted or unwanted, make a new one */
     if ((abc = esl_alphabet_Create(alphatype)) == NULL)  ESL_XFAIL(eslEMEM, hfp->errbuf, "allocation failed: alphabet");
@@ -564,36 +562,36 @@ p7_oprofile_ReadMSV_avx512(P7_HMMFILE *hfp, ESL_ALPHABET **byp_abc, P7_OPROFILE 
   if ((om = p7_oprofile_Create(M, abc)) == NULL)         ESL_XFAIL(eslEMEM, hfp->errbuf, "allocation failed: oprofile");
   om->M = M;
   om->roff = roff;
-  if (! fread((char *) &n,               sizeof(int),     1,           hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read name length");
+  if (! fread((char *) &n,               sizeof(int),     1,           hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read name length");
   ESL_ALLOC(om->name, sizeof(char) * (n+1));
-  if (! fread((char *) om->name,         sizeof(char),    n+1,         hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read name");
+  if (! fread((char *) om->name,         sizeof(char),    n+1,         hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read name");
 
-  if (! fread((char *) &(om->max_length),sizeof(int),     1,           hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read max_length");
-  if (! fread((char *) &(om->tbm_b),     sizeof(uint8_t), 1,           hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read tbm");
-  if (! fread((char *) &(om->tec_b),     sizeof(uint8_t), 1,           hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read tec");
-  if (! fread((char *) &(om->tjb_b),     sizeof(uint8_t), 1,           hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read tjb");
-  if (! fread((char *) &(om->scale_b),   sizeof(float),   1,           hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read scale");
-  if (! fread((char *) &(om->base_b),    sizeof(uint8_t), 1,           hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read base");
-  if (! fread((char *) &(om->bias_b),    sizeof(uint8_t), 1,           hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read bias");
+  if (! fread((char *) &(om->max_length),sizeof(int),     1,           hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read max_length");
+  if (! fread((char *) &(om->tbm_b),     sizeof(uint8_t), 1,           hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read tbm");
+  if (! fread((char *) &(om->tec_b),     sizeof(uint8_t), 1,           hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read tec");
+  if (! fread((char *) &(om->tjb_b),     sizeof(uint8_t), 1,           hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read tjb");
+  if (! fread((char *) &(om->scale_b),   sizeof(float),   1,           hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read scale");
+  if (! fread((char *) &(om->base_b),    sizeof(uint8_t), 1,           hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read base");
+  if (! fread((char *) &(om->bias_b),    sizeof(uint8_t), 1,           hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read bias");
 
   for (x = 0; x < abc->Kp; x++){
-    if (! fread((char *) om->sbv_avx[x],     sizeof(__m256i), Q16x_AVX,        hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read ssv scores at %d [residue %c]", x, abc->sym[x]); 
-  //  p7_restripe_byte((char *) om->sbv[x], (char*) om->sbv_avx[x], padded_byte_vector_length, 128, 256, 255);
+    if (! fread((char *) om->sbv_avx512[x],     sizeof(__m512i), Q16x_AVX512,        hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read ssv scores at %d [residue %c]", x, abc->sym[x]); 
+
   }
   for (x = 0; x < abc->Kp; x++){
-    if (! fread((char *) om->rbv_avx[x],     sizeof(__m256i), Q16_AVX,         hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read msv scores at %d [residue %c]", x, abc->sym[x]);
-    //p7_restripe_byte((char *) om->rbv[x], (char *) om->rbv_avx[x], byte_vector_length, 128, 256, 255);
+    if (! fread((char *) om->rbv_avx512[x],     sizeof(__m512i), Q16_AVX512,         hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read msv scores at %d [residue %c]", x, abc->sym[x]);
   }
-  if (! fread((char *) om->evparam,      sizeof(float),   p7_NEVPARAM, hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read stat params");
-  if (! fread((char *) om->offs,         sizeof(off_t),   p7_NOFFSETS, hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read hmmpfam offsets");
-  if (! fread((char *) om->compo,        sizeof(float),   p7_MAXABET,  hfp->ffp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read model composition");
+  
+  if (! fread((char *) om->evparam,      sizeof(float),   p7_NEVPARAM, hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read stat params");
+  if (! fread((char *) om->offs,         sizeof(off_t),   p7_NOFFSETS, hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read hmmpfam offsets");
+  if (! fread((char *) om->compo,        sizeof(float),   p7_MAXABET,  hfp->ffp512)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read model composition");
 
   /* record ends with magic sentinel, for detecting binary file corruption */
-  if (! fread( (char *) &magic,     sizeof(uint32_t), 1, hfp->ffp))  ESL_XFAIL(eslEFORMAT, hfp->errbuf, "no sentinel magic: .h3f file corrupted?");
+  if (! fread( (char *) &magic,     sizeof(uint32_t), 1, hfp->ffp512))  ESL_XFAIL(eslEFORMAT, hfp->errbuf, "no sentinel magic: .h3f file corrupted?");
   if (magic != v3g_fmagic)                                           ESL_XFAIL(eslEFORMAT, hfp->errbuf, "bad sentinel magic; .h3f file corrupted?");
 
   /* keep track of the ending offset of the MSV model */
-  om->eoff = ftello(hfp->ffp) - 1;
+  om->eoff = ftello(hfp->ffp512) - 1;
 
   if (byp_abc != NULL) *byp_abc = abc;  /* pass alphabet (whether new or not) back to caller, if caller wanted it */
   *ret_om = om;
@@ -649,7 +647,7 @@ int
 p7_oprofile_ReadRest_avx512(P7_HMMFILE *hfp, P7_OPROFILE *om)
 {
   uint32_t      magic;
-  int           M, Q4_AVX, Q8_AVX;
+  int           M, Q4_AVX512, Q8_AVX512;
   int           x,n;
   char         *name = NULL;
   int           alphatype;
@@ -705,58 +703,58 @@ p7_oprofile_ReadRest_avx512(P7_HMMFILE *hfp, P7_OPROFILE *om)
   if (! fread((char *) om->cs,           sizeof(char),     M+2,         hfp->pfp)) ESL_XFAIL(eslEFORMAT, hfp->rr_errbuf, "failed to read cs annotation");
   if (! fread((char *) om->consensus,    sizeof(char),     M+2,         hfp->pfp)) ESL_XFAIL(eslEFORMAT, hfp->rr_errbuf, "failed to read consensus annotation");
 
-  Q4_AVX  = p7O_NQF_AVX(om->M);
-  Q8_AVX  = p7O_NQW_AVX(om->M);
+  Q4_AVX512  = p7O_NQF_AVX512(om->M);
+  Q8_AVX512  = p7O_NQW_AVX512(om->M);
   char *buffer;
-  ESL_ALLOC(buffer, sizeof(__m256i) * Q4_AVX * p7O_NTRANS); // big enough for any row
+  ESL_ALLOC(buffer, sizeof(__m512i) * Q4_AVX512 * p7O_NTRANS); // big enough for any row
 
   if (! fread((char *) buffer, sizeof(uint16_t),  p7O_NTRANS*om->M, hfp->pfp)) ESL_XFAIL(eslEFORMAT, hfp->rr_errbuf, "failed to read <tu>, vitfilter transitions");
   uint16_t *short_pointer;
-  short_pointer = (uint16_t *) om->twv_avx;
+  short_pointer = (uint16_t *) om->twv_avx512;
   // everything but the DDs
   for (int t = p7O_BM; t <= p7O_II; t++){ /* this loop of 7 transitions depends on the order in p7o_tsc_e */
     for(int hmmpos = 0; hmmpos < om->M; hmmpos++){
-      int vector = ((hmmpos%Q8_AVX) * (p7O_NTRANS-1)) + t;
-      int within_vector = hmmpos/Q8_AVX;  
-      int index = (vector * (sizeof(__m256i)/sizeof(uint16_t)))+within_vector;
+      int vector = ((hmmpos%Q8_AVX512) * (p7O_NTRANS-1)) + t;
+      int within_vector = hmmpos/Q8_AVX512;  
+      int index = (vector * (sizeof(__m512i)/sizeof(uint16_t)))+within_vector;
       short_pointer[index] = ((uint16_t *) buffer)[(t * om->M)+hmmpos];
     }
-    for(int padding = om->M; padding < (Q8_AVX * (sizeof(__m256i)/sizeof(uint16_t))); padding++){
-      int vector = ((padding%Q8_AVX) * (p7O_NTRANS-1)) + t;
-      int within_vector = padding/Q8_AVX;  
-      int index = (vector * (sizeof(__m256i)/sizeof(uint16_t)))+within_vector;
+    for(int padding = om->M; padding < (Q8_AVX512 * (sizeof(__m512i)/sizeof(uint16_t))); padding++){
+      int vector = ((padding%Q8_AVX512) * (p7O_NTRANS-1)) + t;
+      int within_vector = padding/Q8_AVX512;  
+      int index = (vector * (sizeof(__m512i)/sizeof(uint16_t)))+within_vector;
       short_pointer[index] = -32768;
     }
   }
   // and the DDs
   for(int hmmpos = 0; hmmpos < om->M; hmmpos++){
-    int vector = (hmmpos % Q8_AVX) + (Q8_AVX * (p7O_NTRANS -1));
-      int within_vector = hmmpos /Q8_AVX;
-      int index = (vector * (sizeof(__m256i)/sizeof(uint16_t)))+within_vector;
+    int vector = (hmmpos % Q8_AVX512) + (Q8_AVX512 * (p7O_NTRANS -1));
+      int within_vector = hmmpos /Q8_AVX512;
+      int index = (vector * (sizeof(__m512i)/sizeof(uint16_t)))+within_vector;
       short_pointer[index] = ((uint16_t *) buffer)[((p7O_NTRANS -1)*om->M) +hmmpos];
   }
-  for(int padding = om->M; padding < (Q8_AVX * (sizeof(__m256i)/sizeof(uint16_t))); padding++){
-      int vector = (padding % Q8_AVX) + (Q8_AVX * (p7O_NTRANS -1));
-      int within_vector = padding /Q8_AVX;
-      int index = (vector * (sizeof(__m256i)/sizeof(uint16_t)))+within_vector;
+  for(int padding = om->M; padding < (Q8_AVX512 * (sizeof(__m512i)/sizeof(uint16_t))); padding++){
+      int vector = (padding % Q8_AVX512) + (Q8_AVX512 * (p7O_NTRANS -1));
+      int within_vector = padding /Q8_AVX512;
+      int index = (vector * (sizeof(__m512i)/sizeof(uint16_t)))+within_vector;
       short_pointer[index] = -32768;
   }
 
   for (x = 0; x < om->abc->Kp; x++){
-    short_pointer = (uint16_t *) om->rwv_avx[x];
+    short_pointer = (uint16_t *) om->rwv_avx512[x];
     if (! fread((char *) buffer,     sizeof(int16_t), om->M,         hfp->pfp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read viterbi scores at %d [residue %c]", x, om->abc->sym[x]);
     int hmmpos;
     for(hmmpos = 0; hmmpos < om->M; hmmpos++){
-      int vector = hmmpos % Q8_AVX;
-      int within_vector = hmmpos /Q8_AVX;
-      int index = (vector * (sizeof(__m256i)/sizeof(uint16_t)))+within_vector;
+      int vector = hmmpos % Q8_AVX512;
+      int within_vector = hmmpos /Q8_AVX512;
+      int index = (vector * (sizeof(__m512i)/sizeof(uint16_t)))+within_vector;
       short_pointer[index] = ((uint16_t *)buffer)[hmmpos];
     }
     
-    for(int padding = hmmpos; padding < (Q8_AVX * (sizeof(__m256i)/sizeof(uint16_t))); padding++){
-      int vector = padding % Q8_AVX;
-      int within_vector = padding /Q8_AVX;
-      int index = (vector * (sizeof(__m256i)/sizeof(uint16_t)))+within_vector;
+    for(int padding = hmmpos; padding < (Q8_AVX512 * (sizeof(__m512i)/sizeof(uint16_t))); padding++){
+      int vector = padding % Q8_AVX512;
+      int within_vector = padding /Q8_AVX512;
+      int index = (vector * (sizeof(__m512i)/sizeof(uint16_t)))+within_vector;
       short_pointer[index] = -32768;  // value for elements of vector that don't
         //correspond to HMM positions
     }
@@ -769,50 +767,50 @@ p7_oprofile_ReadRest_avx512(P7_HMMFILE *hfp, P7_OPROFILE *om)
   if (! fread((char *) &(om->ncj_roundoff), sizeof(float),    1,           hfp->pfp)) ESL_XFAIL(eslEFORMAT, hfp->rr_errbuf, "failed to read ddbound_w");
 
  if (! fread((char *) buffer, sizeof(float),  p7O_NTRANS*om->M, hfp->pfp)) ESL_XFAIL(eslEFORMAT, hfp->rr_errbuf, "failed to read <tf>, fwd/back transitions");
-  float *float_pointer = (float *) om->tfv_avx;
+  float *float_pointer = (float *) om->tfv_avx512;
   // everything but the DDs
   for (int t = p7O_BM; t <= p7O_II; t++){ /* this loop of 7 transitions depends on the order in p7o_tsc_e */
     for(int hmmpos = 0; hmmpos < om->M; hmmpos++){
-      int vector = ((hmmpos%Q4_AVX) * (p7O_NTRANS-1)) + t;
-      int within_vector = hmmpos/Q4_AVX;  
-      int index = (vector * (sizeof(__m256i)/sizeof(float)))+within_vector;
+      int vector = ((hmmpos%Q4_AVX512) * (p7O_NTRANS-1)) + t;
+      int within_vector = hmmpos/Q4_AVX512;  
+      int index = (vector * (sizeof(__m512i)/sizeof(float)))+within_vector;
       float_pointer[index] = ((float *) buffer)[(t * om->M)+hmmpos];
     }
-    for(int padding = om->M; padding < (Q4_AVX * (sizeof(__m256i)/sizeof(float))); padding++){
-      int vector = ((padding%Q4_AVX) * (p7O_NTRANS-1)) + t;
-      int within_vector = padding/Q4_AVX;  
-      int index = (vector * (sizeof(__m256i)/sizeof(float)))+within_vector;
+    for(int padding = om->M; padding < (Q4_AVX512 * (sizeof(__m512i)/sizeof(float))); padding++){
+      int vector = ((padding%Q4_AVX512) * (p7O_NTRANS-1)) + t;
+      int within_vector = padding/Q4_AVX512;  
+      int index = (vector * (sizeof(__m512i)/sizeof(float)))+within_vector;
       float_pointer[index] = 0;
     }
   }
   // and the DDs
   for(int hmmpos = 0; hmmpos < om->M; hmmpos++){
-    int vector = (hmmpos % Q4_AVX) + (Q4_AVX * (p7O_NTRANS -1));
-      int within_vector = hmmpos /Q4_AVX;
-      int index = (vector * (sizeof(__m256i)/sizeof(float)))+within_vector;
+    int vector = (hmmpos % Q4_AVX512) + (Q4_AVX512 * (p7O_NTRANS -1));
+      int within_vector = hmmpos /Q4_AVX512;
+      int index = (vector * (sizeof(__m512i)/sizeof(float)))+within_vector;
       float_pointer[index] = ((float *) buffer)[((p7O_NTRANS -1)*om->M) +hmmpos];
   }
-  for(int padding = om->M; padding < (Q4_AVX * (sizeof(__m256i)/sizeof(float))); padding++){
-      int vector = (padding % Q4_AVX) + (Q4_AVX * (p7O_NTRANS -1));
-      int within_vector = padding /Q4_AVX;
-      int index = (vector * (sizeof(__m256i)/sizeof(float)))+within_vector;
+  for(int padding = om->M; padding < (Q4_AVX512 * (sizeof(__m512i)/sizeof(float))); padding++){
+      int vector = (padding % Q4_AVX512) + (Q4_AVX512 * (p7O_NTRANS -1));
+      int within_vector = padding /Q4_AVX512;
+      int index = (vector * (sizeof(__m512i)/sizeof(float)))+within_vector;
       float_pointer[index] = 0;
   }
 
   for (x = 0; x < om->abc->Kp; x++){
-    float_pointer = (float *) om->rfv_avx[x];
+    float_pointer = (float *) om->rfv_avx512[x];
     if (! fread((char *) buffer,     sizeof(float), om->M,         hfp->pfp)) ESL_XFAIL(eslEFORMAT, hfp->errbuf, "failed to read forward scores at %d [residue %c]", x, om->abc->sym[x]);
     int hmmpos;
     for(hmmpos = 0; hmmpos < om->M; hmmpos++){
-      int vector = hmmpos % Q4_AVX;
-      int within_vector = hmmpos /Q4_AVX;
-      int index = (vector * (sizeof(__m256i)/sizeof(float)))+within_vector;
+      int vector = hmmpos % Q4_AVX512;
+      int within_vector = hmmpos /Q4_AVX512;
+      int index = (vector * (sizeof(__m512i)/sizeof(float)))+within_vector;
       float_pointer[index] = ((float *)buffer)[hmmpos];
     }
-    for(int padding = hmmpos; padding < (Q4_AVX * (sizeof(__m256i)/sizeof(float))); padding++){
-      int vector = padding % Q4_AVX;
-      int within_vector = padding /Q4_AVX;
-      int index = (vector * (sizeof(__m256i)/sizeof(float)))+within_vector;
+    for(int padding = hmmpos; padding < (Q4_AVX512 * (sizeof(__m512i)/sizeof(float))); padding++){
+      int vector = padding % Q4_AVX512;
+      int within_vector = padding /Q4_AVX512;
+      int index = (vector * (sizeof(__m512i)/sizeof(float)))+within_vector;
       float_pointer[index] = 0;  // value for elements of vector that don't correspond to HMM
       //positions
     }

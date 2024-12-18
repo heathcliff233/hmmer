@@ -1416,7 +1416,7 @@ int
 p7_oprofile_mf_Conversion_avx512(const P7_PROFILE *gm, P7_OPROFILE *om)
 {
   int     M   = gm->M;		/* length of the query                                          */
-  int     nq  = p7O_NQB(M);     /* segment length; total # of striped vectors needed            */
+  int     nq  = p7O_NQB_AVX512(M);     /* segment length; total # of striped vectors needed            */
   float   max = 0.0;		/* maximum residue score: used for unsigned emission score bias */
   int     x;			/* counter over residues                                        */
   int     q;			/* q counts over total # of striped vectors, 0..nq-1            */

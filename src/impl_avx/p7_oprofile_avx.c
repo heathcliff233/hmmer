@@ -2535,7 +2535,7 @@ p7_oprofile_Compare_avx(const P7_OPROFILE *om1, const P7_OPROFILE *om2, float to
 
 /* retrieve match odds ratio [k][x]
  * this gets used in p7_alidisplay.c, when we're deciding if a residue is conserved or not */
-static inline float 
+float 
 p7_oprofile_FGetEmission_avx(const P7_OPROFILE *om, int k, int x)
 {
   return (eslINFINITY);

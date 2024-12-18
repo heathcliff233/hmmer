@@ -70,7 +70,7 @@ p7_OptimalAccuracy_avx512(const P7_OPROFILE *om, const P7_OMX *pp, P7_OMX *ox, f
   __m512 zerov = _mm512_setzero_ps();
   __m512 infv  = _mm512_set1_ps(-eslINFINITY);
   int M = om->M;
-  int Q = p7O_NQF(M);
+  int Q = p7O_NQF_AVX512(M);
   int q;
   int j;
   int i;
