@@ -397,15 +397,15 @@ extern int          p7_oprofile_IsLocal(const P7_OPROFILE *om);
 extern void         p7_oprofile_Destroy_sse(P7_OPROFILE *om);
 extern void         p7_oprofile_Destroy_avx(P7_OPROFILE *om);
 extern void         p7_oprofile_Destroy_avx512(P7_OPROFILE *om);
-extern void         p7_oprofile_Destroy_test_avx_sse(P7_OPROFILE *om);
-extern void         p7_oprofile_Destroy_test_all(P7_OPROFILE *om);
+extern void         p7_oprofile_Destroy_test_sse_avx(P7_OPROFILE *om);
+extern void         p7_oprofile_Destroy_test_all_x86_simd(P7_OPROFILE *om);
 extern void         (*p7_oprofile_Destroy)(P7_OPROFILE *om);
 
 extern P7_OPROFILE * p7_oprofile_Copy_sse(P7_OPROFILE *om);
 extern P7_OPROFILE * p7_oprofile_Copy_avx(P7_OPROFILE *om);
 extern P7_OPROFILE * p7_oprofile_Copy_avx512(P7_OPROFILE *om);
-extern P7_OPROFILE * p7_oprofile_Copy_test_avx_sse(P7_OPROFILE *om);
-extern P7_OPROFILE * p7_oprofile_Copy_test_all(P7_OPROFILE *om);
+extern P7_OPROFILE * p7_oprofile_Copy_test_sse_avx(P7_OPROFILE *om);
+extern P7_OPROFILE * p7_oprofile_Copy_test_all_x86_simd(P7_OPROFILE *om);
 extern P7_OPROFILE *(* p7_oprofile_Copy)(P7_OPROFILE *om);
 
 extern P7_OPROFILE *p7_oprofile_Clone(const P7_OPROFILE *om);
@@ -532,7 +532,14 @@ extern int p7_Forward_avx512       (const ESL_DSQ *dsq, int L, const P7_OPROFILE
 extern int p7_ForwardParser_avx512  (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om,                    P7_OMX *fwd, float *opt_sc);
 extern int p7_Backward_avx512       (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
 extern int p7_BackwardParser_avx512 (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
-
+extern int p7_Forward_test_sse_avx       (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om,                    P7_OMX *fwd, float *opt_sc);
+extern int p7_ForwardParser_test_sse_avx  (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om,                    P7_OMX *fwd, float *opt_sc);
+extern int p7_Backward_test_sse_avx       (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
+extern int p7_BackwardParser_test_sse_avx (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
+extern int p7_Forward_test_all_x86_simd       (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om,                    P7_OMX *fwd, float *opt_sc);
+extern int p7_ForwardParser_test_all_x86_simd  (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om,                    P7_OMX *fwd, float *opt_sc);
+extern int p7_Backward_test_all_x86_simd       (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
+extern int p7_BackwardParser_test_all_x86_simd (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
 
 
 /* io.c */
@@ -573,6 +580,8 @@ extern int (* p7_MSVFilter) (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P
 extern int p7_MSVFilter_sse (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
 extern int p7_MSVFilter_avx  (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
 extern int p7_MSVFilter_avx512  (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
+extern int p7_MSVFilter_test_sse_avx  (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
+extern int p7_MSVFilter_test_all_x86_simd  (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
 
 extern int p7_SSVFilter_longtarget(const ESL_DSQ *dsq, int L, P7_OPROFILE *om, P7_OMX *ox, const P7_SCOREDATA *msvdata, P7_BG *bg, double P, P7_HMM_WINDOWLIST *windowlist);
 
@@ -600,6 +609,11 @@ extern int p7_OptimalAccuracy_avx(const P7_OPROFILE *om, const P7_OMX *pp,      
 extern int p7_OATrace_avx        (const P7_OPROFILE *om, const P7_OMX *pp, const P7_OMX *ox, P7_TRACE *tr);
 extern int p7_OptimalAccuracy_avx512(const P7_OPROFILE *om, const P7_OMX *pp,       P7_OMX *ox, float *ret_e);
 extern int p7_OATrace_avx512        (const P7_OPROFILE *om, const P7_OMX *pp, const P7_OMX *ox, P7_TRACE *tr);
+extern int p7_OptimalAccuracy_test_sse_avx(const P7_OPROFILE *om, const P7_OMX *pp,       P7_OMX *ox, float *ret_e);
+extern int p7_OATrace_test_sse_avx        (const P7_OPROFILE *om, const P7_OMX *pp, const P7_OMX *ox, P7_TRACE *tr);
+extern int p7_OptimalAccuracy_test_all_x86_simd(const P7_OPROFILE *om, const P7_OMX *pp,       P7_OMX *ox, float *ret_e);
+extern int p7_OATrace_test_all_x86_simd        (const P7_OPROFILE *om, const P7_OMX *pp, const P7_OMX *ox, P7_TRACE *tr);
+
 
 /* stotrace.c */
 extern int (*p7_StochasticTrace)(ESL_RANDOMNESS *rng, const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *ox, P7_TRACE *tr);
@@ -615,6 +629,8 @@ extern int (* p7_ViterbiFilter)(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om
 extern int p7_ViterbiFilter_sse(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
 extern int p7_ViterbiFilter_avx (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
 extern int p7_ViterbiFilter_avx512 (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
+extern int p7_ViterbiFilter_test_sse_avx (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
+extern int p7_ViterbiFilter_test_all_x86_simd (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc);
 extern int p7_ViterbiFilter_longtarget(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox,
                                         float filtersc, double P, P7_HMM_WINDOWLIST *windowlist);
 
@@ -625,6 +641,11 @@ extern int p7_ViterbiFilter_longtarget(const ESL_DSQ *dsq, int L, const P7_OPROF
 extern void p7_restripe_byte(char *source, char *dest, int length, int source_vector_length, int dest_vector_length, uint8_t pad_value);
 extern void p7_restripe_short(int16_t *source, int16_t *dest, int length, int source_vector_length, int dest_vector_length);
 extern void p7_restripe_float(float *source, float *dest, int length, int source_vector_length, int dest_vector_length);
+
+// debugging utilities (debug_utils.c)
+float **p7_unstripe_float(float **striped_array, int M, int L, int vector_length_bits);
+int p7_unstriped_float_Compare(float **arr1, float **arr2, int L, int M);
+void p7_unstriped_float_Destroy(float **unstriped_aray, int L);
 /*****************************************************************
  * 4. Implementation specific initialization
  *****************************************************************/

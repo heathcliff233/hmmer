@@ -36,7 +36,8 @@ MYINCDIRS      = -I../../${ESLDIR} \
 		 -I${top_srcdir}/src \
 		 -I${srcdir}/.. 
 
-BASE_OBJS =  decoding.o\
+BASE_OBJS =  debug_utils.o\
+	decoding.o\
 	fwdback.o\
 	io.o\
 	ssvfilter.o\

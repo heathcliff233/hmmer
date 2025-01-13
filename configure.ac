@@ -207,6 +207,8 @@ AC_ARG_ENABLE(sse,     [AS_HELP_STRING([--enable-sse],     [enable our SSE vecto
 AC_ARG_ENABLE(avx,     [AS_HELP_STRING([--enable-avx],     [enable our AVX vector code])],               enable_avx=$enableval,     enable_avx=check)
 AC_ARG_ENABLE(avx512,  [AS_HELP_STRING([--enable-avx512],  [enable our AVX-512 vector code])],          enable_avx512=$enableval,  enable_avx512=check)
 AC_ARG_ENABLE(vmx,     [AS_HELP_STRING([--enable-vmx],     [enable our Altivec/VMX vector code])],       enable_vmx=$enableval,     enable_vmx=check)
+AC_ARG_ENABLE(test-sse-avx, [AS_HELP_STRING([--enable-test-sse-avx],     [Run SSE and AVX implementations simultaneously and compare results])],               enable_test_sse_avx=$enableval,     enable_test_sse_avx=no)
+AC_ARG_ENABLE(test-all-x86-simd, [AS_HELP_STRING([--enable-test-all-x86-simd],     [Run SSE, AVX, and AVX-512 implementations simultaneously and compare results])],               enable_test_all_x86_simd=$enableval,     enable_test_all_x86_simd=no)
 
 AC_ARG_ENABLE(threads, [AS_HELP_STRING([--enable-threads], [enable POSIX threads parallelization])],     enable_threads=$enableval, enable_threads=check)
 AC_ARG_ENABLE(mpi,     [AS_HELP_STRING([--enable-mpi],     [enable MPI parallelization])],               enable_mpi=$enableval,     enable_mpi=no)
@@ -497,7 +499,14 @@ esac
 IMPL_CHOICE=$impl_choice
 AC_SUBST(IMPL_CHOICE)
 
-
+# See if we're using one of the x86 SIMD test modes.  This will break badly if we try to use a SIMD
+# instruction set that the compiler doesn't support
+if test "$enable_test_sse_avx" = "yes"; then
+  AC_DEFINE(P7_TEST_SSE_AVX,  1, [Run SSE and AVX code simultaneously and compare])
+fi
+if test "$enable_test_all_x86_simd" = "yes"; then
+  AC_DEFINE(P7_TEST_ALL_x86_SIMD,  1, [Run SSE, AVX, and AVX-512 code simultaneously and compare])
+fi
 
 # Easel has additional vector implementations that HMMER3 does not
 # support. Provide blank config for those CFLAGS.

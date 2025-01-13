@@ -79,7 +79,24 @@ p7_Decoding_avx(const P7_OPROFILE *om, const P7_OMX *oxf, P7_OMX *oxb, P7_OMX *p
   if (isinf(scaleproduct)) return eslERANGE;
   else                     return eslOK;
 }
+
+int
+p7_Decoding_test_sse_avx(const P7_OPROFILE *om, const P7_OMX *oxf, P7_OMX *oxb, P7_OMX *pp)
+{
+  int sse_result = p7_Decoding_sse(om, oxf, oxb, pp);
+  int avx_result = p7_Decoding_avx(om, oxf, oxb, pp);
+
+  if(sse_result != avx_result){
+    printf("SSE and AVX returned different results in p7_Decoding_test_sse_avx: %d vs %d\n", sse_result, avx_result);
+  }
+
+  float **sse_unstriped = p7_unstripe_float((float **) pp->dpf, om->M, oxf->L, 128);
+  float **avx_unstriped = p7_unstripe_float((float **) pp->dpf_avx, om->M, oxf->L, 256);
+  p7_unstriped_float_Compare(sse_unstriped, avx_unstriped, oxf->L, om->M);
+  return sse_result;
+}
 #endif
+
 #ifndef eslENABLE_AVX
 // stub for compilers that can't handle AVX
 int
@@ -88,6 +105,11 @@ p7_Decoding_avx(const P7_OPROFILE *om, const P7_OMX *oxf, P7_OMX *oxb, P7_OMX *p
   return eslEUNSUPPORTEDISA;
 }
 
+int
+p7_Decoding_test_sse_avx(const P7_OPROFILE *om, const P7_OMX *oxf, P7_OMX *oxb, P7_OMX *pp)
+{
+  return eslEUNSUPPORTEDISA;
+}
 #endif
 
 /*------------------ end, posterior decoding --------------------*/

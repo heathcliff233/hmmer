@@ -101,6 +101,83 @@ p7_BackwardParser_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7
 
   return backward_engine(FALSE, dsq, L, om, fwd, bck, opt_sc);
 }
+
+int
+p7_Forward_test_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *opt_sc)
+{
+  int sse_result, avx_result;
+  float sse_score, avx_score;
+  sse_result = p7_Forward_sse(dsq, L, om, ox, &sse_score);
+  avx_result = p7_Forward_avx(dsq, L, om, ox, &avx_score);
+  if(sse_result != avx_result){
+    printf("SSE and AVX implementations returned different results in p7_Forward_test_sse_avx, %d vs. %d\n", sse_result, avx_result);
+  }
+  if(esl_FCompare(sse_score, avx_score, 0.01, 0.01)!=eslOK){
+    printf("SSE and AVX implementations computed different scores in p7_Forward_test_sse_avx, %f vs. %f\n", sse_score, avx_score);
+  }
+  if(opt_sc != NULL){
+    *opt_sc = sse_score;
+  }
+  return(sse_result);
+}
+
+int
+p7_ForwardParser_test_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *opt_sc)
+{
+  int sse_result, avx_result;
+  float sse_score, avx_score;
+  sse_result = p7_ForwardParser_sse(dsq, L, om, ox, &sse_score);
+  avx_result = p7_ForwardParser_avx(dsq, L, om, ox, &avx_score);
+  if(sse_result != avx_result){
+    printf("SSE and AVX implementations returned different results in p7_ForwardParser_test_sse_avx, %d vs. %d\n", sse_result, avx_result);
+  }
+  if(esl_FCompare(sse_score, avx_score, 0.01, 0.01)!=eslOK){
+    printf("SSE and AVX implementations computed different scores in p7_ForwardParser_test_sse_avx, %f vs. %f\n", sse_score, avx_score);
+  }
+  if(opt_sc != NULL){
+    *opt_sc = sse_score;
+  }
+  return(sse_result);
+}
+
+int 
+p7_Backward_test_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc)
+{
+  int sse_result, avx_result;
+  float sse_score, avx_score;
+  sse_result = p7_Backward_sse(dsq, L, om, fwd, bck, &sse_score);
+  avx_result = p7_Backward_avx(dsq, L, om, fwd, bck, &avx_score);
+  if(sse_result != avx_result){
+    printf("SSE and AVX implementations returned different results in p7_Backward_test_sse_avx, %d vs. %d\n", sse_result, avx_result);
+  }
+  if(esl_FCompare(sse_score, avx_score, 0.01, 0.01)!=eslOK){
+    printf("SSE and AVX implementations computed different scores in p7_Backward_test_sse_avx, %f vs. %f\n", sse_score, avx_score);
+  }
+  if(opt_sc != NULL){
+    *opt_sc = sse_score;
+  }
+  return(sse_result);
+}
+
+int 
+p7_BackwardParser_test_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc)
+{
+  int sse_result, avx_result;
+  float sse_score, avx_score;
+  sse_result = p7_BackwardParser_sse(dsq, L, om, fwd, bck, &sse_score);
+  avx_result = p7_BackwardParser_avx(dsq, L, om, fwd, bck, &avx_score);
+  if(sse_result != avx_result){
+    printf("SSE and AVX implementations returned different results in p7_BackwardParser_test_sse_avx, %d vs. %d\n", sse_result, avx_result);
+  }
+  if(esl_FCompare(sse_score, avx_score, 0.01, 0.01)!=eslOK){
+    printf("SSE and AVX implementations computed different scores in p7_BackwardParser_test_sse_avx, %f vs. %f\n", sse_score, avx_score);
+  }
+  if(opt_sc != NULL){
+    *opt_sc = sse_score;
+  }
+  return(sse_result);
+}
+
 #endif
 
 #ifndef eslENABLE_AVX  // stubs for compilers that can't handle AVX
@@ -117,8 +194,6 @@ p7_ForwardParser_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *o
   return eslEUNSUPPORTEDISA;
 }
 
-
-
 int 
 p7_Backward_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc)
 {
@@ -131,6 +206,33 @@ p7_BackwardParser_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7
 {
    return eslEUNSUPPORTEDISA;
 }
+
+int
+p7_Forward_test_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *opt_sc)
+{
+ return eslEUNSUPPORTEDISA;
+}
+
+
+int
+p7_ForwardParser_test_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *opt_sc)
+{
+ return eslEUNSUPPORTEDISA;
+}
+
+int 
+p7_Backward_testt_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc)
+{
+   return eslEUNSUPPORTEDISA;
+}
+
+
+int 
+p7_BackwardParser_test_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc)
+{
+   return eslEUNSUPPORTEDISA;
+}
+
 #endif
 /*****************************************************************
  * 2. Forward/Backward engine implementations (called thru API)

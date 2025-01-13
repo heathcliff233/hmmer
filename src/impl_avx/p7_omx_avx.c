@@ -324,6 +324,23 @@ p7_omx_Destroy_avx(P7_OMX *ox)
   return;
 }
 
+void
+p7_omx_Destroy_test_sse_avx(P7_OMX *ox)
+{
+  if (ox == NULL) return;
+  if (ox->x_mem   != NULL) free(ox->x_mem);
+  if (ox->dp_mem  != NULL) free(ox->dp_mem);
+  if (ox->dpf     != NULL) free(ox->dpf);
+  if (ox->dpw     != NULL) free(ox->dpw);
+  if (ox->dpb     != NULL) free(ox->dpb);
+  if (ox->dp_mem_avx  != NULL) free(ox->dp_mem_avx);
+  if (ox->dpf_avx     != NULL) free(ox->dpf_avx);
+  if (ox->dpw_avx     != NULL) free(ox->dpw_avx);
+  if (ox->dpb_avx     != NULL) free(ox->dpb_avx);
+  free(ox);
+  return;
+}
+
 int
 p7_omx_FDeconvert_avx(P7_OMX *ox, P7_GMX *gx)
 {
@@ -353,6 +370,22 @@ p7_omx_FDeconvert_avx(P7_OMX *ox, P7_GMX *gx)
   return eslOK;
 }
 
+int
+p7_omx_FDeconvert_test_sse_avx(P7_OMX *ox, P7_GMX *gx)
+{
+  P7_GMX *avx_gmx = p7_gmx_Create(gx->allocW-1, gx->allocR-1);
+  int sse_result = p7_omx_FDeconvert_sse(ox, gx);
+  int avx_result = p7_omx_FDeconvert_avx(ox, avx_gmx);
+  if(sse_result != avx_result){
+    printf("SSE and AVX returned different results in p7_omx_FDeconvert_test_sse_avx: %d vs %d\n", sse_result, avx_result);
+  }
+  
+  if(p7_gmx_Compare(gx, avx_gmx, 0.01) !=eslOK){
+    printf("Gmx structures didn't match in p7_omx_FDeconvert_test_sse_avx\n");
+  }
+  p7_gmx_Destroy(avx_gmx);
+  return(sse_result);
+}
 
 int
 p7_omx_DumpMFRow_avx(P7_OMX *ox, int rowi, uint8_t xE, uint8_t xN, uint8_t xJ, uint8_t xB, uint8_t xC)
@@ -579,12 +612,23 @@ p7_omx_Destroy_avx(P7_OMX *ox)
   return;
 }
 
+void
+p7_omx_Destroy_test_sse_avx(P7_OMX *ox)
+{
+  return;
+}
+
 int
 p7_omx_FDeconvert_avx(P7_OMX *ox, P7_GMX *gx)
 {
   return eslEUNSUPPORTEDISA;
 }
 
+int
+p7_omx_FDeconvert_test_sse_avx(P7_OMX *ox, P7_GMX *gx)
+{
+  return eslEUNSUPPORTEDISA;
+}
 
 int
 p7_omx_DumpMFRow_avx(P7_OMX *ox, int rowi, uint8_t xE, uint8_t xN, uint8_t xJ, uint8_t xB, uint8_t xC)

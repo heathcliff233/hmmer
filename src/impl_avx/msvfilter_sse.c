@@ -89,7 +89,6 @@ p7_MSVFilter_sse(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, f
   __m128i tempv;                   /* work vector                                               */
 
   int cmp;
-  int status = eslOK;
 
   /* Check that the DP matrix is ok for us. */
   if (Q > ox->allocQ16)  ESL_EXCEPTION(eslEINVAL, "DP matrix allocated too small");

@@ -242,6 +242,28 @@ p7_ViterbiFilter_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *o
   else  *ret_sc = -eslINFINITY;
   return eslOK;
 }
+
+int
+p7_ViterbiFilter_test_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc)
+{
+  int sse_result, avx_result;
+  float sse_score, avx_score;
+  sse_result = p7_ViterbiFilter_sse(dsq, L, om, ox, &sse_score);
+  avx_result = p7_ViterbiFilter_avx(dsq, L, om, ox, &avx_score);
+  if(sse_result != avx_result){
+    printf("SSE and AVX implementations returned different results in p7_ViterbiFilter_test_sse_avx, %d vs. %d\n", sse_result, avx_result);
+  }
+  if(esl_FCompare(sse_score, avx_score, 0.01, 0.01)!=eslOK){
+    printf("SSE and AVX implementations computed different scores in p7_ViterbiFilter_test_sse_avx, %f vs. %f\n", sse_score, avx_score);
+  }
+  if(ret_sc != NULL){
+    *ret_sc = sse_score;
+  }
+  return sse_result;
+}
+
+  
+  
 #endif
 #ifndef eslENABLE_AVX
 int
@@ -250,6 +272,13 @@ p7_ViterbiFilter_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *o
  
   return eslEUNSUPPORTEDISA;
 }
+
+int
+p7_ViterbiFilter_test_sse_avx(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, P7_OMX *ox, float *ret_sc)
+{ 
+  return eslEUNSUPPORTEDISA;
+}
+
 #endif
 /*---------------- end, p7_ViterbiFilter() ----------------------*/
 

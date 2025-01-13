@@ -117,6 +117,8 @@
  * is made at runtime. 
  * These are also identically defined in Easel esl_config.h.in
  */
+#undef P7_TEST_SSE_AVX // Test mode that runs SSE and AVX code simultaneously
+#undef P7_TEST_ALL_x86_SIMD // Test mode that runs SSE< AVX, AVX-512 code simultaneously
 #undef eslENABLE_NEON
 #undef eslENABLE_SSE
 #undef eslENABLE_AVX
