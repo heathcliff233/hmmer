@@ -72,7 +72,7 @@ static ESL_OPTIONS options[] = {
   /* name        type  default  env        range  togs  reqs incomp                    help                          docgroup */
   { "-h", eslARG_NONE,   FALSE, NULL,       NULL, NULL, NULL, NULL, "help; show brief info on version and usage",          1 },
   { "-1", eslARG_REAL,  "0.25", NULL, "0<x<=1.0", NULL, NULL, NULL, "split so no train/test seq pair has > x identity",    1 },
-  { "-4", eslARG_REAL,   "0.0", NULL, "0<=x<1.0", NULL, NULL, NULL, "split so no train/test seq pair has < x identity",    1 },
+  { "-4", eslARG_REAL,   "0.0", NULL, "0<=x<1.0", NULL, NULL, "--cluster", "split so no train/test seq pair has < x identity",    1 },
   { "-2", eslARG_REAL,  "0.50", NULL, "0<x<=1.0", NULL, NULL, NULL, "filter test seqs so no pair has > x identity",        1 },
   { "-3", eslARG_REAL,   "1.0", NULL, "0<x<=1.0", NULL, NULL, NULL, "filter training seqs so no pair has > x identity",    1 },
   { "-N", eslARG_INT, "200000", NULL,     "n>=0", NULL, NULL, NULL, "number of negative test seqs",                        1 },
@@ -87,7 +87,7 @@ static ESL_OPTIONS options[] = {
   { "--double",     eslARG_NONE,    FALSE, NULL,      NULL,      NULL, NULL, NULL,  "embed two, not one domain in each positive",                2 },
 
   /* Options controlling choice of method for splitting into testing and training sets  */
-  { "--cobalt",     eslARG_NONE,"default", NULL,      NULL,  pmSPLIT_OPTS, NULL, NULL,  "greedy algorithm with random order",                    3 },
+  { "--cobalt",     eslARG_NONE,"default", NULL,      NULL,  pmSPLIT_OPTS, NULL, "-4",  "greedy algorithm with random order",                    3 },
   { "--blue",       eslARG_NONE,    FALSE, NULL,      NULL,  pmSPLIT_OPTS, NULL, NULL,  "multi-round random election process",                   3 },
   { "--cluster",    eslARG_NONE,    FALSE, NULL,      NULL,  pmSPLIT_OPTS, NULL, NULL,  "single linkage clustering",                             3 },
   { "--random",     eslARG_NONE,    FALSE, NULL,      NULL,  pmSPLIT_OPTS, NULL, NULL,  "random selection of training set",                      3 },
@@ -1332,7 +1332,7 @@ er_esl_dst_XAvgSubsetConnectivity(const ESL_ALPHABET *abc, ESL_DSQ **ax, int N, 
           {
             ESL_DASSERT1(( V[i] >= 0 && V[i] <= N && V[j] >= 0 && V[j] <= N ));
             if ((status = esl_dst_XPairId(abc, ax[V[i]], ax[V[j]], &id, NULL, NULL)) != eslOK) goto ERROR;
-            if (id > idthresh_u || id > idthresh_d) avgconn += 1.;
+            if (id > idthresh_u || id < idthresh_d) avgconn += 1.;
             avgid += id;
           }
       avgid   /= (double) (nV * (nV-1) / 2);
@@ -1351,7 +1351,7 @@ er_esl_dst_XAvgSubsetConnectivity(const ESL_ALPHABET *abc, ESL_DSQ **ax, int N, 
    
           ESL_DASSERT1(( V[i] >= 0 && V[i] <= N && V[j] >= 0 && V[j] <= N ));
           if ((status = esl_dst_XPairId(abc, ax[V[i]], ax[V[j]], &id, NULL, NULL)) != eslOK) goto ERROR;
-          if (id > idthresh_u || id > idthresh_d) avgconn += 1.;
+          if (id > idthresh_u || id < idthresh_d) avgconn += 1.;
           avgid += id;
         }
       avgid   /= (double) max_comparisons;
