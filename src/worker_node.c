@@ -457,7 +457,7 @@ int p7_server_workernode_Setup(uint32_t num_databases, char **database_names, ui
 
   // Next, read databases from disk and install shards in the workernode
   for(i = 0; i < num_databases; i++){
-    P7_SHARD *current_shard;
+    P7_SHARD *current_shard = NULL;
 
     datafile = fopen(database_names[i], "r");
     if(fread(id_string, 13, 1, datafile)!=1){ //grab the first 13 characters of the file to determine the type of database it holds
