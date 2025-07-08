@@ -35,7 +35,7 @@ if (-e "$tmppfx.hmm.h3p") { unlink "$tmppfx.hmm.h3p"; }
 @h3progs =  ( "hmmsearch", "phmmer", "nhmmer");
 foreach $h3prog  (@h3progs)  { if (! -x "$builddir/src/$h3prog")          { die "FAIL: didn't find $h3prog executable in $builddir/src\n";              } }
 
-@easel_progs =  ( "esl-reformat");
+@easel_progs =  ( "easel");
 foreach $easel_prog  (@easel_progs)  { if (! -x "$builddir/easel/miniapps/$easel_progs")   { die "FAIL: didn't find $easel_prog executable in $builddir/easel/miniapps\n";              } }
 
 

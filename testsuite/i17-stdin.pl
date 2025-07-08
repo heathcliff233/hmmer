@@ -46,11 +46,11 @@ $nmodel1  = "3box";
 $nmodel2  = "PSE";
 
 @h3progs =  ("hmmalign", "hmmbuild", "hmmconvert", "hmmemit", "hmmfetch", "hmmpress", "hmmscan", "hmmsearch", "hmmstat", "jackhmmer", "nhmmer", "phmmer");
-@eslprogs = ("esl-shuffle");
+@eslprogs = ("easel");
 
 # Verify that we have all the executables and datafiles we need for the test.
-foreach $h3prog  (@h3progs) { if (! -x "$builddir/src/$h3prog")             { die "FAIL: didn't find $h3prog executable in $builddir/src\n";              } }
-foreach $eslprog (@eslrogs) { if (! -x "$builddir/easel/miniapps/$eslprog") { die "FAIL: didn't find $eslprog executable in $builddir/easel/miniapps\n";  } }
+foreach $h3prog  (@h3progs)  { if (! -x "$builddir/src/$h3prog")             { die "FAIL: didn't find $h3prog executable in $builddir/src\n";              } }
+foreach $eslprog (@eslprogs) { if (! -x "$builddir/easel/miniapps/$eslprog") { die "FAIL: didn't find $eslprog executable in $builddir/easel/miniapps\n";  } }
 
 if (! -r "$srcdir/testsuite/$model1.hmm")  { die "FAIL: can't read profile $model1.hmm in $srcdir/testsuite\n"; }
 if (! -r "$srcdir/testsuite/$model2.hmm")  { die "FAIL: can't read profile $model2.hmm in $srcdir/testsuite\n"; }
@@ -77,11 +77,11 @@ if (! -r "$srcdir/testsuite/$nmodel2.sto") { die "FAIL: can't read msa $nmodel2.
 
 `$builddir/src/hmmemit -p -N10 $srcdir/testsuite/$model1.hmm > $tmppfx.db`;         if ($?) { die "FAIL: hmmemit\n"; }
 `$builddir/src/hmmemit -p -N10 $srcdir/testsuite/$model2.hmm >> $tmppfx.db`;        if ($?) { die "FAIL: hmmemit\n"; }
-`$builddir/easel/miniapps/esl-shuffle -G -N100 -L 400 --amino >> $tmppfx.db`;       if ($?) { die "FAIL: esl-shuffle\n"; }
+`$builddir/easel/miniapps/easel synth amino 100 400 >> $tmppfx.db`;                 if ($?) { die "FAIL: easel synth\n"; }
 
 `$builddir/src/hmmemit -p -N2 -L2000 --glocal $srcdir/testsuite/$nmodel1.hmm >  $tmppfx.ndb`; if ($?) { die "FAIL: hmmemit\n"; }
 `$builddir/src/hmmemit -p -N2 -L2000 --glocal $srcdir/testsuite/$nmodel2.hmm >> $tmppfx.ndb`; if ($?) { die "FAIL: hmmemit\n"; }
-`$builddir/easel/miniapps/esl-shuffle -G -N6 -L 2000 --dna                   >> $tmppfx.ndb`; if ($?) { die "FAIL: esl-shuffle\n"; }
+`$builddir/easel/miniapps/easel synth dna 6 2000                             >> $tmppfx.ndb`; if ($?) { die "FAIL: easel synth\n"; }
 
 `echo $model1    > $tmppfx.key`;                                                    if ($?) { die "FAIL: cat\n"; }
 `echo $model2   >> $tmppfx.key`;                                                    if ($?) { die "FAIL: cat\n"; }

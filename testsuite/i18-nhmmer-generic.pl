@@ -30,7 +30,7 @@ BEGIN {
 $alignment   = "3box.sto";
 
 @h3progs =  ( "hmmemit", "hmmbuild", "nhmmer");
-@eslprogs =  ("esl-shuffle");
+@eslprogs =  ("easel");
 
 # Verify that we have all the executables and datafiles we need for the test.
 foreach $h3prog  (@h3progs)  { if (! -x "$builddir/src/$h3prog")              { die "FAIL: didn't find $h3prog executable in $builddir/src\n";              } }
@@ -53,7 +53,7 @@ if ($output !~ /MAXL  75/) {
 
 # Create a roughly 4.5MB database against which to search
 $database   = "$tmppfx.fa";
-do_cmd ( "$builddir/easel/miniapps/esl-shuffle --seed 33 --dna -G -N 1 -L 4500000 -o $tmppfx.A" );
+do_cmd ( "$builddir/easel/miniapps/easel synth -o $tmppfx.A --seed 33 dna 1 4500000" );
 do_cmd ( "$builddir/src/hmmemit -N 2 --seed 4 $tmppfx.hmm >  $tmppfx.B " );
 do_cmd ( "$builddir/src/hmmemit -N 1 --seed 3 $tmppfx.hmm >> $tmppfx.B" ); 
 do_cmd ( "head -n 33000 $tmppfx.A > $database" );
