@@ -1,34 +1,76 @@
 # profmark: benchmark protocol used in HMMER testing
 
+"profmark" implements our protocol for testing profile search
+software.
+
+We start with some set of multiple sequence alignments (MSAs) of
+homologous domains, such as the Pfam database. We split each alignment
+into a training and a test set. We leave each training set aligned,
+and these MSAs are our queries. We create synthetic positive and
+negative target sequences that look like full-length protein
+sequences; the positive test sequences are created by embedding test
+set domains at random known locations. We can then run searches of all
+the query training MSAs against all the synthetic positive and
+negative target sequences, and collect statistics on per-sequence,
+per-domain, and per-residue detection accuracy.
+
+Our strategy follows some important design decisions:
+
+* **Training/test set splits are not random.**
+
+  Random training/test set splits are standard in machine learning
+  benchmarks when data samples can be assumed to independent, but
+  inappropriate for biological sequences that are related by an
+  evolutionary tree. Random splits typically result in having closely
+  related (even identical) sequences in the training and test set.
+  Detecting target sequences for which we already have a known close
+  or identical homolog is trivial.
+    
+  To test the ability of a remote homology search procedure to detect
+  distant outliers, we instead split the input sequence family into a
+  training set and a test set such that the test sequences are
+  dissimilar to the training sequences, using graph-based algorithms
+  [Petti & Eddy, 2022]. By controlling the similarity threshold used
+  in our splitting procedure, we can control the difficulty of the
+  test.
+
+* **Target sequences are full-length, not isolated subsequences.**
+
+  We want to benchmark not just the accuracy of detecting remotely
+  homologous sequences, but more specifically the accuracy of
+  detecting and annotating the bounds of one or more remotely
+  homologous domains (subsequences) within full-length protein
+  sequences.
+  
+  We also don't want a method to be able to use information about the
+  query domain length to discriminate positive vs negative test
+  sequences. For example, a zinc finger domain is an unusually short
+  domain, maybe 30aa; if the target sequences were isolated domain
+  subsequences, a machine learning procedure can artifactually learn
+  that almost all of the domains in the benchmark are unlikely to be
+  zinc fingers, without doing any sequence comparison.
+  
+* **Negative sequences are synthetic, to be sure they are nonhomologous.**
+
+  The premise of developing more powerful technology for detecting
+  remote evolutionary sequence homologs is that there are many remote
+  homologies that remain undetected. Thus any real protein sequence
+  may contain an undetected remote homology to our query. If we were
+  to develop a great new method for detecting previously undetected
+  homologs, it would be ironic if our benchmarking procedure penalized
+  it for finding "false positives".
+
+  We generate synthetic nonhomologous sequence instead. This does have
+  a disadvantage that synthetic sequence is too simplistic, lacking
+  many of the sequence inhomogeneities that can cause false positives
+  in homology searching. We use other kinds of experiments to test for
+  those problems.
+  
 
 ## 1. create-profmark: creating a new benchmark dataset 
 
-A central idea to how we make a benchmark is to split a known sequence
-family into a training set and a test set, not just randomly, but such
-that the test sequences are dissimilar to the training sequences
-[Petti & Eddy, 2022].  We want to test the ability of a remote
-homology search procedure to detect distant outliers.
-
-Another central idea is that our positives are full length sequences,
-with homologous domains embedded in nonhomologous flanking sequence.
-We want to test the ability of profile search software to use local
-and glocal alignment to identify, parse, and align individual domains
-of full-length protein sequences that are typically composed of more
-than one domain. Global alignment to isolated domains is not an
-adequate test.
-
-Another central idea that our negative nonhomologous (sub)sequences
-are always synthetic, not real. This makes sure that a sequence is
-truly nonhomologous, not some as-yet undiscovered homolog that must
-not be counted as a "false positive" if a new approach detects it.
-
-The `create-profmark` program embodies our procedure for splitting
-input multiple sequence alignments of homologous domains (such as Pfam
-alignments) into training/set sets, synthesizing positive homologous
-sequences by embedding one or two test domains in synthetic
-nonhomologous flanking sequence, and synthesizing negative
-nonhomologous sequences, and
-
+The procedure for producing the training and test data is implemented
+in `create-profmark`.
 
 ### Running create-profmark
 
@@ -59,13 +101,14 @@ into a query alignment and a nonredundant set of test domains by two
 single-linkage clustering steps, such that no test domain has > 25%
 identity to any query sequence and no test domain is > 50% identical
 to any other test domain. Full-length positive test sequences are
-constructed by embedding two test domains in a larger sequence, with
-nonhomologous segments generated by selecting a random segment of the
-`<FASTA sequence database>` and shuffling it. Full-length negative
-test sequences are constructed in the same patchwork way except that
-all five segments are nonhomologous shuffled sequence. Test sequences
-are deliberately created in this patchwork to simulate some of the
-inhomogeneity of real sequences.
+constructed by embedding a test domain in a larger sequence (or two,
+with `--double`), with nonhomologous segments generated by selecting a
+random segment of the `<FASTA sequence database>` and shuffling
+it. Full-length negative test sequences are constructed in the same
+patchwork way except that all three segments (five, with `--double`)
+are nonhomologous shuffled sequence. Test sequences are deliberately
+created in this patchwork to simulate some of the inhomogeneity of
+real sequences.
 
 Alternatively, instead of creating full-length positive and negative
 test sequences in FASTA format in the .test.fa file, `create_profmark` can
@@ -183,12 +226,11 @@ construction protocol, the procedure is as follows:
 
        4. **Optionally, ensure a minimum number of training and test sequences.**
 		  
-		  The `--mintrain <n>` and `--mintest <n>` options
-          set these minima. If they aren't satisfied, the split
-          attempt is deemed unsuccessful. Default is 2 for test set
-          size, because the default is to embed 2 homologous domains
-          per synthetic positive sequence. Default is 1 for
-          training set size.
+		  The `--mintrain <n>` and `--mintest <n>` options set these
+          minima. If they aren't satisfied, the split attempt is
+          deemed unsuccessful. Default is 1 for test set size (2, with
+          `--double`, where each positive target seq needs two
+          domains). Default is 10 for training set size.
 
    - **Optionally, repeat attempts to achieve a successful split.**
 
@@ -205,9 +247,13 @@ construction protocol, the procedure is as follows:
      
    - **Optionally, downsample either S or T to maximum sizes.**
 
-     The `--maxtrain <n>` and `--maxtest <n>` options are off by default,
-     but can be used to set maximum sizes for |S| and |T|. A set
-     is randomly downsampled to n if it exceeds the limit.
+     The `--maxtrain <n>` and `--maxtest <n>` options can be used to
+     set maximum sizes for |S| and |T|.  By default, `--maxtest` is
+     10, and there is no limit on training set size.  A set is
+     randomly downsampled to n if it exceeds the limit.
+	 
+	 To make the test set size unlimited (i.e. to turn off
+     `--maxtest`), do `--maxtest 0`.
 
    - **Randomly permute the order of both sets.**
 
@@ -245,16 +291,16 @@ construction protocol, the procedure is as follows:
      domains in nonhomologous sequence constructed from sequences in
      the `<FASTA sequence database>` as follows:
 
-       1. Choose two test domains (by default; `--single` option makes it one)
+       1. Choose one test domain (by default; `--double` option makes it two)
 
        2. Sample a sequence length from a lognormal distribution fitted
 	      to UniProt sequence lengths, sufficiently long to contain the
-	      test domains.
+	      test domain(s).
 		 
 		  The default lognormal parameters ($\mu = 5.6$, $\sigma = 0.75$) were fitted to 195.7M sequence lengths in UniProt
           (October 2020 release). This skewed and long-tailed
           distribution has a mean of 360, median 270, mode 150, and
-          standard deviation of 300. They can be changed with
+          standard deviation of 300. These parameters can be changed with
 		  the `--smu <x>` and `--ssigma <x>` options.
  
        3. Embed the domain(s) at random positions in that sequence length.
@@ -425,12 +471,13 @@ this sequence, and where.
 
 The `concat?` flag (`.` for no, `c` for concatenation) is for a
 frequent edge case, where the length W of a nonhomologous segment is
-longer than the length of the source sequence that was sampled for making it. In
-this case, the source is concatenated to length c*len >= W before
-taking and randomizing a random segment of the desired length W. When
-concatenation is used, the `from` coord might be greater than the `to`
-coord, and `len` is not simply equal to `to-from+1`. The sampled
-segment is `from..len` + zero or more copies of `1..len` + `1..to`.
+longer than the length of the source sequence that was sampled for
+making it. In this case, the source is concatenated to length c*len >=
+W before taking and randomizing a random segment of the desired length
+W. When concatenation is used, the `from` coord might be greater than
+the `to` coord (because of circular permutation), and `len` is not
+simply equal to `to-from+1`. The sampled segment is `from..len` + zero
+or more copies of `1..len` + `1..to`.
 
 For the homologous segments, we currently only embed full-length
 domains.  Thus `from` is always 1 and `to` is always `rlen`. In the
@@ -454,125 +501,98 @@ sequences.
 
 ## 3. Finding summary statistics of a benchmark dataset
 
-| statistic               | command                   |
-|-------------------------|---------------------------|
-| Number of query alignments: |  `wc -l <benchmark_prefix>.tbl` |
-| Number of positives:        |  `wc -l <benchmark_prefix>.pos` |
-| Number of negatives:        |  `wc -l <benchmark_prefix>.neg` |
-| Test sequence length dist:  |  `esl-seqstat <benchmark_prefix>.test.fa` |
-| # of training seqs:         |  `avg -f6 <benchmark_prefix>.tbl`    |
-| # of test seqs:             |  `avg -f8 <benchmark_prefix>.tbl`    |
+| statistic                  | command                                          |
+|----------------------------|--------------------------------------------------|
+| Number of query MSAs:      | `awk '$8=="ok"' <benchmark_prefix.tbl> \| wc -l` |
+| Number of positives:       | `wc -l <benchmark_prefix>.pos`                   |
+| Number of negatives:       | `wc -l <benchmark_prefix>.neg`                   |
+| Test sequence length dist: | `esl-seqstat <benchmark_prefix>.test.fa`         |
+| # of training seqs:        | `avg -f9  <benchmark_prefix>.tbl`                |
+| # of test domains:         | `avg -f10 <benchmark_prefix>.tbl`                |
+| # of test seqs:            | `avg -f11 <benchmark_prefix>.tbl`                |
 
 
-================================================================
-= 5. pmark-master.pl: running a pmark benchmark, in parallel using SGE qsub
-================================================================
 
-Usage:   ./pmark-master.pl <top_builddir> <top_srcdir> <resultdir> <nproc> <benchmark_prefix> <benchmark script>
-Example: ./pmark-master.pl ~/releases/hmmer-release/build-icc ~/releases/hmmer-release h3-results  100 pmark ./x-hmmsearch
+## 4. `pmark-master.py`: running a pmark benchmark (in parallel)
+
+Usage:    `./pmark-master.py <top_builddir> <top_srcdir> <resultdir> <nproc> <benchmark_prefix> <benchmark_script>`  
+Example:  `./pmark-master.py ~/releases/hmmer-release/build-icc ~/releases/hmmer-release h3-results  100 pmark ./x-hmmsearch`  
      
-pmark-master.pl is a wrapper that coarse-grain parallelizes a
-benchmark run for our SGE queue.
+`pmark-master.py` is a wrapper that coarse-grain parallelizes a
+benchmark run and submits a job array to our SLURM queue.
 
 This would typically be run in a notebook directory, which would have
-symlinks to the pmark-master.pl script and the driver x-* scripts, and
-also would have the <benchmark_prefix>.{tbl,msa,fa,pos,neg} files
+symlinks to the `pmark-master.py` script and the driver x-* scripts, and
+also would have the `<benchmark_prefix>.{tbl,msa,fa,pos,neg}` files
 either present or symlinked.
 
 For each benchmark you run that day, you'd have a different
-<resultdir>; for example, you might run a "h3" and "h2"
-benchmark. The <resultdir> name should be short because it is used to
-construct other names, including the SGE job name.
+`<resultdir>`; for example, you might run a "h3" and "h2"
+benchmark. The `<resultdir>` name should be short because it is used to
+construct other names, including the SLURM job array name.
 
-The pmark-master.pl creates the <resultdir>, splits the
-<benchmark_prefix>.tbl file into <nproc> separate tbl files called
-<resultdir>/tbl.<i>, and issues "qsub" commands to run the <benchmark
-script> on each of these subtables.
+`pmark-master.py` creates the `<resultdir>`, splits the
+`<benchmark_prefix>.tbl` file into `<nproc>` separate tbl files called
+`<resultdir>/tbl.<i>`, writes a short SLURM job array script to
+`<resultdir>/<resultdir>.sh`, and submits that job array script to our
+SLURM queue with `sbatch`.
 
-The jobs in SGE are named <resultdir>.<i>.
+`pmark-master.py` calls your `<benchmark_script>` with 7 arguments:
+ `<top_builddir> <top_srcdir> <resultdir> <subtbl>
+ <benchmark_prefix.train.msa> <benchmark_prefix.test.fa> <outfile>`
+ where `<subtbl>` is `<resultdir>/tbl.<i>` (the file with a list of
+ query names this parallelized instance of the benchmark driver is
+ supposed to fetch and process), and `<outfile>` is a file named
+ `<resultdir>/tbl.<i>.out`.
 
-The <benchmark script> is passed 7 arguments:
- <top_builddir> <top_srcdir> <resultdir> <subtbl> <benchmark_prefix.train.msa> <benchmark_prefix.test.fa> <outfile>
-where <subtbl> is <resultdir>/tbl.<i> (the list of queries this
-parallelized instance of the benchmark driver is supposed to process), 
-and <outfile> is a file named <resultdir>/tbl<i>.out.
+When all the driver script instances are done, there will be `<nproc>`
+output files named `<resultdir>/tbl.<i>.out`. These files can be analysed
+and turned into ROC graphs using `rocplot` and/or `rocplot.pl`.
 
-When all the driver script instances are done, there will be <nproc>
-output files named <resultdir>/tbl<i>.out. These files can be analysed
-and turned into ROC graphs using rocplot and/or rocplot.pl.
 
-================================================================
-= 6. x-<benchmark>:   benchmark driver scripts
-================================================================
+## 5. `x-<benchmark>`:   benchmark driver scripts
 
 A driver script gets the 7 arguments as described above:
 
-         <top_builddir> : path to top-level build directory of the
-	                  program(s) to be tested, where executables
-	                  can be found. When testing non-HMMER
-	                  programs, this is the installation directory
-	                  where those executables are found.
+* `<top_builddir>` : path to top-level build directory of the
+  program(s) you're testing, under which your executables can be
+  found. The driver script adds any additional path information
+  needed, relative to <top_builddir>; for example it might call
+  `<top_builddir>/src/hmmsearch`.
+  
+* `<top_srcdir>` : path to top-level src directory of HMMER, where
+  additional data and scripts may be found (even when testing non-HMMER
+  programs - for example, to find our `demotic` BLAST output parsers).
 
-           <top_srcdir> : path to top-level src directory of the HMMER
-                          program(s) to be tested, where data and
-                          scripts may be found. When testing non-HMMER
-                          programs, this is nonetheless still a HMMER
-			  top-level src directory, where parser scripts
-			  and data may be found. (For example, BLAST
-			  output parsers: our demotic perl modules.)
-
-            <resultdir> : name of the directory that temp files can
-	                  be placed in, unique to the instantiation
-			  of pmark-master.pl that called us, so long
-			  as we use names that don't clash with the
-			  other <nproc>-1 instances of driver scripts;
-			  for example, we can safely create tmp files
-			  that start with <queryname>.
+* `<resultdir>` : name of directory that the driver script can
+  safely put its temp files in, unique to this run of `pmark-master.py`,
+  so long as filenames don't clash with the other `<nproc>-1`
+  instances of driver scripts; for example, we can safely create tmp
+  files that start with `<queryname>`.
 	                
-               <subtbl> : name of the tbl.<i> file in <resultsdir> that
-	                  lists the query alignments this instantiation
-			  of the driver is supposed to work on.
+* `<subtbl>` : name of `tbl.<i>` file in `<resultsdir>` that
+  lists the query alignments this driver is supposed to work on.
 
- <benchmark_prefix.train.msa> : the benchmark's MSA file; query alignments named
-                          in <subtbl> will be esl-alifetch'ed from here.
+* `<benchmark_prefix.train.msa>` : benchmark's MSA file; driver
+  fetches alignments in `<subtbl>` from this file.
 
-  <benchmark_prefix.test.fa> : the benchmark's positive and negative sequences;
-                          this will be used as the target database for
-			  searches the driver runs. 
+* `<benchmark_prefix.test.fa>` : the benchmark's positive and negative sequences;
+   driver uses this as the target database for searches.
 
-                          As a special case (i.e. hack), iterative
-			  search benchmarks may look for related
-			  files, such as <benchmark_prefix.test.fa.iter>, a
-			  sequence database to iterate on first before
-			  running on <benchmark_prefix.test.fa>.
+   As a special case (i.e. hack), iterative search benchmarks may look
+   for related files, such as `<benchmark_prefix.test.fa.iter>`, a
+   sequence database to iterate on first before running on
+   `<benchmark_prefix.test.fa>`.
 
-              <outfile> : a whitespace-delimited tabular output file, 
-                          one line per target sequence, described below.
+* `<outfile>` : a whitespace-delimited tabular output file, 
+  one line per target sequence, described below.
 
-Using <top_builddir> and <top_srcdir> allows us to easily construct
+Using `<top_builddir>` and `<top_srcdir>` allows us to easily construct
 regression tests of different HMMER versions and/or configurations.
 
-Why the BEGIN {} clause: you'll see a BEGIN {} clause wrapping cmdline
-argument parsing on many of the x- scripts. That's a trick that goes
-with "use lib ${top_srcdir}/easel/demotic", where we need the demotic
-library included, but we don't know where it is until we get
-${top_srcdir} from the cmdline, so we defer the 'use lib'.
-
-Error handling: why don't these scripts call die() on errors? That's
-deliberate. If a step fails, the script prints an error message and
-skips to the next query, without cleaning up any tmp files from the
-failed query.  Thus we continue collecting data from as much of the
-.tbl file of queries as possible, while saving tmp files that we'll
-need for debugging later. If you have the x- script fail w/ a fatal
-error, it will stop in the middle of a tbl file, which unnecessarily
-compromises the completeness of a benchmark (say, if one piddly query
-out of 10000 fails, there's no reason to bring down the whole
-benchmark).
 
 
-================================================================
-= 7. format of benchmark results output files
-================================================================
+## 6. format of benchmark results output files
 
 The <nproc> output in files <resultdir>/tbl<i>.out have four fields:
       <E-value> <bit score> <target> <query>
@@ -611,9 +631,8 @@ how the ROC plot is turning out:
    cat *.out | sort -g | ../rocplot.pl | head
 
 
-================================================================
-= 8. rocplot: displaying results as ROC graphs
-================================================================
+
+## 7. rocplot: displaying results as ROC graphs
 
 rocplot is compiled from ANSI C source rocplot.c; see Makefile.in for build.
 

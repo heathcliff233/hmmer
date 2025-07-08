@@ -78,12 +78,12 @@ static ESL_OPTIONS options[] = {
   { "-S", eslARG_INT,      "0", NULL,       NULL, NULL, NULL, NULL, "specify RNG seed (0: use a random seed)",             1 },
 
   /* Options defining other characteristics of the benchmark */
-  { "--fragthresh", eslARG_REAL,    "0.5", NULL, "0<=x<=1",      NULL, NULL, NULL,  "exclude sequence fragments with aspan/alen < x",            2 },
-  { "--mintrain",   eslARG_INT,      "10", NULL,     "n>0",      NULL, NULL, NULL,  "minimum number of training domains required per input MSA", 2 },
-  { "--mintest",    eslARG_INT,       "2", NULL,     "n>0",      NULL, NULL, NULL,  "minimum number of test domains required per input MSA",     2 }, 
-  { "--maxtrain",   eslARG_INT,     FALSE, NULL,    "n>=0",      NULL, NULL, NULL,  "maximum number of training domains taken per input MSA",    2 },
-  { "--maxtest",    eslARG_INT,      "10", NULL,    "n>=0",      NULL, NULL, NULL,  "maximum number of test domains taken per input MSA",        2 },
-  { "--double",     eslARG_NONE,    FALSE, NULL,      NULL,      NULL, NULL, NULL,  "embed two, not one domain in each positive",                2 },
+  { "--fragthresh", eslARG_REAL,    "0.5", NULL, "0<=x<=1",      NULL, NULL, NULL,  "exclude sequence fragments with aspan/alen < x",  2 },
+  { "--mintrain",   eslARG_INT,      "10", NULL,     "n>0",      NULL, NULL, NULL,  "min number of training domains required per MSA", 2 },
+  { "--mintest",    eslARG_INT,       "2", NULL,     "n>0",      NULL, NULL, NULL,  "min number of test domains required per MSA",     2 }, 
+  { "--maxtrain",   eslARG_INT,     FALSE, NULL,    "n>=0",      NULL, NULL, NULL,  "max number of training domains taken per MSA",    2 },
+  { "--maxtest",    eslARG_INT,      "10", NULL,    "n>=0",      NULL, NULL, NULL,  "max number of test domains taken per MSA",        2 },
+  { "--double",     eslARG_NONE,    FALSE, NULL,      NULL,      NULL, NULL, NULL,  "embed two, not one domain in each positive",      2 },
 
   /* Options controlling choice of method for splitting into testing and training sets  */
   { "--cobalt",     eslARG_NONE,"default", NULL,      NULL,  pmSPLIT_OPTS, NULL, NULL,  "greedy algorithm with random order",                    3 },
@@ -308,7 +308,10 @@ create_config(char *argv0, ESL_GETOPTS *go)
   if (cfg->seq_mu < cfg->dom_mu)
     cmdline_failure(argv0, "You want to set the mu for seq length larger than for domain length,\nwhen you use the --smu or --dmu options.\n");
   if (cfg->do_double && cfg->min_ntest < 2)
-    cmdline_failure(argv0, "--double embeds two domains per synthetic positive seq; --mintest must be >= 2.\n");  
+    {
+      if (esl_opt_GetSetter(go, "--mintest") == eslARG_SETBY_DEFAULT) cfg->min_ntest = 2;
+      else cmdline_failure(argv0, "--double embeds two domains per synthetic positive seq; --mintest must be >= 2.\n");  
+    }
   return cfg;
 
  ERROR:

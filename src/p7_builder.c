@@ -425,7 +425,7 @@ p7_Builder(P7_BUILDER *bld, ESL_MSA *msa, P7_BG *bg,
   if ((status =  validate_msa         (bld, msa))                       != eslOK) goto ERROR;
   if ((status =  esl_msa_Checksum     (msa, &checksum))                 != eslOK) ESL_XFAIL(status, bld->errbuf, "Failed to calculate checksum"); 
   if ((status =  relative_weights     (bld, msa))                       != eslOK) goto ERROR;
-  if ((status =  esl_msa_MarkFragments_old(msa, bld->fragthresh))           != eslOK) goto ERROR;
+  if ((status =  esl_msa_MarkFragments_old(msa, bld->fragthresh))       != eslOK) goto ERROR;
   if ((status =  build_model          (bld, msa, &hmm, tr_ptr))         != eslOK) goto ERROR;
 
 

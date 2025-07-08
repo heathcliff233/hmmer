@@ -4,7 +4,7 @@ import sys
 import os
 import subprocess
 
-usage = 'pmark-master.py <top_builddir> <top_srcdir> <resultdir> <ncpu> <benchmark_pfx> <pmark_script>'
+usage = 'pmark-master.py <top_builddir> <top_srcdir> <resultdir> <nproc> <benchmark_pfx> <pmark_script>'
 
 if len(sys.argv) != 7: sys.exit('Incorrect number of cmdline args.\nUsage: {}'.format(usage))
 
