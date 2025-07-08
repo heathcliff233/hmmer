@@ -60,9 +60,7 @@ static ESL_OPTIONS options[] = {
 /* Control of output */
   { "-o",           eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,  NULL,  NULL,              "direct output to file <f>, not stdout",                        2 },
   { "-A",           eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,  NULL,  NULL,              "save multiple alignment of hits to file <f>",                  2 },
-  { "--stockholm",        eslARG_NONE,  FALSE, NULL, NULL,      NULL,    "-A",  "--a2m,--pfam",      "output alignment of hits in stockholm format",                       2 },
-  { "--pfam",        eslARG_NONE,  FALSE, NULL, NULL,      NULL,    "-A",  "--a2m,--stockholm",           "output alignment of hits in pfam format.  Requires --notextw or --textw=0",                      2 },
-  { "--a2m",        eslARG_NONE,  FALSE, NULL, NULL,      NULL,    "-A",  "--stockholm,--pfam",            "output alignment of hits in a2m format",                       2 },
+  { "--Aformat",    eslARG_STRING,"Stockholm", NULL, NULL,      NULL,  "-A",  NULL,              "specify MSA output format <s> for -A",                         2 },
   { "--tblout",     eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,  NULL,  NULL,              "save parseable table of per-sequence hits to file <f>",        2 },
   { "--domtblout",  eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,  NULL,  NULL,              "save parseable table of per-domain hits to file <f>",          2 },
   { "--pfamtblout", eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,  NULL,  NULL,              "save table of hits and domains to file, in Pfam format <f>",   2 },
@@ -399,6 +397,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   int              nquery   = 0;
   int              seed;
   int              textw;
+  int              Aformat  = eslMSAFILE_UNKNOWN;
   int              status   = eslOK;
   int              qstatus  = eslOK;
   int              sstatus  = eslOK;
@@ -418,7 +417,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   textw   = (esl_opt_GetBoolean(go, "--notextw") ? 0 : esl_opt_GetInteger(go, "--textw"));
   bg      = p7_bg_Create(abc);
 
-  /* If caller declared input formats, decode them */
+  /* If caller declared input/output formats, decode them */
   if (esl_opt_IsOn(go, "--qformat")) {
     qformat = esl_sqio_EncodeFormat(esl_opt_GetString(go, "--qformat"));
     if (qformat == eslSQFILE_UNKNOWN) p7_Fail("%s is not a recognized input sequence file format\n", esl_opt_GetString(go, "--qformat"));
@@ -427,6 +426,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     dbformat = esl_sqio_EncodeFormat(esl_opt_GetString(go, "--tformat"));
     if (dbformat == eslSQFILE_UNKNOWN) p7_Fail("%s is not a recognized sequence database file format\n", esl_opt_GetString(go, "--tformat"));
   }
+  if ((Aformat  = esl_msafile_EncodeFormat(esl_opt_GetString(go, "--Aformat"))) == eslMSAFILE_UNKNOWN)  // default "Stockholm" is set in OPTIONS
+    p7_Fail("%s is not a recognized MSA file format\n", esl_opt_GetString(go, "--Aformat"));
+
 
   /* Initialize a default builder configuration,
    * then set only the options we need for single sequence search
@@ -629,26 +631,13 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	    if (qsq->acc[0]  != '\0') esl_msa_SetAccession(msa, qsq->acc,  -1);
 	    if (qsq->desc[0] != '\0') esl_msa_SetDesc     (msa, qsq->desc, -1);
 	    esl_msa_FormatAuthor(msa, "phmmer (HMMER %s)", HMMER_VERSION);
-	    if(esl_opt_IsOn(go, "--stockholm")){
-            esl_msafile_Write(afp, msa, eslMSAFILE_STOCKHOLM);
-	    }
-	    else if(esl_opt_IsOn(go, "--pfam")){
-              if(textw !=0){
-                ESL_EXCEPTION_SYS(eslEWRITE, "Pfam alignment format requires unlimited output width");
-              }
-              esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
-	    }
-	    else if(esl_opt_IsOn(go, "--a2m")){
-	      esl_msafile_Write(afp, msa, eslMSAFILE_A2M);          }
-	    else{ // default to selecting pfam vs. stockholm dased on output width
-                 if (textw > 0) esl_msafile_Write(afp, msa, eslMSAFILE_STOCKHOLM);
-                 else           esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
-           }
+            
+            esl_msafile_Write(afp, msa, Aformat);
 
-	    if (fprintf(ofp, "# Alignment of %d hits satisfying inclusion thresholds saved to: %s\n", msa->nseq, esl_opt_GetString(go, "-A")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
-	  }
+            if (fprintf(ofp, "# Alignment of %d hits satisfying inclusion thresholds saved to: %s\n", msa->nseq, esl_opt_GetString(go, "-A")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+          }
 	else if (fprintf(ofp, "# No hits satisfy inclusion thresholds; no alignment saved\n") < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
-	  
+
 	esl_msa_Destroy(msa);
       }
 
@@ -857,7 +846,7 @@ int next_block(ESL_SQFILE *sqfp, ESL_SQ *sq, BLOCK_LIST *list, SEQ_BLOCK *block,
 }
 
 /* mpi_master()
- * The MPI version of hmmbuild.
+ * The MPI version of phmmer
  * Follows standard pattern for a master/worker load-balanced MPI program (J1/78-79).
  * 
  * A master can only return if it's successful. 
@@ -898,6 +887,7 @@ mpi_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   int              nquery   = 0;
   int              seed;
   int              textw;
+  int              Aformat  = eslMSAFILE_UNKNOWN;
   int              status   = eslOK;
   int              qstatus  = eslOK;
   int              sstatus  = eslOK;
@@ -930,6 +920,8 @@ mpi_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     dbformat = esl_sqio_EncodeFormat(esl_opt_GetString(go, "--tformat"));
     if (dbformat == eslSQFILE_UNKNOWN) p7_Fail("%s is not a recognized sequence database file format\n", esl_opt_GetString(go, "--tformat"));
   }
+  if ((Aformat  = esl_msafile_EncodeFormat(esl_opt_GetString(go, "--Aformat"))) == eslMSAFILE_UNKNOWN)  // default "Stockholm" is set in OPTIONS
+    p7_Fail("%s is not a recognized MSA file format\n", esl_opt_GetString(go, "--Aformat"));
 
   bg = p7_bg_Create(abc);
 
@@ -1156,8 +1148,7 @@ mpi_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
 	    esl_msa_FormatAuthor(msa, "phmmer (HMMER %s)", HMMER_VERSION);
 
-	    if (textw > 0) esl_msafile_Write(afp, msa, eslMSAFILE_STOCKHOLM);
-	    else           esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
+	    esl_msafile_Write(afp, msa, Aformat);
 
 	    if (fprintf(ofp, "# Alignment of %d hits satisfying inclusion thresholds saved to: %s\n", msa->nseq, esl_opt_GetString(go, "-A")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 	  }

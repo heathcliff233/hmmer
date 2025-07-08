@@ -82,22 +82,28 @@ Save a multiple alignment of all significant hits (those satisfying
 .IR "inclusion thresholds" )
 to the file 
 .IR <f> .
-If one of the \-\-pfam, \-\-stockholm, or \-\-a2m options is specified,
-the alignment is output in that format.  Otherwise, the alignment is
-in Pfam format if the output width is unlimited, Stockholm if it is limited.
+The output MSA file is written in Stockholm format by default.
+Other formats can be set with
+.BR -Aformat .
 
-.TP 
-.B \-\-stockholm
-Output the alignment of significant hits in Stockholm format. 
-
-.TP 
-.B \-\-pfam
-Output the alignment of significant hits in Pfam format. Requires
-unlimited output text width.
-
-.TP 
-.B \-\-a2m
-Output the alignment of significant hits in a2m format.
+.TP
+.BI \-\-Aformat " <fmt>"
+When using
+.B \-A 
+to save the optional MSA output file,
+write that MSA file in format
+.IR <fmt>.
+Default is Stockholm.
+Choices for
+.I <fmt>
+are
+.BR a2m|afa|clustal|clustallike|pfam|phylip|phylips|psiblast|selex|stockholm .
+.I <fmt>
+is case-insensitive (e.g.
+.B a2m
+or
+.B A2M
+both work).
 
 .TP 
 .BI \-\-tblout " <f>"

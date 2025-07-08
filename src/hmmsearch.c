@@ -59,55 +59,53 @@ typedef struct {
 #endif
 
 static ESL_OPTIONS options[] = {
-  /* name           type      default  env  range     toggles   reqs   incomp              help                                                      docgroup*/
-  { "-h",           eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL,  NULL,            "show brief help on version and usage",                         1 },
+  /* name           type               default  env  range  toggles   reqs incomp              help                                                      docgroup*/
+  { "-h",           eslARG_NONE,         FALSE, NULL, NULL,    NULL,  NULL,  NULL,            "show brief help on version and usage",                         1 },
   /* Control of output */
-  { "-o",           eslARG_OUTFILE, NULL, NULL, NULL,    NULL,  NULL,  NULL,            "direct output to file <f>, not stdout",                        2 },
-  { "-A",           eslARG_OUTFILE, NULL, NULL, NULL,    NULL,  NULL,  NULL,            "save multiple alignment of all hits to file <f>",              2 },
-  { "--stockholm",        eslARG_NONE,  FALSE, NULL, NULL,      NULL,    "-A",  "--a2m,--pfam",      "output alignment of hits in stockholm format",                       2 },
-  { "--pfam",        eslARG_NONE,  FALSE, NULL, NULL,      NULL,    "-A",  "--a2m,--stockholm",           "output alignment of hits in pfam format.  Requires --notextw or --textw=0",                      2 },
-  { "--a2m",        eslARG_NONE,  FALSE, NULL, NULL,      NULL,    "-A",  "--stockholm,--pfam",            "output alignment of hits in a2m format",                       2 },
-  { "--tblout",     eslARG_OUTFILE, NULL, NULL, NULL,    NULL,  NULL,  NULL,            "save parseable table of per-sequence hits to file <f>",        2 },
-  { "--domtblout",  eslARG_OUTFILE, NULL, NULL, NULL,    NULL,  NULL,  NULL,            "save parseable table of per-domain hits to file <f>",          2 },
-  { "--pfamtblout", eslARG_OUTFILE, NULL, NULL, NULL,    NULL,  NULL,  NULL,            "save table of hits and domains to file, in Pfam format <f>",   2 },
-  { "--acc",        eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL,  NULL,            "prefer accessions over names in output",                       2 },
-  { "--noali",      eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL,  NULL,            "don't output alignments, so output is smaller",                2 },
-  { "--notextw",    eslARG_NONE,    NULL, NULL, NULL,    NULL,  NULL, "--textw",        "unlimit ASCII text output line width",                         2 },
-  { "--textw",      eslARG_INT,    "120", NULL, "n>=120",NULL,  NULL, "--notextw",      "set max width of ASCII text output lines",                     2 },
+  { "-o",           eslARG_OUTFILE,       NULL, NULL, NULL,    NULL,  NULL,  NULL,            "direct output to file <f>, not stdout",                        2 },
+  { "-A",           eslARG_OUTFILE,       NULL, NULL, NULL,    NULL,  NULL,  NULL,            "save multiple alignment of all hits to file <f>",              2 },
+  { "--Aformat",    eslARG_STRING, "Stockholm", NULL, NULL,    NULL,  "-A",  NULL,            "specify MSA output format <s> for -A",                         2 },
+  { "--tblout",     eslARG_OUTFILE,       NULL, NULL, NULL,    NULL,  NULL,  NULL,            "save parseable table of per-sequence hits to file <f>",        2 },
+  { "--domtblout",  eslARG_OUTFILE,       NULL, NULL, NULL,    NULL,  NULL,  NULL,            "save parseable table of per-domain hits to file <f>",          2 },
+  { "--pfamtblout", eslARG_OUTFILE,       NULL, NULL, NULL,    NULL,  NULL,  NULL,            "save table of hits and domains to file, in Pfam format <f>",   2 },
+  { "--acc",        eslARG_NONE,         FALSE, NULL, NULL,    NULL,  NULL,  NULL,            "prefer accessions over names in output",                       2 },
+  { "--noali",      eslARG_NONE,         FALSE, NULL, NULL,    NULL,  NULL,  NULL,            "don't output alignments, so output is smaller",                2 },
+  { "--notextw",    eslARG_NONE,          NULL, NULL, NULL,    NULL,  NULL, "--textw",        "unlimit ASCII text output line width",                         2 },
+  { "--textw",      eslARG_INT,          "120", NULL, "n>=120",NULL,  NULL, "--notextw",      "set max width of ASCII text output lines",                     2 },
   /* Control of reporting thresholds */
-  { "-E",           eslARG_REAL,  "10.0", NULL, "x>0",   NULL,  NULL,  REPOPTS,         "report sequences <= this E-value threshold in output",         4 },
-  { "-T",           eslARG_REAL,   FALSE, NULL, NULL,    NULL,  NULL,  REPOPTS,         "report sequences >= this score threshold in output",           4 },
-  { "--domE",       eslARG_REAL,  "10.0", NULL, "x>0",   NULL,  NULL,  DOMREPOPTS,      "report domains <= this E-value threshold in output",           4 },
-  { "--domT",       eslARG_REAL,   FALSE, NULL, NULL,    NULL,  NULL,  DOMREPOPTS,      "report domains >= this score cutoff in output",                4 },
+  { "-E",           eslARG_REAL,        "10.0", NULL, "x>0",   NULL,  NULL,  REPOPTS,         "report sequences <= this E-value threshold in output",         4 },
+  { "-T",           eslARG_REAL,         FALSE, NULL, NULL,    NULL,  NULL,  REPOPTS,         "report sequences >= this score threshold in output",           4 },
+  { "--domE",       eslARG_REAL,        "10.0", NULL, "x>0",   NULL,  NULL,  DOMREPOPTS,      "report domains <= this E-value threshold in output",           4 },
+  { "--domT",       eslARG_REAL,         FALSE, NULL, NULL,    NULL,  NULL,  DOMREPOPTS,      "report domains >= this score cutoff in output",                4 },
   /* Control of inclusion (significance) thresholds */
-  { "--incE",       eslARG_REAL,  "0.01", NULL, "x>0",   NULL,  NULL,  INCOPTS,         "consider sequences <= this E-value threshold as significant",  5 },
-  { "--incT",       eslARG_REAL,   FALSE, NULL, NULL,    NULL,  NULL,  INCOPTS,         "consider sequences >= this score threshold as significant",    5 },
-  { "--incdomE",    eslARG_REAL,  "0.01", NULL, "x>0",   NULL,  NULL,  INCDOMOPTS,      "consider domains <= this E-value threshold as significant",    5 },
-  { "--incdomT",    eslARG_REAL,   FALSE, NULL, NULL,    NULL,  NULL,  INCDOMOPTS,      "consider domains >= this score threshold as significant",      5 },
+  { "--incE",       eslARG_REAL,        "0.01", NULL, "x>0",   NULL,  NULL,  INCOPTS,         "consider sequences <= this E-value threshold as significant",  5 },
+  { "--incT",       eslARG_REAL,         FALSE, NULL, NULL,    NULL,  NULL,  INCOPTS,         "consider sequences >= this score threshold as significant",    5 },
+  { "--incdomE",    eslARG_REAL,        "0.01", NULL, "x>0",   NULL,  NULL,  INCDOMOPTS,      "consider domains <= this E-value threshold as significant",    5 },
+  { "--incdomT",    eslARG_REAL,         FALSE, NULL, NULL,    NULL,  NULL,  INCDOMOPTS,      "consider domains >= this score threshold as significant",      5 },
   /* Model-specific thresholding for both reporting and inclusion */
-  { "--cut_ga",     eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL,  THRESHOPTS,      "use profile's GA gathering cutoffs to set all thresholding",   6 },
-  { "--cut_nc",     eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL,  THRESHOPTS,      "use profile's NC noise cutoffs to set all thresholding",       6 },
-  { "--cut_tc",     eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL,  THRESHOPTS,      "use profile's TC trusted cutoffs to set all thresholding",     6 },
+  { "--cut_ga",     eslARG_NONE,         FALSE, NULL, NULL,    NULL,  NULL,  THRESHOPTS,      "use profile's GA gathering cutoffs to set all thresholding",   6 },
+  { "--cut_nc",     eslARG_NONE,         FALSE, NULL, NULL,    NULL,  NULL,  THRESHOPTS,      "use profile's NC noise cutoffs to set all thresholding",       6 },
+  { "--cut_tc",     eslARG_NONE,         FALSE, NULL, NULL,    NULL,  NULL,  THRESHOPTS,      "use profile's TC trusted cutoffs to set all thresholding",     6 },
   /* Control of acceleration pipeline */
-  { "--max",        eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, "--F1,--F2,--F3", "Turn all heuristic filters off (less speed, more power)",      7 },
-  { "--F1",         eslARG_REAL,  "0.02", NULL, NULL,    NULL,  NULL, "--max",          "Stage 1 (MSV) threshold: promote hits w/ P <= F1",             7 },
-  { "--F2",         eslARG_REAL,  "1e-3", NULL, NULL,    NULL,  NULL, "--max",          "Stage 2 (Vit) threshold: promote hits w/ P <= F2",             7 },
-  { "--F3",         eslARG_REAL,  "1e-5", NULL, NULL,    NULL,  NULL, "--max",          "Stage 3 (Fwd) threshold: promote hits w/ P <= F3",             7 },
-  { "--nobias",     eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL, "--max",          "turn off composition bias filter",                             7 },
+  { "--max",        eslARG_NONE,         FALSE, NULL, NULL,    NULL,  NULL, "--F1,--F2,--F3", "Turn all heuristic filters off (less speed, more power)",      7 },
+  { "--F1",         eslARG_REAL,        "0.02", NULL, NULL,    NULL,  NULL, "--max",          "Stage 1 (MSV) threshold: promote hits w/ P <= F1",             7 },
+  { "--F2",         eslARG_REAL,        "1e-3", NULL, NULL,    NULL,  NULL, "--max",          "Stage 2 (Vit) threshold: promote hits w/ P <= F2",             7 },
+  { "--F3",         eslARG_REAL,        "1e-5", NULL, NULL,    NULL,  NULL, "--max",          "Stage 3 (Fwd) threshold: promote hits w/ P <= F3",             7 },
+  { "--nobias",     eslARG_NONE,          NULL, NULL, NULL,    NULL,  NULL, "--max",          "turn off composition bias filter",                             7 },
 
 /* Other options */
-  { "--nonull2",    eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL,  NULL,            "turn off biased composition score corrections",               12 },
-  { "-Z",           eslARG_REAL,   FALSE, NULL, "x>0",   NULL,  NULL,  NULL,            "set # of comparisons done, for E-value calculation",          12 },
-  { "--domZ",       eslARG_REAL,   FALSE, NULL, "x>0",   NULL,  NULL,  NULL,            "set # of significant seqs, for domain E-value calculation",   12 },
-  { "--seed",       eslARG_INT,    "42",  NULL, "n>=0",  NULL,  NULL,  NULL,            "set RNG seed to <n> (if 0: one-time arbitrary seed)",         12 },
-  { "--tformat",    eslARG_STRING,  NULL, NULL, NULL,    NULL,  NULL,  NULL,            "assert target <seqfile> is in format <s>: no autodetection",  12 },
+  { "--nonull2",    eslARG_NONE,          NULL, NULL, NULL,    NULL,  NULL,  NULL,            "turn off biased composition score corrections",               12 },
+  { "-Z",           eslARG_REAL,         FALSE, NULL, "x>0",   NULL,  NULL,  NULL,            "set # of comparisons done, for E-value calculation",          12 },
+  { "--domZ",       eslARG_REAL,         FALSE, NULL, "x>0",   NULL,  NULL,  NULL,            "set # of significant seqs, for domain E-value calculation",   12 },
+  { "--seed",       eslARG_INT,           "42", NULL, "n>=0",  NULL,  NULL,  NULL,            "set RNG seed to <n> (if 0: one-time arbitrary seed)",         12 },
+  { "--tformat",    eslARG_STRING,        NULL, NULL, NULL,    NULL,  NULL,  NULL,            "assert target <seqfile> is in format <s>: no autodetection",  12 },
 
 #ifdef HMMER_THREADS 
-  { "--cpu",        eslARG_INT, p7_NCPU,"HMMER_NCPU","n>=0",NULL,  NULL,  CPUOPTS,      "number of parallel CPU workers to use for multithreads",      12 },
+  { "--cpu",        eslARG_INT,    p7_NCPU,"HMMER_NCPU","n>=0",NULL,  NULL,  CPUOPTS,         "number of parallel CPU workers to use for multithreads",      12 },
 #endif
 #ifdef HMMER_MPI
-  { "--stall",      eslARG_NONE,   FALSE, NULL, NULL,    NULL,"--mpi", NULL,            "arrest after start: for debugging MPI under gdb",             12 },  
-  { "--mpi",        eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL,  MPIOPTS,         "run as an MPI parallel program",                              12 },
+  { "--stall",      eslARG_NONE,         FALSE, NULL, NULL,    NULL,"--mpi", NULL,            "arrest after start: for debugging MPI under gdb",             12 },  
+  { "--mpi",        eslARG_NONE,         FALSE, NULL, NULL,    NULL,  NULL,  MPIOPTS,         "run as an MPI parallel program",                              12 },
 #endif
 
   /* Restrict search to subset of database - hidden because these flags are
@@ -115,9 +113,9 @@ static ESL_OPTIONS options[] = {
    *   (b) probably going to change
    * Doesn't work with MPI
    */
-  { "--restrictdb_stkey", eslARG_STRING, "0",  NULL, NULL,    NULL,  NULL,  NULL,       "Search starts at the sequence with name <s> (not with MPI)",     99 },
-  { "--restrictdb_n",eslARG_INT,        "-1",  NULL, NULL,    NULL,  NULL,  NULL,       "Search <j> target sequences (starting at --restrictdb_stkey)",   99 },
-  { "--ssifile",    eslARG_STRING,       NULL, NULL, NULL,    NULL,  NULL,  NULL,       "restrictdb_x values require ssi file. Override default to <s>",  99 },
+  { "--restrictdb_stkey", eslARG_STRING,  "0",  NULL, NULL,    NULL,  NULL,  NULL,       "Search starts at the sequence with name <s> (not with MPI)",     99 },
+  { "--restrictdb_n",     eslARG_INT,    "-1",  NULL, NULL,    NULL,  NULL,  NULL,       "Search <j> target sequences (starting at --restrictdb_stkey)",   99 },
+  { "--ssifile",          eslARG_STRING, NULL,  NULL, NULL,    NULL,  NULL,  NULL,       "restrictdb_x values require ssi file. Override default to <s>",  99 },
 
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
@@ -353,16 +351,17 @@ main(int argc, char **argv)
 static int
 serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 {
-  FILE            *ofp      = stdout;            /* results output file (-o)                        */
-  FILE            *afp      = NULL;              /* alignment output file (-A)                      */
-  FILE            *tblfp    = NULL;              /* output stream for tabular per-seq (--tblout)    */
-  FILE            *domtblfp = NULL;              /* output stream for tabular per-dom (--domtblout) */
-  FILE            *pfamtblfp= NULL;              /* output stream for pfam tabular output (--pfamtblout)    */
-  P7_HMMFILE      *hfp      = NULL;              /* open input HMM file                             */
-  ESL_SQFILE      *dbfp     = NULL;              /* open input sequence file                        */
-  P7_HMM          *hmm      = NULL;              /* one HMM query                                   */
-  ESL_ALPHABET    *abc      = NULL;              /* digital alphabet                                */
-  int              dbfmt    = eslSQFILE_UNKNOWN; /* format code for sequence database file          */
+  FILE            *ofp      = stdout;              // optional results output file (-o)
+  FILE            *afp      = NULL;                // optional alignment output file (-A)
+  FILE            *tblfp    = NULL;                // optional output stream for tabular per-seq (--tblout)
+  FILE            *domtblfp = NULL;                // optional output stream for tabular per-dom (--domtblout)
+  FILE            *pfamtblfp= NULL;                // optional output stream for pfam tabular output (--pfamtblout)
+  P7_HMMFILE      *hfp      = NULL;                // open input HMM file
+  ESL_SQFILE      *dbfp     = NULL;                // open input sequence file
+  P7_HMM          *hmm      = NULL;                // one HMM query 
+  ESL_ALPHABET    *abc      = NULL;                // digital alphabet 
+  int              dbfmt    = eslSQFILE_UNKNOWN;   // format code for sequence database file 
+  int              Aformat  = eslMSAFILE_UNKNOWN;  // format code for optional -A alignment output
   ESL_STOPWATCH   *w;
   int              textw    = 0;
   int              nquery   = 0;
@@ -391,6 +390,10 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     dbfmt = esl_sqio_EncodeFormat(esl_opt_GetString(go, "--tformat"));
     if (dbfmt == eslSQFILE_UNKNOWN) p7_Fail("%s is not a recognized sequence database file format\n", esl_opt_GetString(go, "--tformat"));
   }
+
+  if ((Aformat  = esl_msafile_EncodeFormat(esl_opt_GetString(go, "--Aformat"))) == eslMSAFILE_UNKNOWN)  // default "Stockholm" is set in OPTIONS
+    p7_Fail("%s is not a recognized MSA file format\n", esl_opt_GetString(go, "--Aformat"));
+
 
   /* Open the target sequence database */
   status = esl_sqfile_Open(cfg->dbfile, dbfmt, p7_SEQDBENV, &dbfp);
@@ -566,22 +569,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	    esl_msa_SetDesc     (msa, hmm->desc, -1);
 	    esl_msa_FormatAuthor(msa, "hmmsearch (HMMER %s)", HMMER_VERSION);
 
-            if(esl_opt_IsOn(go, "--stockholm")){
-            esl_msafile_Write(afp, msa, eslMSAFILE_STOCKHOLM);
-            }
-            else if(esl_opt_IsOn(go, "--pfam")){
-              if(textw !=0){
-                ESL_EXCEPTION_SYS(eslEWRITE, "Pfam alignment format requires unlimited output width");
-              }
-              esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
-            }
-            else if(esl_opt_IsOn(go, "--a2m")){
-              esl_msafile_Write(afp, msa, eslMSAFILE_A2M);          }
-            else{ // default to selecting pfam vs. stockholm dased on output width
-                 if (textw > 0) esl_msafile_Write(afp, msa, eslMSAFILE_STOCKHOLM);
-                 else           esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
-           }
-	  
+            esl_msafile_Write(afp, msa, Aformat);
+
 	    if (fprintf(ofp, "# Alignment of %d hits satisfying inclusion thresholds saved to: %s\n", msa->nseq, esl_opt_GetString(go, "-A")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 	  } 
 	else { if (fprintf(ofp, "# No hits satisfy inclusion thresholds; no alignment saved\n") < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed"); }
@@ -819,18 +808,19 @@ int next_block(ESL_SQFILE *sqfp, ESL_SQ *sq, BLOCK_LIST *list, SEQ_BLOCK *block,
 static int
 mpi_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 {
-  FILE            *ofp      = stdout;            /* results output file (-o)                        */
-  FILE            *afp      = NULL;              /* alignment output file (-A)                      */
-  FILE            *tblfp    = NULL;              /* output stream for tabular per-seq (--tblout)    */
-  FILE            *domtblfp = NULL;              /* output stream for tabular per-dom (--domtblout) */
-  FILE            *pfamtblfp= NULL;              /* output stream for pfam-style tabular output  (--pfamtblout) */
-  P7_BG           *bg       = NULL;	         /* null model                                      */
-  P7_HMMFILE      *hfp      = NULL;              /* open input HMM file                             */
-  ESL_SQFILE      *dbfp     = NULL;              /* open input sequence file                        */
-  P7_HMM          *hmm      = NULL;              /* one HMM query                                   */
-  ESL_SQ          *dbsq     = NULL;              /* one target sequence (digital)                   */
-  ESL_ALPHABET    *abc      = NULL;              /* digital alphabet                                */
-  int              dbfmt    = eslSQFILE_UNKNOWN; /* format code for sequence database file          */
+  FILE            *ofp      = stdout;              // optional results output file (-o)
+  FILE            *afp      = NULL;                // optional alignment output file (-A)
+  FILE            *tblfp    = NULL;                // optional output stream for tabular per-seq (--tblout) 
+  FILE            *domtblfp = NULL;                // optional output stream for tabular per-dom (--domtblout)
+  FILE            *pfamtblfp= NULL;                // optional output stream for pfam-style tabular output  (--pfamtblout)
+  P7_BG           *bg       = NULL;	           // null model
+  P7_HMMFILE      *hfp      = NULL;                // open input HMM file
+  ESL_SQFILE      *dbfp     = NULL;                // open input sequence file
+  P7_HMM          *hmm      = NULL;                // one HMM query
+  ESL_SQ          *dbsq     = NULL;                // one target sequence (digital)
+  ESL_ALPHABET    *abc      = NULL;                // digital alphabet
+  int              dbfmt    = eslSQFILE_UNKNOWN;   // format code for sequence database file
+  int              Aformat  = eslMSAFILE_UNKNOWN;  // format code for optional -A alignment output
   ESL_STOPWATCH   *w;
   int              textw    = 0;
   int              nquery   = 0;
@@ -860,6 +850,10 @@ mpi_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     dbfmt = esl_sqio_EncodeFormat(esl_opt_GetString(go, "--tformat"));
     if (dbfmt == eslSQFILE_UNKNOWN) mpi_failure("%s is not a recognized sequence database file format\n", esl_opt_GetString(go, "--tformat"));
   }
+
+  if ((Aformat  = esl_msafile_EncodeFormat(esl_opt_GetString(go, "--Aformat"))) == eslMSAFILE_UNKNOWN)  // default "Stockholm" is set in OPTIONS
+    p7_Fail("%s is not a recognized MSA file format\n", esl_opt_GetString(go, "--Aformat"));
+
 
   /* Open the target sequence database */
   status = esl_sqfile_Open(cfg->dbfile, dbfmt, p7_SEQDBENV, &dbfp);
@@ -1067,8 +1061,7 @@ mpi_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	    esl_msa_SetDesc     (msa, hmm->desc, -1);
 	    esl_msa_FormatAuthor(msa, "hmmsearch (HMMER %s)", HMMER_VERSION);
 
-	    if (textw > 0) esl_msafile_Write(afp, msa, eslMSAFILE_STOCKHOLM);
-	    else           esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
+	    esl_msafile_Write(afp, msa, Aformat);
 	  
 	    if (fprintf(ofp, "# Alignment of %d hits satisfying inclusion thresholds saved to: %s\n", msa->nseq, esl_opt_GetString(go, "-A")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 	  } 

@@ -65,9 +65,7 @@ static ESL_OPTIONS options[] = {
 /* Control of output */
   { "-o",           eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,    NULL,  NULL,            "direct output to file <f>, not stdout",                        2 },
   { "-A",           eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,    NULL,  NULL,            "save multiple alignment of hits to file <f>",                  2 },
-  { "--stockholm",        eslARG_NONE,  FALSE, NULL, NULL,      NULL,    "-A",  "--a2m,--pfam",            "output alignment of hits in stockholm format",                       2 },
-  { "--pfam",        eslARG_NONE,  FALSE, NULL, NULL,      NULL,    "-A",  "--a2m,--stockholm",            "output alignment of hits in pfam format.  Requires --notextw or --textw=0",                       2 },
-  { "--a2m",        eslARG_NONE,  FALSE, NULL, NULL,      NULL,    "-A",  "--stockholm,--pfam",            "output alignment of hits in a2m format",                       2 },  
+  { "--Aformat",    eslARG_STRING,"Stockholm", NULL, NULL,      NULL,    "-A",  NULL,            "specify MSA output format <s> for -A",                         2 },
   { "--tblout",     eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,    NULL,  NULL,            "save parseable table of per-sequence hits to file <f>",        2 },
   { "--domtblout",  eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,    NULL,  NULL,            "save parseable table of per-domain hits to file <f>",          2 },
   { "--chkhmm",     eslARG_OUTFILE,      NULL, NULL, NULL,      NULL,    NULL,  NULL,            "save HMM checkpoints to files <f>-<iteration>.hmm",            2 },
@@ -436,6 +434,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   FILE            *domtblfp = NULL;		  /* output stream for tabular per-seq (--domtblout) */
   int              qformat  = eslSQFILE_UNKNOWN;  /* format of qfile                                 */
   int              dbformat = eslSQFILE_UNKNOWN;  /* format of dbfile                                */
+  int              Aformat  = eslMSAFILE_UNKNOWN; /* format of optional -A MSA output                */
   ESL_SQFILE      *qfp      = NULL;		  /* open qfile                                      */
   ESL_SQFILE      *dbfp     = NULL;               /* open dbfile                                     */
   ESL_ALPHABET    *abc      = NULL;               /* sequence alphabet                               */
@@ -483,6 +482,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     dbformat = esl_sqio_EncodeFormat(esl_opt_GetString(go, "--tformat"));
     if (dbformat == eslSQFILE_UNKNOWN) p7_Fail("%s is not a recognized sequence database file format\n", esl_opt_GetString(go, "--tformat"));
   }
+ if ((Aformat  = esl_msafile_EncodeFormat(esl_opt_GetString(go, "--Aformat"))) == eslMSAFILE_UNKNOWN)  // default "Stockholm" is set in OPTIONS
+    p7_Fail("%s is not a recognized MSA file format\n", esl_opt_GetString(go, "--Aformat"));
 
   /* Initialize a null model.
    * The single-sequence P7_BUILDER needs to see this, to construct its probabilities.
@@ -726,23 +727,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       if (domtblfp) p7_tophits_TabularDomains(domtblfp, qsq->name, qsq->acc, info->th, info->pli, (nquery == 1));
       if (afp) 
 	{
-	  if(esl_opt_IsOn(go, "--stockholm")){
-	    esl_msafile_Write(afp, msa, eslMSAFILE_STOCKHOLM);
-	  }
-	  else if(esl_opt_IsOn(go, "--pfam")){
-	      if(textw !=0){
-		ESL_EXCEPTION_SYS(eslEWRITE, "Pfam alignment format requires unlimited output width");
-	      }
-	      esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
-	  }
-	  else if(esl_opt_IsOn(go, "--a2m")){
-	    esl_msafile_Write(afp, msa, eslMSAFILE_A2M);
-	  }
-	  else{ // default to selecting pfam vs. stockholm dased on output width
-	         if (textw > 0) esl_msafile_Write(afp, msa, eslMSAFILE_STOCKHOLM);
-		 else           esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
-	   }
-
+          esl_msafile_Write(afp, msa, Aformat);
 	  if (fprintf(ofp, "# Alignment of %d hits satisfying inclusion thresholds saved to: %s\n", msa->nseq, esl_opt_GetString(go, "-A")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 	}
       if (fprintf(ofp, "//\n")  < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
@@ -1007,6 +992,7 @@ mpi_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   FILE            *domtblfp = NULL;		  /* output stream for tabular per-seq (--domtblout) */
   int              qformat  = eslSQFILE_UNKNOWN;  /* format of qfile                                 */
   int              dbformat = eslSQFILE_UNKNOWN;  /* format of dbfile                                */
+  int              Aformat  = eslMSAFILE_UNKNOWN; /* format of optional -A MSA output file           */
   ESL_SQFILE      *qfp      = NULL;		  /* open qfile                                      */
   ESL_SQFILE      *dbfp     = NULL;               /* open dbfile                                     */
   ESL_ALPHABET    *abc      = NULL;               /* sequence alphabet                               */
@@ -1056,6 +1042,8 @@ mpi_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     dbformat = esl_sqio_EncodeFormat(esl_opt_GetString(go, "--tformat"));
     if (dbformat == eslSQFILE_UNKNOWN) mpi_failure("%s is not a recognized sequence database file format\n", esl_opt_GetString(go, "--tformat"));
   }
+  if ((Aformat  = esl_msafile_EncodeFormat(esl_opt_GetString(go, "--Aformat"))) == eslMSAFILE_UNKNOWN)  // default "Stockholm" is set in OPTIONS
+    p7_Fail("%s is not a recognized MSA file format\n", esl_opt_GetString(go, "--Aformat"));
 
   bg    = p7_bg_Create(abc);
 
@@ -1307,9 +1295,7 @@ mpi_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       if (domtblfp) p7_tophits_TabularDomains(domtblfp, qsq->name, qsq->acc, th, pli, (nquery == 1));
       if (afp) 
 	{
-	  if (textw > 0) esl_msafile_Write(afp, msa, eslMSAFILE_STOCKHOLM);
-	  else           esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
-
+          esl_msafile_Write(afp, msa, Aformat);
 	  if (fprintf(ofp, "# Alignment of %d hits satisfying inclusion thresholds saved to: %s\n", msa->nseq, esl_opt_GetString(go, "-A")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 	}
       if (fprintf(ofp, "//\n") < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
