@@ -658,18 +658,16 @@ p7_oprofile_UpdateMSVEmissionScores(P7_OPROFILE *om, P7_BG *bg, float *fwd_emiss
  *    3.2*3 = 9.6; rounded = 10; bias-10 = 2.
  * When used, we add the bias, then subtract this cost.
  * (A cost of +255 is our -infinity "prohibited event")
- *
- * ML: Contrary to the SSE implementation, we cast only at the end,
- *     because weird results were found on an AARCH64 platform when
- *     casting happened at the beginning.
  */
 static uint8_t
 biased_byteify(P7_OPROFILE *om, float sc)
 {
-  float b;
-  sc  = -1.0f * roundf(om->scale_b * sc);
-  b   = (sc > 255.0 - om->bias_b) ? 255.0 : sc + om->bias_b;
-  return (uint8_t) b;                                       
+  uint8_t b;
+
+  sc  = -1.0f * roundf(om->scale_b * sc);         // sc is now an integer cost represented in a float...; sc is now (-bias_b, -bias_b+1., -bias_b+2.,...)
+  sc += (float) om->bias_b;                       // bias_b is min cost (negative of highest log-odds residue score); sc is now (0.,1.,2.,...), rounded integers 
+  b   = ( sc > 255.) ? 255 : (uint8_t) sc;        // truncate the worst cost at 255 to fit into one byte uchar
+  return b;
 }
 
 /* unbiased_byteify()

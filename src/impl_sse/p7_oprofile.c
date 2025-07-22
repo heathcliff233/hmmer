@@ -668,8 +668,9 @@ biased_byteify(P7_OPROFILE *om, float sc)
 {
   uint8_t b;
 
-  sc  = -1.0f * roundf(om->scale_b * sc);                          /* ugh. sc is now an integer cost represented in a float...           */
-  b   = (sc > 255 - om->bias_b) ? 255 : (uint8_t) sc + om->bias_b; /* and now we cast, saturate, and bias it to an unsigned char cost... */
+  sc  = -1.0f * roundf(om->scale_b * sc);         // sc is now an integer cost represented in a float...; sc is now (-bias_b, -bias_b+1., -bias_b+2.,...)
+  sc += (float) om->bias_b;                       // bias_b is min cost (negative of highest log-odds residue score); sc is now (0.,1.,2.,...), rounded integers 
+  b   = ( sc > 255.) ? 255 : (uint8_t) sc;        // truncate the worst cost at 255 to fit into one byte uchar
   return b;
 }
  
@@ -684,8 +685,8 @@ unbiased_byteify(P7_OPROFILE *om, float sc)
 {
   uint8_t b;
 
-  sc  = -1.0f * roundf(om->scale_b * sc);       /* ugh. sc is now an integer cost represented in a float...    */
-  b   = (sc > 255.) ? 255 : (uint8_t) sc;	/* and now we cast and saturate it to an unsigned char cost... */
+  sc  = -1.0f * roundf(om->scale_b * sc);       
+  b   = (sc > 255.) ? 255 : (uint8_t) sc;	
   return b;
 }
  
