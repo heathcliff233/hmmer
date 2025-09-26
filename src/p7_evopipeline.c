@@ -226,7 +226,6 @@ extern int p7_EvoPipeline_Overthruster(P7_PIPELINE *pli, ESL_RANDOMNESS *r, floa
   *ret_nullsc      = nullsc;
   *ret_time        = time;
 
-  
   if (cfg)   esl_min_cfg_Destroy(cfg);
   if (stats) esl_min_dat_Destroy(stats);
   return eslOK; // if we get this far, we passed all the filters and should proceed to the main stage
@@ -311,7 +310,8 @@ int p7_EvoPipeline_Mainstage(P7_PIPELINE * pli, float *evparam_star, P7_RATE *R,
   else seqbias = 0.0;
   pre_score =  (fwdsc - nullsc) / eslCONST_LOG2; 
   seq_score =  (fwdsc - (nullsc + seqbias)) / eslCONST_LOG2;
-  //printf("^^ fwd %f null %f seqbias %f | seq_score %f\n\n", fwdsc, nullsc, seqbias, seq_score);
+  
+  printf("^^ fwd %f null %f n2sc seqbias %f | seq_score %f | time %f\n\n", fwdsc, nullsc, seqbias, seq_score, time);
   
   /* Calculate the "reconstruction score": estimated
    * per-sequence score as sum of individual domains,
@@ -348,12 +348,12 @@ int p7_EvoPipeline_Mainstage(P7_PIPELINE * pli, float *evparam_star, P7_RATE *R,
 	}
       seqbias = 0.0;
     }    
-  //printf("^^ fwd new seqbias %f  \n", seqbias);
+  printf("^^ fwd new seqbias %f  \n", seqbias);
   sum_score += (sq->n-Ld) * log((float) sq->n / (float) (sq->n+3)); /* NATS */
   pre2_score = (sum_score - nullsc) / eslCONST_LOG2;                /* BITS */
-  //printf("^^ fwd prv sum_sc %f  after %f\n", sum_score, sum_score - (nullsc + seqbias));
+  printf("^^ fwd prv sum_sc %f  after %f\n", sum_score, sum_score - (nullsc + seqbias));
   sum_score  = (sum_score - (nullsc + seqbias)) / eslCONST_LOG2;    /* BITS */
-  //printf("^^ fwd seq_score %f sum_score %f seqbias %f nullsc %f\n", seq_score, sum_score, seqbias, nullsc);
+  printf("^^ fwd seq_score %f sum_score %f seqbias %f nullsc %f\n", seq_score, sum_score, seqbias, nullsc);
 
   /* A special case: let sum_score override the seq_score when it's better, and it includes at least 1 domain */
   if (Ld > 0 && sum_score > seq_score)
@@ -1025,7 +1025,7 @@ func_msvfilter(ESL_RANDOMNESS *r, ESL_DSQ *dsq, int n, P7_HMM *hmm, P7_RATE *R, 
   p7_MSVFilter(dsq, n, om, oxf, &(usc));
   
 #if 0
-  printf("time %f usc %f\n", time, usc);
+  printf("^^time %f usc %f\n", time, usc);
 #endif
 
   return (double)usc;
@@ -1043,7 +1043,7 @@ func_viterbifilter(ESL_RANDOMNESS *r, ESL_DSQ *dsq, int n, P7_HMM *hmm, P7_RATE 
   p7_ViterbiFilter(dsq, n, om, oxf, &(vfsc));
   
 #if 0
-  printf("time %f vfsc %f\n", time, vfsc);
+  printf("^^time %f vfsc %f\n", time, vfsc);
 #endif
 
   return (double)vfsc;
@@ -1061,7 +1061,7 @@ func_forwardparser(ESL_RANDOMNESS *r, ESL_DSQ *dsq, int n, P7_HMM *hmm, P7_RATE 
   p7_ForwardParser(dsq, n, om, oxf, &(fwdsc));
 
 #if 0
-  printf("time %f fwdsc %f\n", time, fwdsc);
+  printf("^^time %f fwdsc %f\n", time, fwdsc);
 #endif
 
   return (double)fwdsc;

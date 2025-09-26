@@ -745,30 +745,34 @@ AC_CONFIG_FILES([ \
 
 # Substitutions in Easel man pages:
 # EASEL_VERSION, EASEL_DATE, EASEL_COPYRIGHT, EASEL_LICENSE, EASEL_URL
-AC_CONFIG_FILES([ \
-  easel/miniapps/esl-afetch.man      \
-  easel/miniapps/esl-alimanip.man    \
-  easel/miniapps/esl-alimap.man      \
-  easel/miniapps/esl-alimask.man     \
-  easel/miniapps/esl-alimerge.man    \
-  easel/miniapps/esl-alipid.man      \
-  easel/miniapps/esl-alirev.man      \
-  easel/miniapps/esl-alistat.man     \
-  easel/miniapps/esl-compalign.man   \
-  easel/miniapps/esl-compstruct.man  \
-  easel/miniapps/esl-construct.man   \
-  easel/miniapps/esl-histplot.man    \
-  easel/miniapps/esl-mask.man        \
-  easel/miniapps/esl-mixdchlet.man   \
-  easel/miniapps/esl-reformat.man    \
-  easel/miniapps/esl-selectn.man     \
-  easel/miniapps/esl-seqrange.man    \
-  easel/miniapps/esl-seqstat.man     \
-  easel/miniapps/esl-sfetch.man      \
-  easel/miniapps/esl-ssdraw.man      \
-  easel/miniapps/esl-weight.man      \
-  easel/miniapps/easel-translate.man \
- ])
+#
+# TK TK   As of 3 Jul 2025 these are under re-development.
+#         Temporarily taking them out.  
+#
+dnl AC_CONFIG_FILES([ \
+dnl   easel/miniapps/esl-afetch.man      \
+dnl   easel/miniapps/esl-alimanip.man    \
+dnl   easel/miniapps/esl-alimap.man      \
+dnl   easel/miniapps/esl-alimask.man     \
+dnl   easel/miniapps/esl-alimerge.man    \
+dnl   easel/miniapps/esl-alipid.man      \
+dnl   easel/miniapps/esl-alirev.man      \
+dnl   easel/miniapps/esl-alistat.man     \
+dnl   easel/miniapps/esl-compalign.man   \
+dnl   easel/miniapps/esl-compstruct.man  \
+dnl   easel/miniapps/esl-construct.man   \
+dnl   easel/miniapps/esl-histplot.man    \
+dnl   easel/miniapps/esl-mask.man        \
+dnl   easel/miniapps/esl-mixdchlet.man   \
+dnl   easel/miniapps/esl-reformat.man    \
+dnl   easel/miniapps/esl-selectn.man     \
+dnl   easel/miniapps/esl-seqrange.man    \
+dnl   easel/miniapps/esl-seqstat.man     \
+dnl   easel/miniapps/esl-sfetch.man      \
+dnl   easel/miniapps/esl-ssdraw.man      \
+dnl   easel/miniapps/esl-weight.man      \
+dnl   easel/miniapps/easel-translate.man \
+dnl  ])
 
 AC_CONFIG_HEADERS([easel/decoy_config.h])   # Put this first to keep gnu 'autoheader' from overwriting a real config file.
 AC_CONFIG_HEADERS([src/p7_config.h])
