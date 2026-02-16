@@ -1254,9 +1254,9 @@ write_msa_subset(FILE *ofp, const ESL_MSA *msa, const int *S, int nS)
   esl_vec_ISet(useme, msa->nseq, FALSE);
   for (i = 0; i < nS; i++) useme[S[i]] = TRUE;
 
-  if ((status = esl_msa_SequenceSubset(msa, useme, &submsa))                                          != eslOK) esl_fatal("esl_msa_SequenceSubset() failed unexpectedly");
-  if ((status = esl_msa_MinimGaps(submsa, /*errbuf=*/NULL, /*textgaps=*/NULL, /*consider_rf=*/FALSE)) != eslOK) esl_fatal("esl_msa_MinimGaps() failed unexpectedly");
-  if ((status = esl_msafile_Write(ofp, submsa, eslMSAFILE_STOCKHOLM))                                 != eslOK) esl_fatal("failed to write MSA to its output file");
+  if ((status = esl_msa_SequenceSubset(msa, useme, &submsa))          != eslOK) esl_fatal("esl_msa_SequenceSubset() failed unexpectedly");
+  if ((status = esl_msa_MinimGaps(submsa, /*consider_rf=*/FALSE))     != eslOK) esl_fatal("esl_msa_MinimGaps() failed unexpectedly");
+  if ((status = esl_msafile_Write(ofp, submsa, eslMSAFILE_STOCKHOLM)) != eslOK) esl_fatal("failed to write MSA to its output file");
 
   free(useme);
   esl_msa_Destroy(submsa);
