@@ -4,12 +4,13 @@ Last updated: 2026-05-05
 
 ## Objective
 
-Implement an opt-in pure GPU MSV path for protein `hmmsearch --gpu`, without CPU fallback for the requested GPU mode, and validate it with correctness and timing benchmarks.
+Implement an opt-in GPU path for protein `hmmsearch --gpu`, without CPU fallback for requested GPU stages, then evaluate later pipeline stages one by one and keep only stages that are suitable for GPU and fast enough on representative benchmarks.
 
 ## Current State
 
 - TODO exists in `agents_docs/gpu-support-todo.md`.
 - An opt-in CUDA MSV implementation is present for protein `hmmsearch --gpu` on protein `dsqdata` target input built with `hmmseqdb`.
+- The GPU path also computes the biased-composition filter score in CUDA batches, reusing the sequence batch already uploaded for MSV.
 - `origin/cuda` remains historical reference material only.
 - Build detection is wired through `configure --enable-cuda` and `--with-cuda-arch=sm_XX`.
 - `nvcc` and CUDA runtime libraries are present in the environment.
@@ -18,7 +19,7 @@ Implement an opt-in pure GPU MSV path for protein `hmmsearch --gpu`, without CPU
 
 ## Required Deliverables
 
-1. CUDA runtime and MSV module under `src/`.
+1. CUDA runtime and MSV/bias module under `src/`.
 2. `hmmsearch --gpu` opt-in CLI path.
 3. No fallback to CPU when GPU mode is explicitly requested.
 4. Benchmark and timing check proving GPU speedup versus CPU MSV on the same fixture set.
@@ -27,6 +28,7 @@ Implement an opt-in pure GPU MSV path for protein `hmmsearch --gpu`, without CPU
 ## Verification Targets
 
 - CUDA MSV parity against CPU `p7_MSVFilter()`.
+- CUDA bias filter parity against CPU `p7_bg_FilterScore()` at the search-hit level and in pipeline counters.
 - Overflow/high-score parity.
 - End-to-end `hmmsearch --gpu` versus CPU `hmmsearch`.
 - Timing comparison that records wall-clock and GPU kernel time.
@@ -42,6 +44,7 @@ Minimum timing evidence to record:
 - GPU MSV wall time.
 - GPU kernel elapsed time.
 - Host/device transfer time.
+- CUDA bias H2D/kernel/D2H time when bias is enabled.
 - Batch size used.
 
 ## Work Log
@@ -80,11 +83,15 @@ Minimum timing evidence to record:
 - 2026-05-05: Larger default run covered all 13 locally prepared amino profmark queries against the full `pmark.test.gpudb` target database. Ten of 13 were faster, median speedup was 1.237x, aggregate CPU wall time was 24.90 sec, aggregate GPU wall time was 18.14 sec, and aggregate speedup was 1.373x. Slow cases were `3keto-disac_hyd` 0.973x, `7tm_3` 0.857x, and `A2M_BRD` 0.934x.
 - 2026-05-05: Larger-run stage totals identify post-MSV CPU continuation as the main remaining efficiency bottleneck: GPU CPU survivor time 10.735 sec versus CUDA kernel 2.310 sec, H2D 0.268 sec, D2H 0.008 sec, dsqdata read/unpack 0.000 sec, metadata 0.115 sec. Within CPU survivor continuation, Viterbi and Forward dominate more than null or bias: null 0.091 sec, bias 2.221 sec, Viterbi 4.496 sec, Forward 2.281 sec, domain 1.445 sec.
 - 2026-05-05: Tested a larger `--gpu-batch-seqs 65536 --gpu-batch-res 16000000` five-query tuning subset. Kernel time decreased, but total wall time did not improve consistently because survivor CPU work dominated. Kept the current 8M-residue default as the more balanced setting.
+- 2026-05-05: Evaluated GPU biased-composition filtering as the next stage because null time was tiny and bias has a narrow per-sequence score boundary. Initial implementation computed the correct stage but did a second dsq transfer and was not good enough: five-query profmark GPU wall total was 11.19 sec versus the 10.84 sec MSV-only baseline, even though measured bias time dropped from 0.846 sec to 0.135 sec.
+- 2026-05-05: Revised GPU bias to reuse the MSV-uploaded dsq/offset/length buffers for the same dsqdata chunk. Tutorial smoke still matched CPU/GPU hit names. Five-query profmark reuse run (`benchmark-data/profmark-current/gpu-bias/subset-5-reuse/logs/profmark-gpu-summary.tsv`) recorded CPU wall total 18.61 sec, GPU wall total 10.32 sec, aggregate speedup 1.803x, zero CPU-only hits except the known `AAA_15` SSV/MSV mismatch count of 2, and the same `Tra1_ring` GPU-only count of 2. Per-query speedups were `14-3-3` 2.000x, `AAA_15` 2.061x, `ATG2_CAD` 1.620x, `Tra1_ring` 1.871x, and `Nup192` 1.882x.
+- 2026-05-05: GPU bias reuse stage totals on the five-query profmark subset: stage bias 0.048 sec versus 0.846 sec in the MSV-only baseline; CUDA bias H2D 0.000898 sec, kernel 0.041753 sec, D2H 0.001005 sec; GPU CPU survivor continuation 6.447 sec. Remaining large CPU costs are still Viterbi and Forward/domain continuation, not null, transfer, or bias.
+- 2026-05-05: Verification for GPU bias pass: `make -C src hmmsearch`; tutorial CPU/GPU hit-name smoke on `tutorial/globins4.hmm` vs `tutorial/globins45.fa`/dsqdata matched; `make -C src generic_msv_utest && src/generic_msv_utest`; `make -C src/impl_sse msvfilter_utest && src/impl_sse/msvfilter_utest`; `git diff --check`.
 
 ## Remaining Scope
 
 - TODO validation categories for a true `dsqdata` v2 length-index extension remain open; current implementation uses existing Easel dsqdata and per-sequence lengths after chunk unpacking.
-- Current `hmmsearch --gpu` uses dsqdata input with GPU replacing MSV only; bias, Viterbi, Forward/Backward, domain definition, null2, hit storage, thresholding, and output remain on CPU as intended for the first MSV milestone.
-- GPU is not universally faster, but the current tuned dsqdata path now shows end-to-end speedups on the representative five-query profmark sample. The biggest remaining efficiency bottleneck is CPU survivor continuation after GPU MSV; dsqdata read/unpack and H2D/D2H transfer are comparatively small in the current measurements.
-- The 13-query profmark run confirms the same bottleneck on a larger sample. Moving the null filter to GPU is unlikely to matter yet because null time is tiny. Moving the bias filter could help some, but Viterbi/Forward/domain continuation are larger CPU costs and should be evaluated before adding a GPU bias implementation.
+- Current `hmmsearch --gpu` uses dsqdata input with GPU replacing MSV and bias filtering; Viterbi, Forward/Backward, domain definition, null2, hit storage, thresholding, and output remain on CPU.
+- GPU is not universally faster, but the current tuned dsqdata path shows end-to-end speedups on representative profmark samples. The biggest remaining efficiency bottleneck is CPU survivor continuation after GPU MSV/bias; dsqdata read/unpack and H2D/D2H transfer are comparatively small in the current measurements.
+- The 13-query profmark run before GPU bias and the five-query GPU-bias run both point to the same next bottleneck class. Moving the null filter to GPU is unlikely to matter because null time is tiny. Bias is now suitable only because it reuses the MSV batch upload. Viterbi and Forward/domain continuation should be evaluated next, with attention to matrix/state ownership and result parity.
 - Sensitivity parity is not complete because CPU `p7_MSVFilter()` includes an SSV shortcut. This is now tracked as a deferred SSV/MSV parity task rather than a blocker for the current efficiency work.

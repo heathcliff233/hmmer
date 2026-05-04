@@ -34,6 +34,9 @@ p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_STATS *stats)
     stats->h2d_seconds     = 0.0;
     stats->kernel_seconds  = 0.0;
     stats->d2h_seconds     = 0.0;
+    stats->bias_h2d_seconds    = 0.0;
+    stats->bias_kernel_seconds = 0.0;
+    stats->bias_d2h_seconds    = 0.0;
     stats->nseqs           = 0;
     stats->nres            = 0;
   }
@@ -86,6 +89,16 @@ int
 p7_cuda_MSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                               ESL_DSQDATA_CHUNK *chu, float *scores, int *statuses,
                               char *errbuf, int errbuf_size)
+{
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
+p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
+                               ESL_DSQDATA_CHUNK *chu, float *filtersc,
+                               char *errbuf, int errbuf_size)
 {
   if (errbuf && errbuf_size > 0)
     snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");

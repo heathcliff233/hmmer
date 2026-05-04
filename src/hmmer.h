@@ -1668,6 +1668,8 @@ extern int p7_pli_NewSeq            (P7_PIPELINE *pli, const ESL_SQ *sq);
 extern int p7_Pipeline              (P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_TOPHITS *th);
 extern int p7_Pipeline_PostMSV      (P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
                                      P7_TOPHITS *hitlist, float nullsc, float usc);
+extern int p7_Pipeline_PostMSVWithFilter(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
+                                         P7_TOPHITS *hitlist, float nullsc, float usc, float filtersc);
 extern int p7_Pipeline_LongTarget   (P7_PIPELINE *pli, P7_OPROFILE *om, P7_SCOREDATA *data,
                                      P7_BG *bg, P7_TOPHITS *hitlist, int64_t seqidx,
                                      const ESL_SQ *sq, int complementarity,

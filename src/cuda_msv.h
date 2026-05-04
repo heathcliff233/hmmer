@@ -18,6 +18,9 @@ typedef struct p7_cuda_msv_stats_s {
   double   h2d_seconds;
   double   kernel_seconds;
   double   d2h_seconds;
+  double   bias_h2d_seconds;
+  double   bias_kernel_seconds;
+  double   bias_d2h_seconds;
   uint64_t nseqs;
   uint64_t nres;
 } P7_CUDA_MSV_STATS;
@@ -40,5 +43,8 @@ extern int  p7_cuda_MSVFilterBatch(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROF
 extern int  p7_cuda_MSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                           ESL_DSQDATA_CHUNK *chu, float *scores, int *statuses,
                                           char *errbuf, int errbuf_size);
+extern int  p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
+                                           ESL_DSQDATA_CHUNK *chu, float *filtersc,
+                                           char *errbuf, int errbuf_size);
 
 #endif /*P7_CUDA_MSV_INCLUDED*/

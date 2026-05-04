@@ -1382,6 +1382,7 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
   char errbuf[eslERRBUFSIZE];
   ESL_DSQDATA_CHUNK *chu = NULL;
   float *gpu_scores = NULL;
+  float *gpu_filtersc = NULL;
   int *gpu_statuses = NULL;
   ESL_DSQ *dbsq_dsqmem = NULL;
   int64_t  dbsq_salloc = 0;
@@ -1395,6 +1396,7 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
     dbsq_dsqmem = dbsq->dsq;
     dbsq_salloc = dbsq->salloc;
     ESL_ALLOC(gpu_scores, sizeof(float) * gpu_capacity);
+    ESL_ALLOC(gpu_filtersc, sizeof(float) * gpu_capacity);
     ESL_ALLOC(gpu_statuses, sizeof(int) * gpu_capacity);
     while (n_targetseqs == -1 || seq_cnt < n_targetseqs) {
       t0 = hmmsearch_WallTime();
@@ -1409,6 +1411,12 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
       status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
       info->pli->time_msv += hmmsearch_WallTime() - t0;
       if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch MSV failed: %s\n", errbuf);
+      if (info->pli->do_biasfilter) {
+        t0 = hmmsearch_WallTime();
+        status = p7_cuda_BiasFilterDsqdataChunk(info->cuda_engine, info->bg, chu, gpu_filtersc, errbuf, sizeof(errbuf));
+        info->pli->time_bias += hmmsearch_WallTime() - t0;
+        if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch bias filter failed: %s\n", errbuf);
+      }
 
       for (i = 0; i < chu->N && (n_targetseqs == -1 || seq_cnt < n_targetseqs); i++, seq_cnt++) {
         t0 = hmmsearch_WallTime();
@@ -1439,7 +1447,17 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
           p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
           info->pli->n_past_msv++;
           t0 = hmmsearch_WallTime();
-          p7_Pipeline_PostMSV(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack);
+          if (info->pli->do_biasfilter) {
+            seq_score = (usc + info->gpu_msv_slack - gpu_filtersc[i]) / eslCONST_LOG2;
+            P = esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
+            if (P <= info->pli->F1) {
+              info->pli->n_past_bias++;
+              p7_Pipeline_PostMSVWithFilter(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack, gpu_filtersc[i]);
+            }
+          } else {
+            info->pli->n_past_bias++;
+            p7_Pipeline_PostMSVWithFilter(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack, nullsc);
+          }
           info->pli->time_gpu_survivor += hmmsearch_WallTime() - t0;
         }
         p7_pipeline_Reuse(info->pli);
@@ -1455,6 +1473,7 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
     dbsq->salloc = dbsq_salloc;
     esl_sq_Destroy(dbsq);
     free(gpu_scores);
+    free(gpu_filtersc);
     free(gpu_statuses);
     return sstatus;
   }
@@ -1490,6 +1509,7 @@ ERROR:
   }
   if (dbsq) esl_sq_Destroy(dbsq);
   free(gpu_scores);
+  free(gpu_filtersc);
   free(gpu_statuses);
   return eslEMEM;
 }

@@ -84,7 +84,7 @@ if not (gpu_targetdb.with_suffix(gpu_targetdb.suffix + ".dsqi")).exists():
 
 summary = logs / "profmark-gpu-summary.tsv"
 with summary.open("w") as s:
-    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tgpu_read\tgpu_meta\tgpu_survivor\tgpu_h2d\tgpu_kernel\tgpu_d2h\tstage_null\tstage_msv_host\tstage_bias\tstage_vit\tstage_fwd\tstage_bck\tstage_domain\tstage_null2_output\n")
+    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tgpu_read\tgpu_meta\tgpu_survivor\tgpu_h2d\tgpu_kernel\tgpu_d2h\tgpu_bias_h2d\tgpu_bias_kernel\tgpu_bias_d2h\tstage_null\tstage_msv_host\tstage_bias\tstage_vit\tstage_fwd\tstage_bck\tstage_domain\tstage_null2_output\n")
     for q in args.queries:
         sto = queries / (q + ".sto")
         hmm = queries / (q + ".hmm")
@@ -111,6 +111,9 @@ with summary.open("w") as s:
         h2d = parse_stat(gpu_out, "CUDA MSV H2D time:")
         kernel = parse_stat(gpu_out, "CUDA MSV kernel time:")
         d2h = parse_stat(gpu_out, "CUDA MSV D2H time:")
+        bias_h2d = parse_stat(gpu_out, "CUDA bias H2D time:")
+        bias_kernel = parse_stat(gpu_out, "CUDA bias kernel time:")
+        bias_d2h = parse_stat(gpu_out, "CUDA bias D2H time:")
         gpu_read = parse_stat(gpu_out, "GPU dsqdata read/unpack time:")
         gpu_meta = parse_stat(gpu_out, "GPU sequence metadata time:")
         gpu_survivor = parse_stat(gpu_out, "GPU CPU survivor time:")
@@ -122,8 +125,8 @@ with summary.open("w") as s:
         stage_bck = parse_stat(gpu_out, "Stage Backward time:")
         stage_domain = parse_stat(gpu_out, "Stage domain time:")
         stage_null2_output = parse_stat(gpu_out, "Stage null2/output time:")
-        s.write("{}\t{:.3f}\t{:.3f}\t{:.3f}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(
+        s.write("{}\t{:.3f}\t{:.3f}\t{:.3f}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(
             q, cpu_wall, gpu_wall, cpu_wall / gpu_wall if gpu_wall > 0 else 0.0,
             len(cpu_names - gpu_names), len(gpu_names - cpu_names),
-            gpu_read, gpu_meta, gpu_survivor, h2d, kernel, d2h,
+            gpu_read, gpu_meta, gpu_survivor, h2d, kernel, d2h, bias_h2d, bias_kernel, bias_d2h,
             stage_null, stage_msv_host, stage_bias, stage_vit, stage_fwd, stage_bck, stage_domain, stage_null2_output))

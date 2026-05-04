@@ -766,20 +766,10 @@ int
 p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
                     P7_TOPHITS *hitlist, float nullsc, float usc)
 {
-  P7_HIT          *hit     = NULL;     /* ptr to the current hit output data      */
-  float            vfsc, fwdsc;        /* filter scores                           */
-  float            filtersc;           /* HMM null filter score                   */
-  float            seqbias;
-  float            seq_score;          /* the corrected per-seq bit score */
-  float            sum_score;           /* the corrected reconstruction score for the seq */
-  float            pre_score, pre2_score; /* uncorrected bit scores for seq */
-  double           P;                /* P-value of a hit */
-  double           lnP;              /* log P-value of a hit */
-  int              Ld;               /* # of residues in envelopes */
-  int              d;
-  int              status;
+  float            filtersc;
+  float            seq_score;
+  double           P;
   double           t0;
-  double           t_stage;
 
   /* biased composition HMM filtering */
   t0 = p7_pipeline_WallTime();
@@ -796,6 +786,30 @@ p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
   else filtersc = nullsc;
   pli->time_bias += p7_pipeline_WallTime() - t0;
   pli->n_past_bias++;
+
+  return p7_Pipeline_PostMSVWithFilter(pli, om, bg, sq, ntsq, hitlist, nullsc, usc, filtersc);
+}
+
+int
+p7_Pipeline_PostMSVWithFilter(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
+                              P7_TOPHITS *hitlist, float nullsc, float usc, float filtersc)
+{
+  P7_HIT          *hit     = NULL;     /* ptr to the current hit output data      */
+  float            vfsc, fwdsc;        /* filter scores                           */
+  float            seqbias;
+  float            seq_score;          /* the corrected per-seq bit score */
+  float            sum_score;           /* the corrected reconstruction score for the seq */
+  float            pre_score, pre2_score; /* uncorrected bit scores for seq */
+  double           P;                /* P-value of a hit */
+  double           lnP;              /* log P-value of a hit */
+  int              Ld;               /* # of residues in envelopes */
+  int              d;
+  int              status;
+  double           t0;
+  double           t_stage;
+
+  seq_score = (usc - filtersc) / eslCONST_LOG2;
+  P = esl_gumbel_surv(seq_score,  om->evparam[p7_MMU],  om->evparam[p7_MLAMBDA]);
 
   /* In scan mode, if it passes the MSV filter, read the rest of the profile */
   if (pli->mode == p7_SCAN_MODELS)
@@ -1877,6 +1891,9 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# CUDA MSV H2D time: %.6f sec\n", stats.h2d_seconds);
     fprintf(ofp, "# CUDA MSV kernel time: %.6f sec\n", stats.kernel_seconds);
     fprintf(ofp, "# CUDA MSV D2H time: %.6f sec\n", stats.d2h_seconds);
+    fprintf(ofp, "# CUDA bias H2D time: %.6f sec\n", stats.bias_h2d_seconds);
+    fprintf(ofp, "# CUDA bias kernel time: %.6f sec\n", stats.bias_kernel_seconds);
+    fprintf(ofp, "# CUDA bias D2H time: %.6f sec\n", stats.bias_d2h_seconds);
     fprintf(ofp, "# CUDA MSV sequences: %" PRIu64 "\n", stats.nseqs);
     fprintf(ofp, "# CUDA MSV residues: %" PRIu64 "\n", stats.nres);
   }

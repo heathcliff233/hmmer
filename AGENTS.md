@@ -26,7 +26,9 @@ GPU status snapshot:
 
 - The current `hmmsearch --gpu` path is protein-only, opt-in, and requires `hmmseqdb`/Easel protein `dsqdata` input.
 - The repository applies an Easel `dsqdata` chunk-sizing patch at build time from `patches/easel-dsqdata-open-sized.patch`; do not edit the submodule in place for this work.
-- Direct CUDA MSV speedup exists, but end-to-end dsqdata profmark timing is still slower than CPU in the current state. Treat profmark as the real benchmark, not tutorial-sized inputs.
+- CUDA currently accelerates MSV plus the biased-composition filter in the GPU path. Bias reuses the uploaded MSV sequence batch; avoid a second dsq transfer when adding adjacent GPU stages.
+- Current profmark runs show real end-to-end speedups on representative protein queries, but not universally. Treat `benchmark-data/profmark-current` as the real benchmark, not tutorial-sized inputs.
+- Remaining GPU bottlenecks are mainly CPU survivor continuation after bias, especially Viterbi, Forward, and domain definition. Null scoring is too small to prioritize as a standalone GPU stage.
 
 ## Core Terms
 

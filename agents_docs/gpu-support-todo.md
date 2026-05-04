@@ -1,10 +1,10 @@
 # GPU Support TODO
 
-This is a planning document for future GPU work. Do not treat it as implemented behavior.
+This is a planning document for future GPU work. Cross-check implemented behavior against `agents_docs/gpu-support-progress.md` and the code before relying on any older milestone wording here.
 
 ## Current Direction
 
-The first GPU milestone should be an opt-in CUDA acceleration path for protein `hmmsearch`, focused on the MSV filter stage only.
+The first GPU milestone was an opt-in CUDA acceleration path for protein `hmmsearch`, initially focused on MSV. The current efficiency pass is evaluating later pipeline stages one by one and only keeping stages that are suitable for GPU and fast enough on `profmark`.
 
 Locked decisions:
 
@@ -12,7 +12,7 @@ Locked decisions:
 - Add GPU code under a new additive `src/cuda/` area. Do not make it the active `impl_*` backend and do not replace the selected SSE/NEON/VMX implementation.
 - Start with `hmmsearch --gpu`; leave `phmmer`, `jackhmmer`, `hmmscan`, daemon paths, and nucleotide programs for later milestones.
 - Accelerate full MSV-compatible filtering first, not SSV-only.
-- Keep biased-composition filtering, Viterbi, Forward/Backward, domain definition, null2, hit storage, thresholding, and output on CPU for v1.
+- Keep Viterbi, Forward/Backward, domain definition, null2, hit storage, thresholding, and output on CPU until each is evaluated. Bias filtering has a CUDA batch prototype in the current GPU path because its score boundary is narrow and it can reuse the MSV-uploaded sequence batch.
 - Do not change the pressed HMM database files (`.h3m/.h3i/.h3f/.h3p`) in v1.
 - Treat the old `origin/cuda` branch as reference material only. It targets a substantially different codebase/version and should not be ported mechanically.
 
@@ -27,7 +27,7 @@ For ordinary `hmmsearch`, the relevant early sequence of work is:
 3. `p7_Pipeline()` computes the base null score with `p7_bg_NullOne()`.
 4. `p7_Pipeline()` calls `p7_MSVFilter()`.
 5. The host computes the MSV bit score and Gumbel P-value and applies `pli->F1`.
-6. Survivors continue through bias filtering and later CPU stages.
+6. GPU mode computes the biased-composition filter score in batch after MSV, then survivors continue through later CPU stages.
 
 The MSV implementation is part of the selected optimized implementation. In the SSE path, `src/impl_sse/msvfilter.c:p7_MSVFilter()` first tries `p7_SSVFilter()` and falls back to full byte MSV DP when SSV cannot produce a result. The byte profile conversion rules live in the optimized profile implementation, for example `src/impl_sse/p7_oprofile.c`.
 
@@ -55,6 +55,7 @@ The host should compute or reconstruct:
 
 - sequence null score;
 - MSV `usc`;
+- bias filter pass/fail from the GPU-provided filter score;
 - MSV bit score;
 - MSV Gumbel P-value;
 - `pli->F1` pass/fail;
@@ -73,7 +74,7 @@ Split `p7_Pipeline()` without changing its public CPU behavior:
 The post-MSV helper must preserve:
 
 - zero-length and over-limit sequence behavior;
-- bias filter behavior and `--nobias`/`--max` semantics;
+- bias filter behavior and `--nobias`/`--max` semantics, including the split helper that accepts a precomputed filter score;
 - scan/search mode distinctions, even though v1 GPU should use search mode only;
 - thresholding, counters, domain definition, and output ordering;
 - existing error conventions and `pli->errbuf` usage.
@@ -161,14 +162,16 @@ Performance tests should separately measure:
 - sequence DB read/unpack cost;
 - host-to-device transfer cost;
 - kernel throughput;
+- CUDA bias H2D/kernel/D2H cost when bias is enabled;
 - survivor handoff cost into CPU post-MSV stages;
 - sensitivity of throughput to batch sequence count and residue count.
 
 Current bottleneck interpretation:
 
-- CPU survivor continuation after GPU MSV is larger than CUDA kernel, transfer, and dsqdata read costs in the current full-profmark runs.
+- CPU survivor continuation after GPU MSV/bias is larger than CUDA kernel, transfer, and dsqdata read costs in the current profmark runs.
 - Null scoring is currently too small to justify moving to GPU as an isolated optimization.
-- Bias filtering is measurable, but Viterbi/Forward/domain continuation are larger CPU costs; evaluate those stages before prioritizing a GPU bias filter.
+- Bias filtering is suitable for GPU only when it reuses the MSV sequence batch upload; a separate bias dsq upload erased most of the benefit.
+- Viterbi/Forward/domain continuation are now the main CPU costs to evaluate next. Forward/Backward may be partially suitable but need careful matrix/state ownership; domain definition is less obviously suitable because it is workflow-heavy and depends on posterior/domain data structures.
 
 Use ignored local `benchmark-data/` for larger datasets and run logs.
 
@@ -177,13 +180,13 @@ Current benchmark guidance:
 - Use `profmark` for any serious GPU speed claim.
 - Use `hmmseqdb` to build the target database before running `hmmsearch --gpu`.
 - Keep `--gpu-batch-seqs`, `--gpu-batch-res`, and `--gpu-msv-slack` in the logs.
-- Record both sensitivity deltas and wall-clock timing. Kernel speedup alone is not enough.
+- Record both sensitivity deltas and wall-clock timing. Kernel speedup alone is not enough. Compare each proposed GPU stage against the last accepted GPU baseline, not just against CPU.
 
 ## Deferred Work
 
 Do not include these in the first implementation milestone unless explicitly requested:
 
-- GPU Viterbi, Forward/Backward, null2, or domain definition.
+- GPU Viterbi, Forward/Backward, null2, or domain definition until each stage has a concrete suitability check and benchmark.
 - GPU `hmmscan`, pressed HMM DB format changes, or profile database GPU indexing.
 - GPU `phmmer` or `jackhmmer`.
 - GPU daemon/cache integration.
