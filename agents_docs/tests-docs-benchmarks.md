@@ -68,6 +68,8 @@ Use these for performance-sensitive changes in DP filters, optimized implementat
 
 Benchmark datasets should stay local and untracked. Use ignored `benchmark-data/` for downloaded inputs, generated datasets, and run logs; prefer `.git/info/exclude` for local-only ignores when the data is only for one checkout.
 
+GPU note: the current `hmmsearch --gpu` path expects protein `dsqdata` from `hmmseqdb`, not raw FASTA. The build applies `patches/easel-dsqdata-open-sized.patch` before building Easel, so treat GPU validation as a top-level build-and-run flow, not a direct submodule edit.
+
 ### Protein `profmark` Dataset
 
 `profmark/create-profmark` creates the standard protein sensitivity benchmark dataset. The dataset is not checked in. Build it from external inputs:
@@ -89,6 +91,8 @@ profmark/create-profmark -S 42 benchmark-data/profmark-current/work/pmark benchm
 ```
 
 Expected outputs are `pmark.train.msa`, `pmark.test.fa`, `pmark.tbl`, `pmark.pos`, and `pmark.neg`. `pmark.tbl` includes both successful and failed family splits; filter field 8 for `ok` when selecting benchmarkable families. Validate with `wc -l pmark.tbl pmark.pos pmark.neg` and `easel/miniapps/esl-seqstat pmark.test.fa`.
+
+For GPU work, prefer `benchmark-data/profmark-current/work/pmark.test.fa` plus an `hmmseqdb`-built `pmark.test.gpudb` target database. Keep `--gpu-batch-seqs`, `--gpu-batch-res`, and `--gpu-msv-slack` in the run logs, and record CPU vs GPU wall time, GPU kernel time, transfer time, and any sensitivity differences.
 
 ### Nucleotide Benchmark Data
 

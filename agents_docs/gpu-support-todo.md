@@ -110,6 +110,13 @@ Why construction-time lengths matter:
 
 For v1, `hmmsearch --gpu` should require a GPU-capable protein `dsqdata` database. Ordinary FASTA should remain on the CPU path.
 
+Current implementation status:
+
+- `hmmseqdb` exists and wraps protein `dsqdata` construction for GPU search.
+- `hmmsearch --gpu` now rejects ordinary FASTA input and expects an `hmmseqdb`-built target database.
+- A build-time patch under `patches/easel-dsqdata-open-sized.patch` adjusts Easel chunk sizing for GPU runs; treat that as a bridge, not the final v2 format.
+- The open design gap is a true `dsqdata` v2 length-index extension that stores per-sequence lengths in the database itself rather than relying on chunk unpacking.
+
 Do not conflate this with `makehmmerdb`: `makehmmerdb` is currently the nucleotide/FM-index database builder for `nhmmer`. Nucleotide GPU support should later revisit `makehmmerdb` for long-target length/window metadata, but that is not part of the first protein `hmmsearch` GPU milestone.
 
 ## Build And CLI TODO
@@ -157,6 +164,13 @@ Performance tests should separately measure:
 - sensitivity of throughput to batch sequence count and residue count.
 
 Use ignored local `benchmark-data/` for larger datasets and run logs.
+
+Current benchmark guidance:
+
+- Use `profmark` for any serious GPU speed claim.
+- Use `hmmseqdb` to build the target database before running `hmmsearch --gpu`.
+- Keep `--gpu-batch-seqs`, `--gpu-batch-res`, and `--gpu-msv-slack` in the logs.
+- Record both sensitivity deltas and wall-clock timing. Kernel speedup alone is not enough.
 
 ## Deferred Work
 

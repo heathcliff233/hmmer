@@ -22,6 +22,12 @@ Easel is not a leaf dependency. HMMER uses it for core runtime objects (`ESL_MSA
 
 Search results are reported as hits and domains with bit scores, E-values, coordinates, alignments, and per-stage pipeline statistics. Much of the code exists to make profile HMM searches fast while preserving their statistical behavior.
 
+GPU status snapshot:
+
+- The current `hmmsearch --gpu` path is protein-only, opt-in, and requires `hmmseqdb`/Easel protein `dsqdata` input.
+- The repository applies an Easel `dsqdata` chunk-sizing patch at build time from `patches/easel-dsqdata-open-sized.patch`; do not edit the submodule in place for this work.
+- Direct CUDA MSV speedup exists, but end-to-end dsqdata profmark timing is still slower than CPU in the current state. Treat profmark as the real benchmark, not tutorial-sized inputs.
+
 ## Core Terms
 
 - `homolog`: a sequence related to another by common ancestry.
@@ -86,6 +92,7 @@ Use `agents_docs/` only for files relevant to the task:
 - `agents_docs/parallel-daemon-cache.md`: threads, MPI, daemon programs, sequence/HMM caches.
 - `agents_docs/tests-docs-benchmarks.md`: build targets, tests, docs, benchmarks, local benchmark data.
 - `agents_docs/gpu-support-todo.md`: planned CUDA GPU support, `hmmsearch --gpu`, GPU-capable sequence database construction, and open validation/tuning work.
+- `agents_docs/gpu-support-progress.md`: current GPU implementation status, benchmark results, and remaining gaps.
 
 ## Code Navigation
 
@@ -103,3 +110,5 @@ Prefer existing project patterns and helper APIs over new layering.
 Do not report full configure/build/check verification unless `easel/` is present and the configure/build actually ran. Fresh checkouts need Easel before `autoconf` can regenerate `configure`, because `configure.ac` includes macros from `easel/m4`.
 
 Benchmark datasets are local working data, not repository content. Put downloaded/generated benchmark data under ignored `benchmark-data/`; see `agents_docs/tests-docs-benchmarks.md` for the protein `profmark` dataset and nucleotide benchmark smoke data.
+
+For GPU work, prefer the protein `profmark` dataset plus an `hmmseqdb`-built `dsqdata` target database. Record both CPU and GPU wall time, kernel time, transfer time, batch size, and sensitivity deltas in `agents_docs/gpu-support-progress.md` as the work lands.

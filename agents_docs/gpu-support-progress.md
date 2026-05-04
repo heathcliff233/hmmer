@@ -1,6 +1,6 @@
 # GPU Support Progress
 
-Last updated: 2026-05-04
+Last updated: 2026-05-05
 
 ## Objective
 
@@ -14,6 +14,7 @@ Implement an opt-in pure GPU MSV path for protein `hmmsearch --gpu`, without CPU
 - Build detection is wired through `configure --enable-cuda` and `--with-cuda-arch=sm_XX`.
 - `nvcc` and CUDA runtime libraries are present in the environment.
 - `hmmseqdb` builds existing Easel protein `dsqdata`; `hmmsearch --gpu` rejects ordinary FASTA target input.
+- The Easel `dsqdata` chunk-sizing change is applied at build time from `patches/easel-dsqdata-open-sized.patch`, not edited in place in the submodule.
 
 ## Required Deliverables
 
@@ -68,6 +69,7 @@ Minimum timing evidence to record:
 - 2026-05-04: Stable dsqdata profmark long-profile run on full `pmark.test.gpudb` with `--gpu-batch-seqs 8192 --gpu-batch-res 1572864 --gpu-msv-slack 2`: `ATG2_CAD` CPU 6.190 sec, GPU 8.240 sec, CPU-only 0, GPU-only 0, H2D 0.025552 sec, kernel 1.600307 sec, D2H 0.001135 sec; `Tra1_ring` CPU 4.510 sec, GPU 6.140 sec, CPU-only 0, GPU-only 2, H2D 0.021998 sec, kernel 1.293523 sec, D2H 0.001092 sec; `Nup192` CPU 4.590 sec, GPU 6.050 sec, CPU-only 0, GPU-only 0, H2D 0.021564 sec, kernel 1.272845 sec, D2H 0.001040 sec. This preserves CPU sensitivity but does not show end-to-end speedup on the dsqdata path yet.
 - 2026-05-04: Current direct MSV timing after dsqdata changes: `src/impl_sse/msvfilter_benchmark --gpu -N100000 -L400 tutorial/globins4.hmm` reported CPU MSV wall time 0.105566 sec, CUDA MSV wall time 0.049826 sec, H2D 0.005057 sec, kernel 0.039756 sec, D2H 0.001127 sec, CUDA kernel 149,913.1 Mc/s. Device MSV still speeds up; end-to-end dsqdata search is dominated by reader/unpack and downstream CPU survivor costs.
 - 2026-05-04: Verification after dsqdata integration passed: `make -C easel libeasel.a`, `make -C src hmmsearch hmmseqdb`, `make -C easel esl_dsqdata_utest`, `make -C src generic_msv_utest`, `make -C src/impl_sse msvfilter_utest msvfilter_benchmark`, `easel/esl_dsqdata_utest`, `src/generic_msv_utest`, and `src/impl_sse/msvfilter_utest`.
+- 2026-05-05: Updated repository guidance to reflect the current GPU state: `hmmsearch --gpu` requires `hmmseqdb`/protein `dsqdata`, Easel is patched at build time, and profmark remains the benchmark for GPU claims.
 
 ## Remaining Scope
 
