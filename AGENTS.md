@@ -28,7 +28,8 @@ GPU status snapshot:
 - The repository applies an Easel `dsqdata` chunk-sizing patch at build time from `patches/easel-dsqdata-open-sized.patch`; do not edit the submodule in place for this work.
 - CUDA currently accelerates MSV plus the biased-composition filter in the GPU path. Bias reuses the uploaded MSV sequence batch; avoid a second dsq transfer when adding adjacent GPU stages.
 - Current profmark runs show real end-to-end speedups on representative protein queries, but not universally. Treat `benchmark-data/profmark-current` as the real benchmark, not tutorial-sized inputs.
-- Remaining GPU bottlenecks are mainly CPU survivor continuation after bias, especially Viterbi, Forward, and domain definition. Null scoring is too small to prioritize as a standalone GPU stage.
+- Remaining GPU bottlenecks are mainly CPU survivor continuation after bias. Viterbi is still a logical bottleneck, but the first candidate-only CUDA prototype was rejected as slower and not parity-safe.
+- Forward/Backward is only partially suitable as a simple GPU target: `p7_ForwardParser()` supplies both the F3 score and `P7_OMX` state needed by Backward/domain, so a score-only GPU Forward filter must include the cost of rerunning CPU Forward for F3 survivors. Domain definition, null2, hit storage, thresholding, and output should stay CPU-side for now.
 
 ## Core Terms
 

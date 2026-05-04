@@ -172,7 +172,9 @@ Current bottleneck interpretation:
 - Null scoring is currently too small to justify moving to GPU as an isolated optimization.
 - Bias filtering is suitable for GPU only when it reuses the MSV sequence batch upload; a separate bias dsq upload erased most of the benefit.
 - Viterbi is the next bounded candidate because it remains a scalar filter, but the first candidate-only CUDA prototype was rejected: it was slower on profmark `14-3-3` and lost a CPU hit. Any future attempt needs a different parallelization/memory design plus explicit score/overflow parity against the optimized 16-bit CPU filter before integration.
-- Forward/Backward may be partially suitable but need careful matrix/state ownership because ForwardParser output feeds BackwardParser and domain definition. Domain definition is less obviously suitable because it is workflow-heavy and depends on posterior/domain data structures.
+- Forward/Backward is partially suitable, but the boundary is not just a score. `p7_ForwardParser()` produces the Forward score used for F3 filtering and also writes `P7_OMX` special-state rows/scale factors consumed by `p7_BackwardParser()` and `p7_domaindef_ByPosteriorHeuristics()`. A narrow GPU Forward score prefilter must therefore include the cost of rerunning CPU Forward for F3 survivors, or it must return enough matrix-equivalent state for Backward/domain.
+- Stage-count evidence from `benchmark-data/profmark-current/gpu-stage-suitability/counts-2/logs/profmark-gpu-summary.tsv` shows why Forward is still worth studying: on full `pmark.test.gpudb`, `14-3-3` reduced 287 Viterbi survivors to 4 Forward survivors, and `ATG2_CAD` reduced 542 to 57, with zero hit deltas in that run.
+- Domain definition is a poor near-term standalone GPU target. It runs after the Forward filter has already reduced candidates sharply and it is workflow-heavy: posterior decoding, region/envelope definition, stochastic clustering, null2/domain corrections, and alignment display ownership all interact with `P7_DOMAINDEF` and `P7_TOPHITS`.
 
 Use ignored local `benchmark-data/` for larger datasets and run logs.
 
@@ -181,7 +183,7 @@ Current benchmark guidance:
 - Use `profmark` for any serious GPU speed claim.
 - Use `hmmseqdb` to build the target database before running `hmmsearch --gpu`.
 - Keep `--gpu-batch-seqs`, `--gpu-batch-res`, and `--gpu-msv-slack` in the logs.
-- Record both sensitivity deltas and wall-clock timing. Kernel speedup alone is not enough. Compare each proposed GPU stage against the last accepted GPU baseline, not just against CPU.
+- Record pass counts for MSV, bias, Viterbi, and Forward, plus sensitivity deltas and wall-clock timing. Kernel speedup alone is not enough. Compare each proposed GPU stage against the last accepted GPU baseline, not just against CPU.
 
 ## Deferred Work
 
