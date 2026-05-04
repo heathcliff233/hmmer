@@ -94,6 +94,8 @@ Expected outputs are `pmark.train.msa`, `pmark.test.fa`, `pmark.tbl`, `pmark.pos
 
 For GPU work, prefer `benchmark-data/profmark-current/work/pmark.test.fa` plus an `hmmseqdb`-built `pmark.test.gpudb` target database. Keep `--gpu-batch-seqs`, `--gpu-batch-res`, and `--gpu-msv-slack` in the run logs, and record CPU vs GPU wall time, GPU kernel time, transfer time, CUDA bias timing, and any sensitivity differences.
 
+Use `test-speed/x-hmmsearch-gpu-profmark` to run CPU/GPU query subsets and write `logs/profmark-gpu-summary.tsv`. Use `test-speed/x-hmmsearch-gpu-profmark-summary <summary.tsv>` to aggregate wall time, stage totals, pass counts, sensitivity deltas, and the theoretical upper bound for a free Forward score prefilter that still reruns CPU Forward for F3 survivors.
+
 ### Nucleotide Benchmark Data
 
 There is no separate `profmark`-style nucleotide benchmark dataset checked into this tree. Nucleotide benchmark and regression coverage comes from tutorial/test assets:

@@ -1,0 +1,92 @@
+#! /usr/bin/env python3
+
+import argparse
+import csv
+import statistics
+
+
+FLOAT_COLUMNS = [
+    "cpu_wall",
+    "gpu_wall",
+    "gpu_read",
+    "gpu_meta",
+    "gpu_survivor",
+    "gpu_h2d",
+    "gpu_kernel",
+    "gpu_d2h",
+    "gpu_bias_h2d",
+    "gpu_bias_kernel",
+    "gpu_bias_d2h",
+    "stage_null",
+    "stage_msv_host",
+    "stage_bias",
+    "stage_vit",
+    "stage_fwd",
+    "stage_bck",
+    "stage_domain",
+    "stage_null2_output",
+]
+
+COUNT_COLUMNS = [
+    "cpu_only",
+    "gpu_only",
+    "past_msv",
+    "past_bias",
+    "past_vit",
+    "past_fwd",
+]
+
+
+def as_float(row, key):
+    try:
+        return float(row[key])
+    except (KeyError, ValueError):
+        return 0.0
+
+
+def as_int(row, key):
+    try:
+        return int(row[key])
+    except (KeyError, ValueError):
+        return 0
+
+
+parser = argparse.ArgumentParser(description="Summarize x-hmmsearch-gpu-profmark TSV output")
+parser.add_argument("summary_tsv")
+args = parser.parse_args()
+
+with open(args.summary_tsv, newline="") as fh:
+    rows = list(csv.DictReader(fh, delimiter="\t"))
+
+if not rows:
+    raise SystemExit("no rows in {}".format(args.summary_tsv))
+
+totals = {key: sum(as_float(row, key) for row in rows) for key in FLOAT_COLUMNS}
+counts = {key: sum(as_int(row, key) for row in rows) for key in COUNT_COLUMNS}
+speedups = [as_float(row, "speedup") for row in rows if as_float(row, "speedup") > 0.0]
+
+free_fwd_saved = 0.0
+for row in rows:
+    past_vit = as_int(row, "past_vit")
+    past_fwd = as_int(row, "past_fwd")
+    stage_fwd = as_float(row, "stage_fwd")
+    if past_vit > 0:
+        free_fwd_saved += stage_fwd * (1.0 - (float(past_fwd) / float(past_vit)))
+
+gpu_wall = totals["gpu_wall"]
+cpu_wall = totals["cpu_wall"]
+free_fwd_wall = gpu_wall - free_fwd_saved
+
+print("queries\t{}".format(len(rows)))
+print("cpu_wall\t{:.3f}".format(cpu_wall))
+print("gpu_wall\t{:.3f}".format(gpu_wall))
+print("aggregate_speedup\t{:.3f}".format(cpu_wall / gpu_wall if gpu_wall > 0 else 0.0))
+print("median_speedup\t{:.3f}".format(statistics.median(speedups) if speedups else 0.0))
+for key in COUNT_COLUMNS:
+    print("{}\t{}".format(key, counts[key]))
+for key in FLOAT_COLUMNS[2:]:
+    print("{}\t{:.6f}".format(key, totals[key]))
+print("free_forward_saved\t{:.6f}".format(free_fwd_saved))
+print("free_forward_gpu_wall\t{:.3f}".format(free_fwd_wall))
+print("free_forward_incremental_speedup\t{:.3f}".format(gpu_wall / free_fwd_wall if free_fwd_wall > 0 else 0.0))
+print("free_forward_total_speedup\t{:.3f}".format(cpu_wall / free_fwd_wall if free_fwd_wall > 0 else 0.0))

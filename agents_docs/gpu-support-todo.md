@@ -187,6 +187,7 @@ Current benchmark guidance:
 - Use `hmmseqdb` to build the target database before running `hmmsearch --gpu`.
 - Keep `--gpu-batch-seqs`, `--gpu-batch-res`, and `--gpu-msv-slack` in the logs.
 - Record pass counts for MSV, bias, Viterbi, and Forward, plus sensitivity deltas and wall-clock timing. Kernel speedup alone is not enough. Compare each proposed GPU stage against the last accepted GPU baseline, not just against CPU.
+- Summarize `test-speed/x-hmmsearch-gpu-profmark` output with `test-speed/x-hmmsearch-gpu-profmark-summary <summary.tsv>` before making stage-suitability claims.
 
 ## Deferred Work
 
