@@ -4,7 +4,7 @@ HMMER's common path moves biological sequence/alignment data into HMMER model ob
 
 ## Shared Model/Search Flow
 
-1. Input data comes from Easel:
+1. Input data comes from Easel; see `easel-integration.md` for the library boundary:
    - `ESL_MSA` for multiple sequence alignments.
    - `ESL_SQ` for single query or target sequences.
    - `ESL_SQFILE`, `ESL_MSAFILE`, and `ESL_ALPHABET` own I/O and alphabet detection.

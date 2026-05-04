@@ -5,9 +5,9 @@ HMMER is a C/autotools project centered on profile hidden Markov models. The top
 ## Repository Layout
 
 - `src/`: core HMMER library code, installed CLI programs, auxiliary programs, optimized implementations, daemon/cache code, FM-index code, test drivers, examples, benchmarks, and stats programs.
-- `src/impl_sse`, `src/impl_vmx`, `src/impl_neon`: vectorized acceleration layers selected by `configure`. The active implementation is built as `src/impl`.
-- `libdivsufsort/`: suffix array construction used by `makehmmerdb` for FM-index databases.
-- `easel/`: required external-but-sibling library. It supplies sequence/MSA I/O, alphabets, random utilities, work queues, threads, sqc tests, and autoconf macros.
+- `src/impl_sse`, `src/impl_vmx`, `src/impl_neon`: vectorized acceleration layers selected by `configure`. The active implementation is linked as `src/impl`; see `config-and-optimized-impl.md` for feature gates and generated build artifacts.
+- `libdivsufsort/`: bundled suffix array/BWT construction library used narrowly by `makehmmerdb` for FM-index databases.
+- `easel/`: required external-but-sibling library. It supplies sequence/MSA I/O, alphabets, random utilities, work queues, threads, sqc tests, miniapps, and autoconf macros. See `easel-integration.md` for concrete HMMER/Easel boundaries.
 - `testsuite/`: integration data and `testsuite.sqc`.
 - `documentation/`, `tutorial/`: user guide, man pages, and runnable tutorial material.
 - `profmark/`, `test-speed/`, `autobuild/`: benchmarks, performance harnesses, and automation scripts.

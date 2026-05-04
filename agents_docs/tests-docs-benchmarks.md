@@ -1,6 +1,6 @@
 # Tests, Docs, And Benchmarks
 
-Use `src/Makefile.in` and `testsuite/testsuite.sqc` to choose verification. This checkout currently lacks `easel/`, so full configure/build/check requires restoring Easel first.
+Use `src/Makefile.in` and `testsuite/testsuite.sqc` to choose verification. Full configure/build/check requires the sibling `easel/` tree because HMMER builds and tests Easel as part of the top-level workflow.
 
 ## Build Targets
 
@@ -48,8 +48,8 @@ Run `make check` for broad behavior changes. For a focused change, run the relev
 
 ## Documentation
 
-- `documentation/man/`: installed man pages.
-- `documentation/userguide/`: User Guide and daemon guide sources; it also consumes Easel manpage processing tools.
+- `documentation/man/`: installed man pages. Edit `*.man.in` sources; generated `*.man` files are configured outputs.
+- `documentation/userguide/`: User Guide and daemon guide sources; it also consumes Easel miniapp manpages and Easel manpage processing tools. `titlepage*.tex` and `copyright.tex` are configured from `.in` files.
 - `tutorial/`: sample data used for user-facing examples.
 - `release-notes/`: release history and notes.
 
@@ -60,9 +60,58 @@ If CLI options or output change, update the man page and user guide in the same 
 - `profmark/`: profile search benchmarking and comparison harnesses.
 - `test-speed/`: speed/performance scripts.
 - `autobuild/`: platform build automation.
+- `contrib/`: extra experimental/support code that is not part of the installed program set.
 
 Use these for performance-sensitive changes in DP filters, optimized implementations, FM-index code, or daemon/cache behavior. They are not substitutes for correctness tests.
 
-## Current Worktree Verification Notes
+Benchmark datasets should stay local and untracked. Use ignored `benchmark-data/` for downloaded inputs, generated datasets, and run logs; prefer `.git/info/exclude` for local-only ignores when the data is only for one checkout.
 
-Because `easel/` is missing here, docs-only changes can be verified with file inventory and Git status. Build/test verification should be reported as blocked until Easel is restored.
+### Protein `profmark` Dataset
+
+`profmark/create-profmark` creates the standard protein sensitivity benchmark dataset. The dataset is not checked in. Build it from external inputs:
+
+- Pfam SEED Stockholm alignments, for example `Pfam-A.seed.gz` from the Pfam current release.
+- UniProt/Swiss-Prot FASTA, for example `uniprot_sprot.fasta.gz` from the UniProt current release.
+
+Typical local build:
+
+```sh
+mkdir -p benchmark-data/profmark-current/{downloads,work,logs}
+curl -L -C - --fail -o benchmark-data/profmark-current/downloads/Pfam-A.seed.gz https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release/Pfam-A.seed.gz
+curl -L -C - --fail -o benchmark-data/profmark-current/downloads/uniprot_sprot.fasta.gz https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/complete/uniprot_sprot.fasta.gz
+sha256sum benchmark-data/profmark-current/downloads/Pfam-A.seed.gz benchmark-data/profmark-current/downloads/uniprot_sprot.fasta.gz > benchmark-data/profmark-current/logs/downloads.sha256
+gzip -dc benchmark-data/profmark-current/downloads/Pfam-A.seed.gz > benchmark-data/profmark-current/work/Pfam-A.seed
+gzip -dc benchmark-data/profmark-current/downloads/uniprot_sprot.fasta.gz > benchmark-data/profmark-current/work/uniprot_sprot.fasta
+easel/miniapps/esl-sfetch --index benchmark-data/profmark-current/work/uniprot_sprot.fasta
+profmark/create-profmark -S 42 benchmark-data/profmark-current/work/pmark benchmark-data/profmark-current/work/Pfam-A.seed benchmark-data/profmark-current/work/uniprot_sprot.fasta
+```
+
+Expected outputs are `pmark.train.msa`, `pmark.test.fa`, `pmark.tbl`, `pmark.pos`, and `pmark.neg`. `pmark.tbl` includes both successful and failed family splits; filter field 8 for `ok` when selecting benchmarkable families. Validate with `wc -l pmark.tbl pmark.pos pmark.neg` and `easel/miniapps/esl-seqstat pmark.test.fa`.
+
+### Nucleotide Benchmark Data
+
+There is no separate `profmark`-style nucleotide benchmark dataset checked into this tree. Nucleotide benchmark and regression coverage comes from tutorial/test assets:
+
+- `tutorial/MADE1.sto` and `tutorial/dna_target.fa` exercise `hmmbuild`, `nhmmer`, `nhmmscan`, and `makehmmerdb`.
+- `testsuite/i18-nhmmer-generic.pl` synthesizes a larger pseudochromosome search case.
+- `testsuite/i20-fmindex-core.pl` builds a small FM-index database and checks exact-match behavior; it may be commented out in `testsuite/testsuite.sqc`.
+
+Typical local nucleotide data build:
+
+```sh
+mkdir -p benchmark-data/nucleotide-current/{work,logs}
+cp tutorial/MADE1.sto benchmark-data/nucleotide-current/work/MADE1.sto
+cp tutorial/dna_target.fa benchmark-data/nucleotide-current/work/dna_target.fa
+src/hmmbuild benchmark-data/nucleotide-current/work/MADE1.hmm benchmark-data/nucleotide-current/work/MADE1.sto > benchmark-data/nucleotide-current/logs/hmmbuild-made1.log 2>&1
+src/makehmmerdb benchmark-data/nucleotide-current/work/dna_target.fa benchmark-data/nucleotide-current/work/dna_target.fm > benchmark-data/nucleotide-current/logs/makehmmerdb-dna-target.log 2>&1
+src/nhmmer benchmark-data/nucleotide-current/work/MADE1.hmm benchmark-data/nucleotide-current/work/dna_target.fa > benchmark-data/nucleotide-current/logs/nhmmer-made1-fasta.out 2> benchmark-data/nucleotide-current/logs/nhmmer-made1-fasta.err
+src/nhmmer benchmark-data/nucleotide-current/work/MADE1.hmm benchmark-data/nucleotide-current/work/dna_target.fm > benchmark-data/nucleotide-current/logs/nhmmer-made1-fm.out 2> benchmark-data/nucleotide-current/logs/nhmmer-made1-fm.err
+src/hmmpress -f benchmark-data/nucleotide-current/work/MADE1.hmm > benchmark-data/nucleotide-current/logs/hmmpress-made1.log 2>&1
+src/nhmmscan benchmark-data/nucleotide-current/work/MADE1.hmm benchmark-data/nucleotide-current/work/dna_target.fa > benchmark-data/nucleotide-current/logs/nhmmscan-made1.out 2> benchmark-data/nucleotide-current/logs/nhmmscan-made1.err
+```
+
+This is a functional local nucleotide benchmark/smoke dataset, not a full sensitivity benchmark.
+
+## Easel Verification Notes
+
+Easel is part of full verification, not an optional external package. `make check` runs Easel's SQC suite before HMMER's suite, and HMMER tests use `easel/devkit/sqc`. Benchmark data workflows also use Easel miniapps such as `esl-sfetch`, `esl-afetch`, `esl-shuffle`, `esl-seqstat`, and `esl-reformat`.

@@ -30,7 +30,9 @@ Unlike `nhmmer`, `nhmmscan` is not an FM-index target search path; it reads pres
 - writes metadata followed by FM data blocks,
 - can build forward-only indexes, though HMMER search normally needs both directions.
 
-Start with `src/makehmmerdb.c`, then `src/fm_general.c`, `src/fm_alphabet.c`, and `libdivsufsort/`.
+Start with `src/makehmmerdb.c`, then `src/fm_general.c`, `src/fm_alphabet.c`, and `libdivsufsort/`. `libdivsufsort` is bundled source for suffix-array/BWT construction; ordinary HMMER search logic should stay in the HMMER FM-index modules, not inside the vendored library.
+
+For local benchmark data, use ignored `benchmark-data/nucleotide-current/` rather than adding generated nucleotide assets to Git. This checkout does not contain a separate standard nucleotide sensitivity benchmark dataset analogous to protein `profmark`; use `tutorial/MADE1.sto`, `tutorial/dna_target.fa`, `testsuite/i18-nhmmer-generic.pl`, and `testsuite/i20-fmindex-core.pl` for nucleotide benchmark/regression coverage.
 
 ## FM Structs
 
