@@ -794,20 +794,34 @@ int
 p7_Pipeline_PostMSVWithFilter(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
                               P7_TOPHITS *hitlist, float nullsc, float usc, float filtersc)
 {
-  P7_HIT          *hit     = NULL;     /* ptr to the current hit output data      */
-  float            vfsc, fwdsc;        /* filter scores                           */
-  float            seqbias;
-  float            seq_score;          /* the corrected per-seq bit score */
-  float            sum_score;           /* the corrected reconstruction score for the seq */
-  float            pre_score, pre2_score; /* uncorrected bit scores for seq */
-  double           P;                /* P-value of a hit */
-  double           lnP;              /* log P-value of a hit */
-  int              Ld;               /* # of residues in envelopes */
-  int              d;
+  float            fwdsc;             /* Forward score                            */
+  int              status;
+  int              passed;
+  double           t0;
+
+  status = p7_Pipeline_PostMSVWithFilterPreFwd(pli, om, bg, sq, usc, filtersc, &passed);
+  if (status != eslOK || !passed) return status;
+
+
+  /* Parse it with Forward and obtain its real Forward score. */
+  t0 = p7_pipeline_WallTime();
+  p7_ForwardParser(sq->dsq, sq->n, om, pli->oxf, &fwdsc);
+  pli->time_fwd += p7_pipeline_WallTime() - t0;
+
+  return p7_Pipeline_PostFwd(pli, om, bg, sq, ntsq, hitlist, nullsc, filtersc, fwdsc);
+}
+
+int
+p7_Pipeline_PostMSVWithFilterPreFwd(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq,
+                                    float usc, float filtersc, int *ret_passed)
+{
+  float            vfsc;             /* Viterbi score                            */
+  float            seq_score;        /* corrected per-seq bit score              */
+  double           P;                /* P-value of a hit                         */
   int              status;
   double           t0;
-  double           t_stage;
 
+  if (ret_passed) *ret_passed = FALSE;
   seq_score = (usc - filtersc) / eslCONST_LOG2;
   P = esl_gumbel_surv(seq_score,  om->evparam[p7_MMU],  om->evparam[p7_MLAMBDA]);
 
@@ -823,19 +837,34 @@ p7_Pipeline_PostMSVWithFilter(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, cons
   if (P > pli->F2)
     {
       t0 = p7_pipeline_WallTime();
-      p7_ViterbiFilter(sq->dsq, sq->n, om, pli->oxf, &vfsc);  
+      p7_ViterbiFilter(sq->dsq, sq->n, om, pli->oxf, &vfsc);
       pli->time_vit += p7_pipeline_WallTime() - t0;
       seq_score = (vfsc-filtersc) / eslCONST_LOG2;
       P  = esl_gumbel_surv(seq_score,  om->evparam[p7_VMU],  om->evparam[p7_VLAMBDA]);
       if (P > pli->F2) return eslOK;
     }
   pli->n_past_vit++;
+  if (ret_passed) *ret_passed = TRUE;
+  return eslOK;
+}
 
+int
+p7_Pipeline_PostFwd(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
+                    P7_TOPHITS *hitlist, float nullsc, float filtersc, float fwdsc)
+{
+  P7_HIT          *hit     = NULL;     /* ptr to the current hit output data      */
+  float            seqbias;
+  float            seq_score;          /* the corrected per-seq bit score */
+  float            sum_score;           /* the corrected reconstruction score for the seq */
+  float            pre_score, pre2_score; /* uncorrected bit scores for seq */
+  double           P;                /* P-value of a hit */
+  double           lnP;              /* log P-value of a hit */
+  int              Ld;               /* # of residues in envelopes */
+  int              d;
+  int              status;
+  double           t0;
+  double           t_stage;
 
-  /* Parse it with Forward and obtain its real Forward score. */
-  t0 = p7_pipeline_WallTime();
-  p7_ForwardParser(sq->dsq, sq->n, om, pli->oxf, &fwdsc);
-  pli->time_fwd += p7_pipeline_WallTime() - t0;
   seq_score = (fwdsc-filtersc) / eslCONST_LOG2;
   P = esl_exp_surv(seq_score,  om->evparam[p7_FTAU],  om->evparam[p7_FLAMBDA]);
   if (P > pli->F3) return eslOK;
