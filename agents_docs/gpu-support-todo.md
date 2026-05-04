@@ -151,6 +151,7 @@ Required test categories:
 - Compatibility tests showing existing v1 `dsqdata` readers still work.
 - `hmmseqdb` smoke tests for protein FASTA input and rejection of unsupported inputs.
 - CUDA MSV parity against CPU `p7_MSVFilter()` across varied model sizes, residue distributions, and sequence lengths.
+- CUDA SSV shortcut parity with the optimized CPU `p7_MSVFilter()` path. The CPU SSE path first tries `p7_SSVFilter()` and accepts that score when it is safe enough, only falling back to full MSV on `eslENORESULT`; GPU v1 currently runs full MSV only, so some borderline CPU-reported hits can differ. Track this as a deferred sensitivity/parity task, not an efficiency blocker for the current MSV-only tuning pass.
 - Overflow/high-score behavior parity.
 - End-to-end `hmmsearch --gpu` versus CPU `hmmsearch` on small deterministic fixtures.
 - Error tests for non-CUDA builds, missing devices, non-GPU-capable sequence databases, and invalid options.

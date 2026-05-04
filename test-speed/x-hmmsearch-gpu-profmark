@@ -36,7 +36,12 @@ def parse_real(path):
 def parse_stat(path, label):
     for line in pathlib.Path(path).read_text().splitlines():
         if label in line:
-            return line.split()[5]
+            for field in line.split():
+                try:
+                    float(field)
+                    return field
+                except ValueError:
+                    pass
     return "NA"
 
 
@@ -54,9 +59,9 @@ parser.add_argument("top_builddir")
 parser.add_argument("profmark_workdir")
 parser.add_argument("outdir")
 parser.add_argument("queries", nargs="+")
-parser.add_argument("--gpu-batch-seqs", default="8192")
-parser.add_argument("--gpu-batch-res", default="1572864")
-parser.add_argument("--gpu-msv-slack", default="2")
+parser.add_argument("--gpu-batch-seqs", default="32768")
+parser.add_argument("--gpu-batch-res", default="8000000")
+parser.add_argument("--gpu-msv-slack", default="0")
 args = parser.parse_args()
 
 top = pathlib.Path(args.top_builddir)
@@ -79,7 +84,7 @@ if not (gpu_targetdb.with_suffix(gpu_targetdb.suffix + ".dsqi")).exists():
 
 summary = logs / "profmark-gpu-summary.tsv"
 with summary.open("w") as s:
-    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tgpu_h2d\tgpu_kernel\tgpu_d2h\n")
+    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tgpu_read\tgpu_meta\tgpu_survivor\tgpu_h2d\tgpu_kernel\tgpu_d2h\tstage_null\tstage_msv_host\tstage_bias\tstage_vit\tstage_fwd\tstage_bck\tstage_domain\tstage_null2_output\n")
     for q in args.queries:
         sto = queries / (q + ".sto")
         hmm = queries / (q + ".hmm")
@@ -106,6 +111,19 @@ with summary.open("w") as s:
         h2d = parse_stat(gpu_out, "CUDA MSV H2D time:")
         kernel = parse_stat(gpu_out, "CUDA MSV kernel time:")
         d2h = parse_stat(gpu_out, "CUDA MSV D2H time:")
-        s.write("{}\t{:.3f}\t{:.3f}\t{:.3f}\t{}\t{}\t{}\t{}\t{}\n".format(
+        gpu_read = parse_stat(gpu_out, "GPU dsqdata read/unpack time:")
+        gpu_meta = parse_stat(gpu_out, "GPU sequence metadata time:")
+        gpu_survivor = parse_stat(gpu_out, "GPU CPU survivor time:")
+        stage_null = parse_stat(gpu_out, "Stage null time:")
+        stage_msv_host = parse_stat(gpu_out, "Stage MSV host time:")
+        stage_bias = parse_stat(gpu_out, "Stage bias time:")
+        stage_vit = parse_stat(gpu_out, "Stage Viterbi time:")
+        stage_fwd = parse_stat(gpu_out, "Stage Forward time:")
+        stage_bck = parse_stat(gpu_out, "Stage Backward time:")
+        stage_domain = parse_stat(gpu_out, "Stage domain time:")
+        stage_null2_output = parse_stat(gpu_out, "Stage null2/output time:")
+        s.write("{}\t{:.3f}\t{:.3f}\t{:.3f}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(
             q, cpu_wall, gpu_wall, cpu_wall / gpu_wall if gpu_wall > 0 else 0.0,
-            len(cpu_names - gpu_names), len(gpu_names - cpu_names), h2d, kernel, d2h))
+            len(cpu_names - gpu_names), len(gpu_names - cpu_names),
+            gpu_read, gpu_meta, gpu_survivor, h2d, kernel, d2h,
+            stage_null, stage_msv_host, stage_bias, stage_vit, stage_fwd, stage_bck, stage_domain, stage_null2_output))

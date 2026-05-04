@@ -49,6 +49,7 @@ src/hmmfetch
 src/hmmlogo
 src/hmmpgmd
 src/hmmpgmd_shard
+src/hmmseqdb
 src/hmmpress
 src/hmmscan
 src/hmmsearch

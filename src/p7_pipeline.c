@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h> 
+#include <sys/time.h>
 
 #include "easel.h"
 #include "esl_exponential.h"
@@ -33,6 +34,14 @@ typedef struct {
   float            *scores;
   float            *fwd_emissions_arr;
 } P7_PIPELINE_LONGTARGET_OBJS;
+
+static double
+p7_pipeline_WallTime(void)
+{
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (double) tv.tv_sec + (double) tv.tv_usec * 1e-6;
+}
 
 
 /*****************************************************************
@@ -245,6 +254,19 @@ p7_pipeline_Create(const ESL_GETOPTS *go, int M_hint, int L_hint, int long_targe
   pli->pos_past_bias   = 0;
   pli->pos_past_vit    = 0;
   pli->pos_past_fwd    = 0;
+  pli->pos_output      = 0;
+  pli->time_null       = 0.0;
+  pli->time_msv        = 0.0;
+  pli->time_bias       = 0.0;
+  pli->time_vit        = 0.0;
+  pli->time_fwd        = 0.0;
+  pli->time_bck        = 0.0;
+  pli->time_domain     = 0.0;
+  pli->time_null2      = 0.0;
+  pli->time_output     = 0.0;
+  pli->time_gpu_read   = 0.0;
+  pli->time_gpu_meta   = 0.0;
+  pli->time_gpu_survivor = 0.0;
   pli->mode            = mode;
   pli->show_accessions = (go && esl_opt_GetBoolean(go, "--acc")   ? TRUE  : FALSE);
   pli->show_alignments = (go && esl_opt_GetBoolean(go, "--noali") ? FALSE : TRUE);
@@ -646,6 +668,19 @@ p7_pipeline_Merge(P7_PIPELINE *p1, P7_PIPELINE *p2)
   p1->pos_past_fwd  += p2->pos_past_fwd;
   p1->pos_output    += p2->pos_output;
 
+  p1->time_null       += p2->time_null;
+  p1->time_msv        += p2->time_msv;
+  p1->time_bias       += p2->time_bias;
+  p1->time_vit        += p2->time_vit;
+  p1->time_fwd        += p2->time_fwd;
+  p1->time_bck        += p2->time_bck;
+  p1->time_domain     += p2->time_domain;
+  p1->time_null2      += p2->time_null2;
+  p1->time_output     += p2->time_output;
+  p1->time_gpu_read   += p2->time_gpu_read;
+  p1->time_gpu_meta   += p2->time_gpu_meta;
+  p1->time_gpu_survivor += p2->time_gpu_survivor;
+
   if (p1->Z_setby == p7_ZSETBY_NTARGETS)
     {
       p1->Z += (p1->mode == p7_SCAN_MODELS) ? p2->nmodels : p2->nseqs;
@@ -703,6 +738,7 @@ p7_Pipeline(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, cons
   float            nullsc;             /* null model score                        */
   double           P;                  /* P-value of a hit                         */
   float            seq_score;          /* MSV bit score                             */
+  double           t0;
   
   if (sq->n == 0) return eslOK;    /* silently skip length 0 seqs; they'd cause us all sorts of weird problems */
   if (sq->n > 100000) ESL_EXCEPTION(eslETYPE, "Target sequence length > 100K, over comparison pipeline limit.\n(Did you mean to use nhmmer/nhmmscan?)");
@@ -710,10 +746,14 @@ p7_Pipeline(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, cons
   p7_omx_GrowTo(pli->oxf, om->M, 0, sq->n);    /* expand the one-row omx if needed */
 
   /* Base null model score (we could calculate this in NewSeq(), for a scan pipeline) */
+  t0 = p7_pipeline_WallTime();
   p7_bg_NullOne  (bg, sq->dsq, sq->n, &nullsc);
+  pli->time_null += p7_pipeline_WallTime() - t0;
 
   /* First level filter: the MSV filter, multihit with <om> */
+  t0 = p7_pipeline_WallTime();
   p7_MSVFilter(sq->dsq, sq->n, om, pli->oxf, &usc);
+  pli->time_msv += p7_pipeline_WallTime() - t0;
   seq_score = (usc - nullsc) / eslCONST_LOG2;
   P = esl_gumbel_surv(seq_score,  om->evparam[p7_MMU],  om->evparam[p7_MLAMBDA]);
   if (P > pli->F1) return eslOK;
@@ -738,16 +778,23 @@ p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
   int              Ld;               /* # of residues in envelopes */
   int              d;
   int              status;
+  double           t0;
+  double           t_stage;
 
   /* biased composition HMM filtering */
+  t0 = p7_pipeline_WallTime();
   if (pli->do_biasfilter)
     {
       p7_bg_FilterScore(bg, sq->dsq, sq->n, &filtersc);
       seq_score = (usc - filtersc) / eslCONST_LOG2;
       P = esl_gumbel_surv(seq_score,  om->evparam[p7_MMU],  om->evparam[p7_MLAMBDA]);
-      if (P > pli->F1) return eslOK;
+      if (P > pli->F1) {
+        pli->time_bias += p7_pipeline_WallTime() - t0;
+        return eslOK;
+      }
     }
   else filtersc = nullsc;
+  pli->time_bias += p7_pipeline_WallTime() - t0;
   pli->n_past_bias++;
 
   /* In scan mode, if it passes the MSV filter, read the rest of the profile */
@@ -761,7 +808,9 @@ p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
   /* Second level filter: ViterbiFilter(), multihit with <om> */
   if (P > pli->F2)
     {
+      t0 = p7_pipeline_WallTime();
       p7_ViterbiFilter(sq->dsq, sq->n, om, pli->oxf, &vfsc);  
+      pli->time_vit += p7_pipeline_WallTime() - t0;
       seq_score = (vfsc-filtersc) / eslCONST_LOG2;
       P  = esl_gumbel_surv(seq_score,  om->evparam[p7_VMU],  om->evparam[p7_VLAMBDA]);
       if (P > pli->F2) return eslOK;
@@ -770,7 +819,9 @@ p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
 
 
   /* Parse it with Forward and obtain its real Forward score. */
+  t0 = p7_pipeline_WallTime();
   p7_ForwardParser(sq->dsq, sq->n, om, pli->oxf, &fwdsc);
+  pli->time_fwd += p7_pipeline_WallTime() - t0;
   seq_score = (fwdsc-filtersc) / eslCONST_LOG2;
   P = esl_exp_surv(seq_score,  om->evparam[p7_FTAU],  om->evparam[p7_FLAMBDA]);
   if (P > pli->F3) return eslOK;
@@ -778,9 +829,13 @@ p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
 
   /* ok, it's for real. Now a Backwards parser pass, and hand it to domain definition workflow */
   p7_omx_GrowTo(pli->oxb, om->M, 0, sq->n);
+  t0 = p7_pipeline_WallTime();
   p7_BackwardParser(sq->dsq, sq->n, om, pli->oxf, pli->oxb, NULL);
+  pli->time_bck += p7_pipeline_WallTime() - t0;
 
+  t0 = p7_pipeline_WallTime();
   status = p7_domaindef_ByPosteriorHeuristics(sq, ntsq, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, FALSE, NULL, NULL, NULL);
+  pli->time_domain += p7_pipeline_WallTime() - t0;
   if (status != eslOK) ESL_FAIL(status, pli->errbuf, "domain definition workflow failure"); /* eslERANGE can happen  */
   if (pli->ddef->nregions   == 0) return eslOK; /* score passed threshold but there's no discrete domains here       */
   if (pli->ddef->nenvelopes == 0) return eslOK; /* rarer: region was found, stochastic clustered, no envelopes found */
@@ -788,6 +843,7 @@ p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
 
 
   /* Calculate the null2-corrected per-seq score */
+  t0 = p7_pipeline_WallTime();
   if (pli->do_null2)
     {
       seqbias = esl_vec_FSum(pli->ddef->n2sc, sq->n+1);
@@ -842,6 +898,7 @@ p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
       seq_score = sum_score;
       pre_score = pre2_score;
     }
+  pli->time_null2 += p7_pipeline_WallTime() - t0;
 
   /* Apply thresholding and determine whether to put this
    * target into the hit list. E-value thresholding may
@@ -849,6 +906,7 @@ p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
    * than eventually reported.
    */
   lnP =  esl_exp_logsurv (seq_score,  om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA]);
+  t_stage = p7_pipeline_WallTime();
   if (p7_pli_TargetReportable(pli, seq_score, lnP))
     {
       p7_tophits_CreateNextHit(hitlist, &hit);
@@ -945,6 +1003,7 @@ p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
       }
 	  
     }
+  pli->time_output += p7_pipeline_WallTime() - t_stage;
 
   return eslOK;
 }
@@ -1812,12 +1871,23 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
   if (pli->cuda_engine != NULL) {
     P7_CUDA_MSV_STATS stats;
     p7_cuda_engine_GetStats(pli->cuda_engine, &stats);
+    fprintf(ofp, "# GPU dsqdata read/unpack time: %.6f sec\n", pli->time_gpu_read);
+    fprintf(ofp, "# GPU sequence metadata time: %.6f sec\n", pli->time_gpu_meta);
+    fprintf(ofp, "# GPU CPU survivor time: %.6f sec\n", pli->time_gpu_survivor);
     fprintf(ofp, "# CUDA MSV H2D time: %.6f sec\n", stats.h2d_seconds);
     fprintf(ofp, "# CUDA MSV kernel time: %.6f sec\n", stats.kernel_seconds);
     fprintf(ofp, "# CUDA MSV D2H time: %.6f sec\n", stats.d2h_seconds);
     fprintf(ofp, "# CUDA MSV sequences: %" PRIu64 "\n", stats.nseqs);
     fprintf(ofp, "# CUDA MSV residues: %" PRIu64 "\n", stats.nres);
   }
+  fprintf(ofp, "# Stage null time: %.6f sec\n", pli->time_null);
+  fprintf(ofp, "# Stage MSV host time: %.6f sec\n", pli->time_msv);
+  fprintf(ofp, "# Stage bias time: %.6f sec\n", pli->time_bias);
+  fprintf(ofp, "# Stage Viterbi time: %.6f sec\n", pli->time_vit);
+  fprintf(ofp, "# Stage Forward time: %.6f sec\n", pli->time_fwd);
+  fprintf(ofp, "# Stage Backward time: %.6f sec\n", pli->time_bck);
+  fprintf(ofp, "# Stage domain time: %.6f sec\n", pli->time_domain);
+  fprintf(ofp, "# Stage null2/output time: %.6f sec\n", pli->time_null2 + pli->time_output);
 
   return eslOK;
 }

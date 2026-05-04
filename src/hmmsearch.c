@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 
 #include "easel.h"
 #include "esl_alphabet.h"
@@ -47,8 +48,16 @@ typedef struct {
   P7_CUDA_ENGINE   *cuda_engine; /* optional GPU MSV engine                 */
   P7_CUDA_MSVPROFILE *cuda_msv;  /* optional GPU MSV profile                */
   int               gpu_batch_seqs; /* target sequences per GPU MSV batch     */
-  float             gpu_msv_slack;  /* extra nats for GPU MSV survivor handoff */
+  float             gpu_msv_slack;  /* optional extra nats for experiments     */
 } WORKER_INFO;
+
+static double
+hmmsearch_WallTime(void)
+{
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (double) tv.tv_sec + (double) tv.tv_usec * 1e-6;
+}
 
 #define REPOPTS     "-E,-T,--cut_ga,--cut_nc,--cut_tc"
 #define DOMREPOPTS  "--domE,--domT,--cut_ga,--cut_nc,--cut_tc"
@@ -99,9 +108,9 @@ static ESL_OPTIONS options[] = {
   { "--nobias",     eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL, "--max",          "turn off composition bias filter",                             7 },
   { "--gpu",        eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, MPIOPTS,          "use CUDA GPU for the MSV filter (no CPU fallback)",            7 },
   { "--gpu-device", eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,           "CUDA device id for --gpu",                                     99 },
-  { "--gpu-batch-seqs", eslARG_INT, "8192", NULL, "n>0", NULL, "--gpu", NULL,           "number of target sequences per CUDA MSV batch",                99 },
-  { "--gpu-batch-res", eslARG_INT, "1572864", NULL, "n>0", NULL, "--gpu", NULL,         "approximate target residues per CUDA MSV batch",               99 },
-  { "--gpu-msv-slack", eslARG_REAL,  "4.0", NULL, "x>=0", NULL, "--gpu", NULL,           "extra nats added to GPU MSV scores before CPU continuation",   99 },
+  { "--gpu-batch-seqs", eslARG_INT, "32768", NULL, "n>0", NULL, "--gpu", NULL,          "maximum target sequences per CUDA MSV batch",                  99 },
+  { "--gpu-batch-res", eslARG_INT, "8000000", NULL, "n>0", NULL, "--gpu", NULL,         "approximate target residues per CUDA MSV batch",               99 },
+  { "--gpu-msv-slack", eslARG_REAL,  "0.0", NULL, "x>=0", NULL, "--gpu", NULL,           "experimental extra nats added to GPU MSV scores",              99 },
 
 /* Other options */
   { "--nonull2",    eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL,  NULL,            "turn off biased composition score corrections",               12 },
@@ -324,8 +333,8 @@ main(int argc, char **argv)
       p7_Fail("--gpu requires an hmmseqdb/dsqdata target database; --tformat is only for ordinary sequence files\n");
     if (esl_opt_IsUsed(go, "--restrictdb_stkey") || esl_opt_IsUsed(go, "--restrictdb_n"))
       p7_Fail("--gpu does not currently support restricted target database ranges\n");
-    if (esl_opt_GetInteger(go, "--gpu-batch-res") > 1572864)
-      p7_Fail("--gpu-batch-res is currently limited to 1572864 residues for dsqdata safety\n");
+    if (esl_opt_GetInteger(go, "--gpu-batch-res") > 100000000)
+      p7_Fail("--gpu-batch-res is currently limited to 100000000 residues for CUDA MSV v1\n");
   }
 
 
@@ -1376,6 +1385,8 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
   int *gpu_statuses = NULL;
   ESL_DSQ *dbsq_dsqmem = NULL;
   int64_t  dbsq_salloc = 0;
+  int      gpu_capacity = info->gpu_batch_seqs > 0 ? info->gpu_batch_seqs : eslDSQDATA_CHUNK_MAXSEQ;
+  double   t0;
 
   if (info->cuda_engine != NULL) {
     if (dd == NULL) return eslEINVAL;
@@ -1383,19 +1394,24 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
     if (dbsq == NULL) { status = eslEMEM; goto ERROR; }
     dbsq_dsqmem = dbsq->dsq;
     dbsq_salloc = dbsq->salloc;
-    ESL_ALLOC(gpu_scores, sizeof(float) * eslDSQDATA_CHUNK_MAXSEQ);
-    ESL_ALLOC(gpu_statuses, sizeof(int) * eslDSQDATA_CHUNK_MAXSEQ);
+    ESL_ALLOC(gpu_scores, sizeof(float) * gpu_capacity);
+    ESL_ALLOC(gpu_statuses, sizeof(int) * gpu_capacity);
     while (n_targetseqs == -1 || seq_cnt < n_targetseqs) {
+      t0 = hmmsearch_WallTime();
       sstatus = esl_dsqdata_Read(dd, &chu);
+      info->pli->time_gpu_read += hmmsearch_WallTime() - t0;
       if (sstatus != eslOK) break;
-      if (info->gpu_batch_seqs > 0 && chu->N > info->gpu_batch_seqs)
-        p7_Fail("--gpu-batch-seqs %d is smaller than dsqdata chunk size %d; rebuild or use --gpu-batch-seqs >= %d\n",
-                info->gpu_batch_seqs, chu->N, chu->N);
+      if (chu->N > gpu_capacity)
+        p7_Fail("--gpu-batch-seqs %d is smaller than dsqdata chunk size %d; use --gpu-batch-seqs >= %d\n",
+                gpu_capacity, chu->N, chu->N);
 
+      t0 = hmmsearch_WallTime();
       status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+      info->pli->time_msv += hmmsearch_WallTime() - t0;
       if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch MSV failed: %s\n", errbuf);
 
       for (i = 0; i < chu->N && (n_targetseqs == -1 || seq_cnt < n_targetseqs); i++, seq_cnt++) {
+        t0 = hmmsearch_WallTime();
         dbsq->dsq    = dbsq_dsqmem;
         dbsq->salloc = dbsq_salloc;
         esl_sq_Reuse(dbsq);
@@ -1406,20 +1422,25 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
         if (status != eslOK) goto ERROR;
         dbsq->tax_id = chu->taxid[i];
         dbsq->dsq    = chu->dsq[i];
+        info->pli->time_gpu_meta += hmmsearch_WallTime() - t0;
 
         p7_pli_NewSeq(info->pli, dbsq);
         if (dbsq->n == 0) { dbsq->dsq = NULL; p7_pipeline_Reuse(info->pli); continue; }
         if (dbsq->n > 100000) ESL_EXCEPTION(eslETYPE, "Target sequence length > 100K, over comparison pipeline limit.\n(Did you mean to use nhmmer/nhmmscan?)");
+        t0 = hmmsearch_WallTime();
         p7_bg_NullOne(info->bg, dbsq->dsq, dbsq->n, &nullsc);
+        info->pli->time_null += hmmsearch_WallTime() - t0;
         usc = gpu_scores[i];
         seq_score = (usc - nullsc) / eslCONST_LOG2;
         P = (gpu_statuses[i] == eslERANGE) ? 0.0 : esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
-        if (P <= info->pli->F1 || seq_score >= 0.0) {
+        if (P <= info->pli->F1) {
           p7_bg_SetLength(info->bg, dbsq->n);
           p7_oprofile_ReconfigLength(info->om, dbsq->n);
           p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
           info->pli->n_past_msv++;
+          t0 = hmmsearch_WallTime();
           p7_Pipeline_PostMSV(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack);
+          info->pli->time_gpu_survivor += hmmsearch_WallTime() - t0;
         }
         p7_pipeline_Reuse(info->pli);
         dbsq->dsq = NULL;

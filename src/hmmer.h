@@ -1243,6 +1243,20 @@ typedef struct p7_pipeline_s {
   uint64_t      pos_past_fwd;	/* # positions that pass ForwardFilter()  (used for nhmmer) */
   uint64_t      pos_output;	    /* # positions that make it to the final output (used for nhmmer) */
 
+  /* Optional stage timing, accumulated as elapsed wall seconds.              */
+  double        time_null;       /* base null model scoring                    */
+  double        time_msv;        /* CPU MSV filter, or GPU MSV host call wall  */
+  double        time_bias;       /* biased-composition filter                  */
+  double        time_vit;        /* Viterbi filter                             */
+  double        time_fwd;        /* Forward filter                             */
+  double        time_bck;        /* Backward parser                            */
+  double        time_domain;     /* domain definition workflow                 */
+  double        time_null2;      /* null2/reconstruction scoring               */
+  double        time_output;     /* hit object construction/threshold prep     */
+  double        time_gpu_read;   /* dsqdata read/unpack wall time for GPU path */
+  double        time_gpu_meta;   /* ESL_SQ metadata setup in GPU path          */
+  double        time_gpu_survivor; /* CPU post-MSV continuation in GPU path     */
+
   enum p7_pipemodes_e mode;    	/* p7_SCAN_MODELS | p7_SEARCH_SEQS          */
   int           long_targets;   /* TRUE if the target sequences are expected to be very long (e.g. dna chromosome search in nhmmer) */
   int           strands;         /*  p7_STRAND_TOPONLY  | p7_STRAND_BOTTOMONLY |  p7_STRAND_BOTH */

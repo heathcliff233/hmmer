@@ -18,7 +18,7 @@ index cc03cae..d5e3436 100644
  {
    ESL_DSQDATA *dd        = NULL;
    int          bufsize   = 4096;
-@@ -168,6 +177,8 @@ esl_dsqdata_Open(ESL_ALPHABET **byp_abc, char *basename, int nconsumers, ESL_DSQ
+@@ -169,6 +178,8 @@ esl_dsqdata_Open(ESL_ALPHABET **byp_abc, char *basename, int nconsumers, ESL_DSQ
 
    ESL_DASSERT1(( nconsumers > 0   ));
    ESL_DASSERT1(( byp_abc  != NULL ));  // either *byp_abc == NULL or *byp_abc = the caller's expected alphabet.
@@ -27,7 +27,7 @@ index cc03cae..d5e3436 100644
 
    ESL_ALLOC(dd, sizeof(ESL_DSQDATA));
    dd->stubfp          = NULL;
-@@ -186,8 +197,8 @@ esl_dsqdata_Open(ESL_ALPHABET **byp_abc, char *basename, int nconsumers, ESL_DSQ
+@@ -187,8 +198,8 @@ esl_dsqdata_Open(ESL_ALPHABET **byp_abc, char *basename, int nconsumers, ESL_DSQ
    dd->nseq            = 0;
    dd->nres            = 0;
 

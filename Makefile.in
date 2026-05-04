@@ -86,7 +86,7 @@ endif
 
 patch-easel:
 	@if test -f ${srcdir}/patches/easel-dsqdata-open-sized.patch; then \
-	  cd ${ESLDIR} && { patch -p1 --dry-run < ../${srcdir}/patches/easel-dsqdata-open-sized.patch >/dev/null 2>&1 && patch -p1 < ../${srcdir}/patches/easel-dsqdata-open-sized.patch || patch -p1 -R --dry-run < ../${srcdir}/patches/easel-dsqdata-open-sized.patch >/dev/null 2>&1; }; \
+	  cd ${ESLDIR} && { patch -p1 --ignore-whitespace --dry-run < ../${srcdir}/patches/easel-dsqdata-open-sized.patch >/dev/null 2>&1 && patch -p1 --ignore-whitespace < ../${srcdir}/patches/easel-dsqdata-open-sized.patch || patch -p1 -R --ignore-whitespace --dry-run < ../${srcdir}/patches/easel-dsqdata-open-sized.patch >/dev/null 2>&1; }; \
 	fi
 
 # all: Compile all documented executables.

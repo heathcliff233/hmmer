@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "easel.h"
 #include "esl_alphabet.h"
@@ -18,6 +19,7 @@ static ESL_OPTIONS options[] = {
   /* name           type       default env  range toggles reqs incomp help                                            docgroup */
   { "-h",           eslARG_NONE, FALSE, NULL, NULL, NULL,   NULL, NULL, "show brief help on version and usage",        1 },
   { "--informat",   eslARG_STRING, NULL, NULL, NULL, NULL,  NULL, NULL, "assert input <seqfile> is in format <s>",     2 },
+  { "--check",      eslARG_NONE, FALSE, NULL, NULL, NULL,   NULL, NULL, "validate the written dsqdata database",       2 },
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
@@ -74,11 +76,16 @@ main(int argc, char **argv)
   ESL_GETOPTS  *go      = NULL;
   ESL_ALPHABET *abc     = NULL;
   ESL_SQFILE   *sqfp    = NULL;
+  ESL_DSQDATA  *dd      = NULL;
+  ESL_DSQDATA_CHUNK *chu = NULL;
   char         *seqfile = NULL;
   char         *seqdb   = NULL;
   char          errbuf[eslERRBUFSIZE];
   int           fmt     = eslSQFILE_UNKNOWN;
   int           status;
+  uint64_t      check_nseq = 0;
+  uint64_t      check_nres = 0;
+  int           i;
 
   process_commandline(argc, argv, &go, &seqfile, &seqdb);
 
@@ -107,6 +114,28 @@ main(int argc, char **argv)
 
   printf("done.\n");
   printf("Created protein dsqdata database %s for hmmsearch --gpu.\n", seqdb);
+
+  if (esl_opt_GetBoolean(go, "--check")) {
+    status = esl_dsqdata_Open(&abc, seqdb, 1, &dd);
+    if      (status == eslENOTFOUND) p7_Fail("Failed to open created dsqdata database %s for checking: %s\n", seqdb, dd ? dd->errbuf : "");
+    else if (status == eslEFORMAT)   p7_Fail("Created dsqdata database %s failed format check: %s\n", seqdb, dd ? dd->errbuf : "");
+    else if (status != eslOK)        p7_Fail("Unexpected error %d opening created dsqdata database %s\n", status, seqdb);
+
+    while ((status = esl_dsqdata_Read(dd, &chu)) == eslOK) {
+      check_nseq += chu->N;
+      for (i = 0; i < chu->N; i++) check_nres += chu->L[i];
+      esl_dsqdata_Recycle(dd, chu);
+      chu = NULL;
+    }
+    if (status != eslEOF) p7_Fail("Read/check failed for created dsqdata database %s: %s\n", seqdb, dd->errbuf);
+    if (check_nseq != dd->nseq || check_nres != dd->nres)
+      p7_Fail("Created dsqdata database %s failed count check: header has %" PRIu64 " seqs/%" PRIu64 " residues, read %" PRIu64 " seqs/%" PRIu64 " residues\n",
+              seqdb, dd->nseq, dd->nres, check_nseq, check_nres);
+    printf("Checked protein dsqdata database %s: %" PRIu64 " sequences, %" PRIu64 " residues, max length %" PRIu64 ".\n",
+           seqdb, dd->nseq, dd->nres, dd->max_seqlen);
+    esl_dsqdata_Close(dd);
+    dd = NULL;
+  }
 
   esl_sqfile_Close(sqfp);
   esl_alphabet_Destroy(abc);
