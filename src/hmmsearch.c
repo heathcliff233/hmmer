@@ -1435,6 +1435,8 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
         p7_pli_NewSeq(info->pli, dbsq);
         if (dbsq->n == 0) { dbsq->dsq = NULL; p7_pipeline_Reuse(info->pli); continue; }
         if (dbsq->n > 100000) ESL_EXCEPTION(eslETYPE, "Target sequence length > 100K, over comparison pipeline limit.\n(Did you mean to use nhmmer/nhmmscan?)");
+        p7_bg_SetLength(info->bg, dbsq->n);
+        p7_oprofile_ReconfigLength(info->om, dbsq->n);
         t0 = hmmsearch_WallTime();
         p7_bg_NullOne(info->bg, dbsq->dsq, dbsq->n, &nullsc);
         info->pli->time_null += hmmsearch_WallTime() - t0;
@@ -1442,8 +1444,6 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
         seq_score = (usc - nullsc) / eslCONST_LOG2;
         P = (gpu_statuses[i] == eslERANGE) ? 0.0 : esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
         if (P <= info->pli->F1) {
-          p7_bg_SetLength(info->bg, dbsq->n);
-          p7_oprofile_ReconfigLength(info->om, dbsq->n);
           p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
           info->pli->n_past_msv++;
           t0 = hmmsearch_WallTime();
