@@ -39,6 +39,7 @@ p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_STATS *stats)
     stats->bias_d2h_seconds    = 0.0;
     stats->nseqs           = 0;
     stats->nres            = 0;
+    stats->nbatches        = 0;
   }
 }
 

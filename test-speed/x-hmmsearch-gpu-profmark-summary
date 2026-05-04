@@ -34,6 +34,7 @@ COUNT_COLUMNS = [
     "past_bias",
     "past_vit",
     "past_fwd",
+    "gpu_batches",
 ]
 
 

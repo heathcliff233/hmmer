@@ -1925,6 +1925,7 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# CUDA bias D2H time: %.6f sec\n", stats.bias_d2h_seconds);
     fprintf(ofp, "# CUDA MSV sequences: %" PRIu64 "\n", stats.nseqs);
     fprintf(ofp, "# CUDA MSV residues: %" PRIu64 "\n", stats.nres);
+    fprintf(ofp, "# CUDA MSV batches: %" PRIu64 "\n", stats.nbatches);
   }
   fprintf(ofp, "# Stage null time: %.6f sec\n", pli->time_null);
   fprintf(ofp, "# Stage MSV host time: %.6f sec\n", pli->time_msv);

@@ -23,6 +23,7 @@ typedef struct p7_cuda_msv_stats_s {
   double   bias_d2h_seconds;
   uint64_t nseqs;
   uint64_t nres;
+  uint64_t nbatches;
 } P7_CUDA_MSV_STATS;
 
 extern int  p7_cuda_Available(char *errbuf, int errbuf_size);

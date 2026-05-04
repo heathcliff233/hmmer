@@ -70,6 +70,8 @@ parser.add_argument("outdir")
 parser.add_argument("queries", nargs="+")
 parser.add_argument("--gpu-batch-seqs", default="32768")
 parser.add_argument("--gpu-batch-res", default="8000000")
+parser.add_argument("--gpu-load-seqs", default="32768")
+parser.add_argument("--gpu-load-res", default="8000000")
 parser.add_argument("--gpu-msv-slack", default="0")
 args = parser.parse_args()
 
@@ -93,7 +95,7 @@ if not (gpu_targetdb.with_suffix(gpu_targetdb.suffix + ".dsqi")).exists():
 
 summary = logs / "profmark-gpu-summary.tsv"
 with summary.open("w") as s:
-    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tpast_msv\tpast_bias\tpast_vit\tpast_fwd\tgpu_read\tgpu_meta\tgpu_survivor\tgpu_h2d\tgpu_kernel\tgpu_d2h\tgpu_bias_h2d\tgpu_bias_kernel\tgpu_bias_d2h\tstage_null\tstage_msv_host\tstage_bias\tstage_vit\tstage_fwd\tstage_bck\tstage_domain\tstage_null2_output\n")
+    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tpast_msv\tpast_bias\tpast_vit\tpast_fwd\tgpu_batches\tgpu_batch_seqs\tgpu_batch_res\tgpu_load_seqs\tgpu_load_res\tgpu_read\tgpu_meta\tgpu_survivor\tgpu_h2d\tgpu_kernel\tgpu_d2h\tgpu_bias_h2d\tgpu_bias_kernel\tgpu_bias_d2h\tstage_null\tstage_msv_host\tstage_bias\tstage_vit\tstage_fwd\tstage_bck\tstage_domain\tstage_null2_output\n")
     for q in args.queries:
         sto = queries / (q + ".sto")
         hmm = queries / (q + ".hmm")
@@ -110,6 +112,8 @@ with summary.open("w") as s:
         timed([str(hmmsearch), "--cpu", "0", "--noali", "-o", str(cpu_out), "--tblout", str(cpu_tbl), str(hmm), str(targetdb)], cpu_time)
         timed([str(hmmsearch), "--gpu", "--cpu", "0", "--gpu-batch-seqs", args.gpu_batch_seqs,
                "--gpu-batch-res", args.gpu_batch_res,
+               "--gpu-load-seqs", args.gpu_load_seqs,
+               "--gpu-load-res", args.gpu_load_res,
                "--gpu-msv-slack", args.gpu_msv_slack, "--noali", "-o", str(gpu_out), "--tblout", str(gpu_tbl),
                str(hmm), str(gpu_targetdb)], gpu_time)
 
@@ -130,6 +134,7 @@ with summary.open("w") as s:
         past_bias = parse_pass_count(gpu_out, "Passed bias filter:")
         past_vit = parse_pass_count(gpu_out, "Passed Vit filter:")
         past_fwd = parse_pass_count(gpu_out, "Passed Fwd filter:")
+        gpu_batches = parse_stat(gpu_out, "CUDA MSV batches:")
         stage_null = parse_stat(gpu_out, "Stage null time:")
         stage_msv_host = parse_stat(gpu_out, "Stage MSV host time:")
         stage_bias = parse_stat(gpu_out, "Stage bias time:")
@@ -138,9 +143,10 @@ with summary.open("w") as s:
         stage_bck = parse_stat(gpu_out, "Stage Backward time:")
         stage_domain = parse_stat(gpu_out, "Stage domain time:")
         stage_null2_output = parse_stat(gpu_out, "Stage null2/output time:")
-        s.write("{}\t{:.3f}\t{:.3f}\t{:.3f}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(
+        s.write("{}\t{:.3f}\t{:.3f}\t{:.3f}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(
             q, cpu_wall, gpu_wall, cpu_wall / gpu_wall if gpu_wall > 0 else 0.0,
             len(cpu_names - gpu_names), len(gpu_names - cpu_names),
             past_msv, past_bias, past_vit, past_fwd,
+            gpu_batches, args.gpu_batch_seqs, args.gpu_batch_res, args.gpu_load_seqs, args.gpu_load_res,
             gpu_read, gpu_meta, gpu_survivor, h2d, kernel, d2h, bias_h2d, bias_kernel, bias_d2h,
             stage_null, stage_msv_host, stage_bias, stage_vit, stage_fwd, stage_bck, stage_domain, stage_null2_output))

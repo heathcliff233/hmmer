@@ -169,6 +169,7 @@ Performance tests should separately measure:
 Current bottleneck interpretation:
 
 - CPU survivor continuation after GPU MSV/bias is larger than CUDA kernel, transfer, and dsqdata read costs in the current profmark runs.
+- Load/search batch packing is implemented. `--gpu-load-seqs`/`--gpu-load-res` control dsqdata reader chunking, while `--gpu-batch-seqs`/`--gpu-batch-res` control the CUDA search batch. The GPU path can pack multiple loaded chunks into one CUDA MSV/bias batch. Current all-13 profmark evidence says larger 12M/16M search batches reduce launch count and kernel time but do not improve wall time because CPU survivor continuation dominates; keep the 32,768 sequence / 8M residue defaults unless new profiling says otherwise.
 - Null scoring is currently too small to justify moving to GPU as an isolated optimization.
 - Bias filtering is suitable for GPU only when it reuses the MSV sequence batch upload; a separate bias dsq upload erased most of the benefit.
 - Viterbi is the next bounded candidate because it remains a scalar filter, but the first candidate-only CUDA prototype was rejected: it was slower on profmark `14-3-3` and lost a CPU hit. Any future attempt needs a different parallelization/memory design plus explicit score/overflow parity against the optimized 16-bit CPU filter before integration.
@@ -185,7 +186,7 @@ Current benchmark guidance:
 
 - Use `profmark` for any serious GPU speed claim.
 - Use `hmmseqdb` to build the target database before running `hmmsearch --gpu`.
-- Keep `--gpu-batch-seqs`, `--gpu-batch-res`, and `--gpu-msv-slack` in the logs.
+- Keep `--gpu-load-seqs`, `--gpu-load-res`, `--gpu-batch-seqs`, `--gpu-batch-res`, `--gpu-msv-slack`, and CUDA batch count in the logs.
 - Record pass counts for MSV, bias, Viterbi, and Forward, plus sensitivity deltas and wall-clock timing. Kernel speedup alone is not enough. Compare each proposed GPU stage against the last accepted GPU baseline, not just against CPU.
 - Summarize `test-speed/x-hmmsearch-gpu-profmark` output with `test-speed/x-hmmsearch-gpu-profmark-summary <summary.tsv>` before making stage-suitability claims.
 

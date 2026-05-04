@@ -565,6 +565,7 @@ p7_cuda_MSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   engine->stats.d2h_seconds    += elapsed_seconds(d2h0, d2h1);
   engine->stats.nseqs          += nseq;
   engine->stats.nres           += total - (2 * nseq);
+  engine->stats.nbatches       += 1;
 
   for (int i = 0; i < nseq; i++) {
     if (h_overflow[i]) {

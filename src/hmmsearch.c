@@ -38,6 +38,13 @@
 #include "cuda_msv.h"
 
 typedef struct {
+  int                nchunks;
+  int                chunk_alloc;
+  ESL_DSQDATA_CHUNK **chunks;
+  ESL_DSQDATA_CHUNK  view;
+} GPU_SEARCH_BATCH;
+
+typedef struct {
 #ifdef HMMER_THREADS
   ESL_WORK_QUEUE   *queue;
 #endif 
@@ -48,6 +55,9 @@ typedef struct {
   P7_CUDA_ENGINE   *cuda_engine; /* optional GPU MSV engine                 */
   P7_CUDA_MSVPROFILE *cuda_msv;  /* optional GPU MSV profile                */
   int               gpu_batch_seqs; /* target sequences per GPU MSV batch     */
+  int               gpu_batch_res;  /* target residues per GPU MSV batch      */
+  int               gpu_load_seqs;  /* target sequences per dsqdata load      */
+  int               gpu_load_res;   /* target residues per dsqdata load       */
   float             gpu_msv_slack;  /* optional extra nats for experiments     */
 } WORKER_INFO;
 
@@ -57,6 +67,94 @@ hmmsearch_WallTime(void)
   struct timeval tv;
   gettimeofday(&tv, NULL);
   return (double) tv.tv_sec + (double) tv.tv_usec * 1e-6;
+}
+
+static int gpu_search_batch_Init(GPU_SEARCH_BATCH *batch);
+static void gpu_search_batch_Reset(GPU_SEARCH_BATCH *batch);
+static void gpu_search_batch_Destroy(GPU_SEARCH_BATCH *batch);
+static int gpu_search_batch_AddChunk(GPU_SEARCH_BATCH *batch, ESL_DSQDATA_CHUNK *chu);
+
+static int
+gpu_search_batch_Init(GPU_SEARCH_BATCH *batch)
+{
+  if (batch == NULL) return eslEINVAL;
+  memset(batch, 0, sizeof(*batch));
+  return eslOK;
+}
+
+static void
+gpu_search_batch_Reset(GPU_SEARCH_BATCH *batch)
+{
+  if (batch == NULL) return;
+  batch->nchunks = 0;
+  batch->view.i0 = 0;
+  batch->view.N  = 0;
+}
+
+static void
+gpu_search_batch_Destroy(GPU_SEARCH_BATCH *batch)
+{
+  if (batch == NULL) return;
+  free(batch->chunks);
+  free(batch->view.dsq);
+  free(batch->view.name);
+  free(batch->view.acc);
+  free(batch->view.desc);
+  free(batch->view.taxid);
+  free(batch->view.L);
+  memset(batch, 0, sizeof(*batch));
+}
+
+static int
+gpu_search_batch_Grow(GPU_SEARCH_BATCH *batch, int nchunks, int nseq)
+{
+  void *p;
+  int status;
+
+  if (nchunks > batch->chunk_alloc) {
+    int new_alloc = batch->chunk_alloc ? batch->chunk_alloc : 4;
+    while (new_alloc < nchunks) new_alloc *= 2;
+    ESL_RALLOC(batch->chunks, p, sizeof(*batch->chunks) * new_alloc);
+    batch->chunk_alloc = new_alloc;
+  }
+  if (nseq > batch->view.mdalloc) {
+    int new_alloc = batch->view.mdalloc ? batch->view.mdalloc : 4096;
+    while (new_alloc < nseq) new_alloc *= 2;
+    ESL_RALLOC(batch->view.dsq,   p, sizeof(*batch->view.dsq)   * new_alloc);
+    ESL_RALLOC(batch->view.name,  p, sizeof(*batch->view.name)  * new_alloc);
+    ESL_RALLOC(batch->view.acc,   p, sizeof(*batch->view.acc)   * new_alloc);
+    ESL_RALLOC(batch->view.desc,  p, sizeof(*batch->view.desc)  * new_alloc);
+    ESL_RALLOC(batch->view.taxid, p, sizeof(*batch->view.taxid) * new_alloc);
+    ESL_RALLOC(batch->view.L,     p, sizeof(*batch->view.L)     * new_alloc);
+    batch->view.mdalloc = new_alloc;
+  }
+  return eslOK;
+
+ERROR:
+  return eslEMEM;
+}
+
+static int
+gpu_search_batch_AddChunk(GPU_SEARCH_BATCH *batch, ESL_DSQDATA_CHUNK *chu)
+{
+  int offset;
+  int status;
+
+  if (batch == NULL || chu == NULL) return eslEINVAL;
+  if ((status = gpu_search_batch_Grow(batch, batch->nchunks + 1, batch->view.N + chu->N)) != eslOK) return status;
+
+  if (batch->nchunks == 0) batch->view.i0 = chu->i0;
+  batch->chunks[batch->nchunks++] = chu;
+  offset = batch->view.N;
+
+  memcpy(batch->view.dsq   + offset, chu->dsq,   sizeof(*batch->view.dsq)   * chu->N);
+  memcpy(batch->view.name  + offset, chu->name,  sizeof(*batch->view.name)  * chu->N);
+  memcpy(batch->view.acc   + offset, chu->acc,   sizeof(*batch->view.acc)   * chu->N);
+  memcpy(batch->view.desc  + offset, chu->desc,  sizeof(*batch->view.desc)  * chu->N);
+  memcpy(batch->view.taxid + offset, chu->taxid, sizeof(*batch->view.taxid) * chu->N);
+  memcpy(batch->view.L     + offset, chu->L,     sizeof(*batch->view.L)     * chu->N);
+  batch->view.N += chu->N;
+  return eslOK;
 }
 
 #define REPOPTS     "-E,-T,--cut_ga,--cut_nc,--cut_tc"
@@ -108,8 +206,10 @@ static ESL_OPTIONS options[] = {
   { "--nobias",     eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL, "--max",          "turn off composition bias filter",                             7 },
   { "--gpu",        eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, MPIOPTS,          "use CUDA GPU for the MSV filter (no CPU fallback)",            7 },
   { "--gpu-device", eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,           "CUDA device id for --gpu",                                     99 },
-  { "--gpu-batch-seqs", eslARG_INT, "32768", NULL, "n>0", NULL, "--gpu", NULL,          "maximum target sequences per CUDA MSV batch",                  99 },
-  { "--gpu-batch-res", eslARG_INT, "8000000", NULL, "n>0", NULL, "--gpu", NULL,         "approximate target residues per CUDA MSV batch",               99 },
+  { "--gpu-batch-seqs", eslARG_INT, "32768", NULL, "n>0", NULL, "--gpu", NULL,          "maximum target sequences per CUDA search batch",               99 },
+  { "--gpu-batch-res", eslARG_INT, "8000000", NULL, "n>0", NULL, "--gpu", NULL,         "approximate target residues per CUDA search batch",            99 },
+  { "--gpu-load-seqs",  eslARG_INT, "32768", NULL, "n>0", NULL, "--gpu", NULL,          "maximum target sequences per dsqdata load chunk",              99 },
+  { "--gpu-load-res",   eslARG_INT, "8000000", NULL, "n>0", NULL, "--gpu", NULL,        "approximate target residues per dsqdata load chunk",           99 },
   { "--gpu-msv-slack", eslARG_REAL,  "0.0", NULL, "x>=0", NULL, "--gpu", NULL,           "experimental extra nats added to GPU MSV scores",              99 },
 
 /* Other options */
@@ -335,6 +435,12 @@ main(int argc, char **argv)
       p7_Fail("--gpu does not currently support restricted target database ranges\n");
     if (esl_opt_GetInteger(go, "--gpu-batch-res") > 100000000)
       p7_Fail("--gpu-batch-res is currently limited to 100000000 residues for CUDA MSV v1\n");
+    if (esl_opt_GetInteger(go, "--gpu-load-res") > 100000000)
+      p7_Fail("--gpu-load-res is currently limited to 100000000 residues for dsqdata GPU mode\n");
+    if (esl_opt_GetInteger(go, "--gpu-load-seqs") > esl_opt_GetInteger(go, "--gpu-batch-seqs"))
+      p7_Fail("--gpu-load-seqs must be <= --gpu-batch-seqs so each loaded chunk fits in a CUDA search batch\n");
+    if (esl_opt_GetInteger(go, "--gpu-load-res") > esl_opt_GetInteger(go, "--gpu-batch-res"))
+      p7_Fail("--gpu-load-res must be <= --gpu-batch-res so each loaded chunk fits in a CUDA search batch\n");
   }
 
 
@@ -489,6 +595,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     info[i].cuda_engine = NULL;
     info[i].cuda_msv    = NULL;
     info[i].gpu_batch_seqs = esl_opt_GetInteger(go, "--gpu-batch-seqs");
+    info[i].gpu_batch_res  = esl_opt_GetInteger(go, "--gpu-batch-res");
+    info[i].gpu_load_seqs  = esl_opt_GetInteger(go, "--gpu-load-seqs");
+    info[i].gpu_load_res   = esl_opt_GetInteger(go, "--gpu-load-res");
     info[i].gpu_msv_slack  = esl_opt_GetReal(go, "--gpu-msv-slack");
 #ifdef HMMER_THREADS
 	  info[i].queue = queue;
@@ -543,8 +652,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       p7_oprofile_Convert(gm, om);                  /* <om> is now p7_LOCAL, multihit */
 
       if (do_gpu) {
-        int chunk_maxseq    = esl_opt_GetInteger(go, "--gpu-batch-seqs");
-        int chunk_maxpacket = ESL_MAX(eslDSQDATA_CHUNK_MAXPACKET, (esl_opt_GetInteger(go, "--gpu-batch-res") + 5) / 6);
+        int chunk_maxseq    = esl_opt_GetInteger(go, "--gpu-load-seqs");
+        int chunk_maxpacket = ESL_MAX(eslDSQDATA_CHUNK_MAXPACKET, (esl_opt_GetInteger(go, "--gpu-load-res") + 5) / 6);
         status = esl_dsqdata_OpenSized(&abc, cfg->dbfile, 1, chunk_maxseq, chunk_maxpacket, &dd);
         if      (status == eslENOTFOUND) p7_Fail("--gpu requires an hmmseqdb/dsqdata target database; failed to open %s: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
         else if (status == eslEFORMAT)   p7_Fail("--gpu target database %s is not compatible protein dsqdata: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
@@ -1381,14 +1490,19 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
   double P;
   char errbuf[eslERRBUFSIZE];
   ESL_DSQDATA_CHUNK *chu = NULL;
+  ESL_DSQDATA_CHUNK *search_chu = NULL;
+  GPU_SEARCH_BATCH batch;
   float *gpu_scores = NULL;
   float *gpu_filtersc = NULL;
   int *gpu_statuses = NULL;
   ESL_DSQ *dbsq_dsqmem = NULL;
   int64_t  dbsq_salloc = 0;
   int      gpu_capacity = info->gpu_batch_seqs > 0 ? info->gpu_batch_seqs : eslDSQDATA_CHUNK_MAXSEQ;
+  int64_t  batch_res = 0;
+  int64_t  effective_load_res = 0;
   double   t0;
 
+  gpu_search_batch_Init(&batch);
   if (info->cuda_engine != NULL) {
     if (dd == NULL) return eslEINVAL;
     dbsq = esl_sq_CreateDigital(info->om->abc);
@@ -1398,38 +1512,53 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
     ESL_ALLOC(gpu_scores, sizeof(float) * gpu_capacity);
     ESL_ALLOC(gpu_filtersc, sizeof(float) * gpu_capacity);
     ESL_ALLOC(gpu_statuses, sizeof(int) * gpu_capacity);
+    effective_load_res = (int64_t) 6 * ESL_MAX(eslDSQDATA_CHUNK_MAXPACKET, (info->gpu_load_res + 5) / 6);
     while (n_targetseqs == -1 || seq_cnt < n_targetseqs) {
-      t0 = hmmsearch_WallTime();
-      sstatus = esl_dsqdata_Read(dd, &chu);
-      info->pli->time_gpu_read += hmmsearch_WallTime() - t0;
-      if (sstatus != eslOK) break;
-      if (chu->N > gpu_capacity)
-        p7_Fail("--gpu-batch-seqs %d is smaller than dsqdata chunk size %d; use --gpu-batch-seqs >= %d\n",
-                gpu_capacity, chu->N, chu->N);
+      gpu_search_batch_Reset(&batch);
+      batch_res = 0;
+
+      do {
+        t0 = hmmsearch_WallTime();
+        sstatus = esl_dsqdata_Read(dd, &chu);
+        info->pli->time_gpu_read += hmmsearch_WallTime() - t0;
+        if (sstatus != eslOK) break;
+        if (chu->N > gpu_capacity)
+          p7_Fail("--gpu-batch-seqs %d is smaller than dsqdata load chunk size %d; use --gpu-batch-seqs >= %d or reduce --gpu-load-seqs\n",
+                  gpu_capacity, chu->N, chu->N);
+        status = gpu_search_batch_AddChunk(&batch, chu);
+        if (status != eslOK) goto ERROR;
+        batch_res += effective_load_res;
+        chu = NULL;
+      } while ((n_targetseqs == -1 || seq_cnt + batch.view.N < n_targetseqs) &&
+               batch.view.N + info->gpu_load_seqs <= info->gpu_batch_seqs &&
+               batch_res + effective_load_res <= info->gpu_batch_res);
+
+      if (batch.view.N == 0) break;
+      search_chu = (batch.nchunks == 1) ? batch.chunks[0] : &batch.view;
 
       t0 = hmmsearch_WallTime();
-      status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+      status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
       info->pli->time_msv += hmmsearch_WallTime() - t0;
       if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch MSV failed: %s\n", errbuf);
       if (info->pli->do_biasfilter) {
         t0 = hmmsearch_WallTime();
-        status = p7_cuda_BiasFilterDsqdataChunk(info->cuda_engine, info->bg, chu, gpu_filtersc, errbuf, sizeof(errbuf));
+        status = p7_cuda_BiasFilterDsqdataChunk(info->cuda_engine, info->bg, search_chu, gpu_filtersc, errbuf, sizeof(errbuf));
         info->pli->time_bias += hmmsearch_WallTime() - t0;
         if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch bias filter failed: %s\n", errbuf);
       }
 
-      for (i = 0; i < chu->N && (n_targetseqs == -1 || seq_cnt < n_targetseqs); i++, seq_cnt++) {
+      for (i = 0; i < search_chu->N && (n_targetseqs == -1 || seq_cnt < n_targetseqs); i++, seq_cnt++) {
         t0 = hmmsearch_WallTime();
         dbsq->dsq    = dbsq_dsqmem;
         dbsq->salloc = dbsq_salloc;
         esl_sq_Reuse(dbsq);
-        status = esl_sq_SetName(dbsq, chu->name[i]);
-        if (status == eslOK) status = esl_sq_SetAccession(dbsq, chu->acc[i]);
-        if (status == eslOK) status = esl_sq_SetDesc(dbsq, chu->desc[i]);
-        if (status == eslOK) status = esl_sq_SetCoordComplete(dbsq, chu->L[i]);
+        status = esl_sq_SetName(dbsq, search_chu->name[i]);
+        if (status == eslOK) status = esl_sq_SetAccession(dbsq, search_chu->acc[i]);
+        if (status == eslOK) status = esl_sq_SetDesc(dbsq, search_chu->desc[i]);
+        if (status == eslOK) status = esl_sq_SetCoordComplete(dbsq, search_chu->L[i]);
         if (status != eslOK) goto ERROR;
-        dbsq->tax_id = chu->taxid[i];
-        dbsq->dsq    = chu->dsq[i];
+        dbsq->tax_id = search_chu->taxid[i];
+        dbsq->dsq    = search_chu->dsq[i];
         info->pli->time_gpu_meta += hmmsearch_WallTime() - t0;
 
         p7_pli_NewSeq(info->pli, dbsq);
@@ -1464,11 +1593,16 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
         dbsq->dsq = NULL;
       }
       dbsq->dsq = NULL;
-      esl_dsqdata_Recycle(dd, chu);
-      chu = NULL;
+      for (i = 0; i < batch.nchunks; i++)
+        esl_dsqdata_Recycle(dd, batch.chunks[i]);
+      gpu_search_batch_Reset(&batch);
+      search_chu = NULL;
     }
     if (n_targetseqs!=-1 && seq_cnt==n_targetseqs) sstatus = eslEOF;
     if (chu) esl_dsqdata_Recycle(dd, chu);
+    for (i = 0; i < batch.nchunks; i++)
+      esl_dsqdata_Recycle(dd, batch.chunks[i]);
+    gpu_search_batch_Destroy(&batch);
     dbsq->dsq    = dbsq_dsqmem;
     dbsq->salloc = dbsq_salloc;
     esl_sq_Destroy(dbsq);
@@ -1503,6 +1637,9 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
 
 ERROR:
   if (chu) esl_dsqdata_Recycle(dd, chu);
+  for (i = 0; i < batch.nchunks; i++)
+    esl_dsqdata_Recycle(dd, batch.chunks[i]);
+  gpu_search_batch_Destroy(&batch);
   if (dbsq && dbsq_dsqmem) {
     dbsq->dsq    = dbsq_dsqmem;
     dbsq->salloc = dbsq_salloc;
