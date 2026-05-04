@@ -29,6 +29,7 @@
 
 #include "hmmer.h"
 #include "impl_sse.h"
+#include "cuda_msv.h"
 
 /*****************************************************************
  * 1. The p7_MSVFilter() DP implementation.
@@ -493,6 +494,7 @@ static ESL_OPTIONS options[] = {
   { "-c",        eslARG_NONE,   FALSE, NULL, NULL,  NULL,  NULL, "-x", "compare scores to generic implementation (debug)", 0 }, 
   { "-s",        eslARG_INT,     "42", NULL, NULL,  NULL,  NULL, NULL, "set random number seed to <n>",                    0 },
   { "-x",        eslARG_NONE,   FALSE, NULL, NULL,  NULL,  NULL, "-c", "equate scores to trusted implementation (debug)",  0 },
+  { "--gpu",     eslARG_NONE,   FALSE, NULL, NULL,  NULL,  NULL, NULL, "benchmark CUDA MSV implementation",                0 },
   { "-L",        eslARG_INT,    "400", NULL, "n>0", NULL,  NULL, NULL, "length of random target seqs",                     0 },
   { "-N",        eslARG_INT,  "50000", NULL, "n>0", NULL,  NULL, NULL, "number of random target seqs",                     0 },
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
@@ -515,12 +517,21 @@ main(int argc, char **argv)
   P7_OPROFILE    *om      = NULL;
   P7_OMX         *ox      = NULL;
   P7_GMX         *gx      = NULL;
+  ESL_SQ_BLOCK   *block   = NULL;
+  P7_CUDA_ENGINE *engine  = NULL;
+  P7_CUDA_MSVPROFILE *cuom = NULL;
+  float          *scores  = NULL;
+  int            *statuses = NULL;
   int             L       = esl_opt_GetInteger(go, "-L");
   int             N       = esl_opt_GetInteger(go, "-N");
+  int             do_gpu  = esl_opt_GetBoolean(go, "--gpu");
+  int             B       = 1000;
   ESL_DSQ        *dsq     = malloc(sizeof(ESL_DSQ) * (L+2));
   int             i;
+  int             b;
+  int             n;
   float           sc1, sc2;
-  double          base_time, bench_time, Mcs;
+  double          bench_time, Mcs;
 
   if (p7_hmmfile_Open(hmmfile, NULL, &hfp, NULL) != eslOK) p7_Fail("Failed to open HMM file %s", hmmfile);
   if (p7_hmmfile_Read(hfp, &abc, &hmm)           != eslOK) p7_Fail("Failed to read HMM");
@@ -537,13 +548,6 @@ main(int argc, char **argv)
 
   ox = p7_omx_Create(gm->M, 0, 0);
   gx = p7_gmx_Create(gm->M, L);
-
-  /* Get a baseline time: how long it takes just to generate the sequences */
-  esl_stopwatch_Start(w);
-  for (i = 0; i < N; i++)
-    esl_rsq_xfIID(r, bg->f, abc->K, L, dsq);
-  esl_stopwatch_Stop(w);
-  base_time = w->user;
 
   esl_stopwatch_Start(w);
   for (i = 0; i < N; i++)
@@ -569,13 +573,72 @@ main(int argc, char **argv)
 	}
     }
   esl_stopwatch_Stop(w);
-  bench_time = w->user - base_time;
+  bench_time = w->elapsed;
   Mcs        = (double) N * (double) L * (double) gm->M * 1e-6 / (double) bench_time;
   esl_stopwatch_Display(stdout, w, "# CPU time: ");
   printf("# M    = %d\n",   gm->M);
-  printf("# %.1f Mc/s\n", Mcs);
+  printf("# CPU+sequence-generation %.1f Mc/s\n", Mcs);
+
+  if (do_gpu)
+    {
+      char errbuf[eslERRBUFSIZE];
+      P7_CUDA_MSV_STATS stats;
+      double cpu_msv_time;
+      double gpu_msv_time;
+      if (p7_cuda_engine_Create(0, &engine, errbuf, sizeof(errbuf)) != eslOK) p7_Fail("%s", errbuf);
+      if (p7_cuda_msvprofile_Create(om, &cuom, errbuf, sizeof(errbuf)) != eslOK) p7_Fail("%s", errbuf);
+      block = esl_sq_CreateDigitalBlock(B, abc);
+      scores   = malloc(sizeof(float) * B);
+      statuses = malloc(sizeof(int)   * B);
+      if (!scores || !statuses) p7_Fail("allocation failed");
+
+      esl_randomness_Init(r, esl_opt_GetInteger(go, "-s"));
+      block->count = B;
+      for (b = 0; b < B; b++)
+        {
+          esl_sq_Reuse(block->list + b);
+          esl_sq_GrowTo(block->list + b, L);
+          esl_rsq_xfIID(r, bg->f, abc->K, L, block->list[b].dsq);
+          block->list[b].n = L;
+        }
+
+      esl_stopwatch_Start(w);
+      for (i = 0; i < N; i += B)
+        {
+          n = ESL_MIN(B, N - i);
+          for (b = 0; b < n; b++)
+            p7_MSVFilter(block->list[b].dsq, L, om, ox, &scores[b]);
+        }
+      esl_stopwatch_Stop(w);
+      cpu_msv_time = w->elapsed;
+      Mcs = (double) N * (double) L * (double) gm->M * 1e-6 / cpu_msv_time;
+      printf("# CPU MSV wall time: %.6f sec\n", cpu_msv_time);
+      printf("# CPU MSV %.1f Mc/s\n", Mcs);
+
+      esl_stopwatch_Start(w);
+      for (i = 0; i < N; i += B)
+        {
+          n = ESL_MIN(B, N - i);
+          block->count = n;
+          if (p7_cuda_MSVFilterBatch(engine, cuom, block, scores, statuses, errbuf, sizeof(errbuf)) != eslOK) p7_Fail("%s", errbuf);
+        }
+      esl_stopwatch_Stop(w);
+      gpu_msv_time = w->elapsed;
+      p7_cuda_engine_GetStats(engine, &stats);
+      Mcs = (double) N * (double) L * (double) gm->M * 1e-6 / stats.kernel_seconds;
+      printf("# CUDA MSV wall time: %.6f sec\n", gpu_msv_time);
+      printf("# CUDA H2D time: %.6f sec\n", stats.h2d_seconds);
+      printf("# CUDA kernel time: %.6f sec\n", stats.kernel_seconds);
+      printf("# CUDA D2H time: %.6f sec\n", stats.d2h_seconds);
+      printf("# CUDA kernel %.1f Mc/s\n", Mcs);
+    }
 
   free(dsq);
+  free(scores);
+  free(statuses);
+  esl_sq_DestroyBlock(block);
+  p7_cuda_msvprofile_Destroy(cuom);
+  p7_cuda_engine_Destroy(engine);
   p7_omx_Destroy(ox);
   p7_gmx_Destroy(gx);
   p7_oprofile_Destroy(om);
@@ -871,7 +934,3 @@ main(int argc, char **argv)
 }
 #endif /*p7MSVFILTER_EXAMPLE*/
 /*---------------------- end, example ---------------------------*/
-
-
-
-

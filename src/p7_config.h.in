@@ -128,9 +128,13 @@
 #undef HMMER_MPI
 #undef HMMER_THREADS
 
+/* Optional GPU acceleration
+ */
+#undef HMMER_CUDA
+#undef eslENABLE_CUDA
+
 /* Optional processor specific support
  */
 #undef HAVE_FLUSH_ZERO_MODE
 
 #endif /*P7_CONFIGH_INCLUDED*/
-

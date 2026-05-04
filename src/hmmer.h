@@ -314,6 +314,9 @@ typedef struct p7_bg_s {
   const ESL_ALPHABET *abc;	/* reference to alphabet in use: set at initialization             */
 } P7_BG;
 
+typedef struct p7_cuda_msv_profile_s P7_CUDA_MSVPROFILE;
+typedef struct p7_cuda_msv_engine_s  P7_CUDA_ENGINE;
+
 /*****************************************************************
  * 4. P7_TRACE:  a traceback (alignment of seq to profile).
  *****************************************************************/
@@ -1249,6 +1252,9 @@ typedef struct p7_pipeline_s {
   int           show_accessions;/* TRUE to output accessions not names      */
   int           show_alignments;/* TRUE to output alignments (default)      */
 
+  P7_CUDA_ENGINE     *cuda_engine; /* optional CUDA runtime for hmmsearch --gpu */
+  P7_CUDA_MSVPROFILE *cuda_msv;    /* optional CUDA MSV profile for current query */
+
   P7_HMMFILE   *hfp;		/* COPY of open HMM database (if scan mode) */
   char          errbuf[eslERRBUFSIZE];
 } P7_PIPELINE;
@@ -1646,6 +1652,8 @@ extern int p7_pli_NewModel          (P7_PIPELINE *pli, const P7_OPROFILE *om, P7
 extern int p7_pli_NewModelThresholds(P7_PIPELINE *pli, const P7_OPROFILE *om);
 extern int p7_pli_NewSeq            (P7_PIPELINE *pli, const ESL_SQ *sq);
 extern int p7_Pipeline              (P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_TOPHITS *th);
+extern int p7_Pipeline_PostMSV      (P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
+                                     P7_TOPHITS *hitlist, float nullsc, float usc);
 extern int p7_Pipeline_LongTarget   (P7_PIPELINE *pli, P7_OPROFILE *om, P7_SCOREDATA *data,
                                      P7_BG *bg, P7_TOPHITS *hitlist, int64_t seqidx,
                                      const ESL_SQ *sq, int complementarity,
@@ -1815,5 +1823,3 @@ extern int fm_getOccCount     (const FM_DATA *fm, const FM_CFG *cfg, int pos, ui
 extern int fm_getOccCountLT   (const FM_DATA *fm, const FM_CFG *cfg, int pos, uint8_t c, uint32_t *cnteq, uint32_t *cntlt);
 
 #endif /*P7_HMMERH_INCLUDED*/
-
-

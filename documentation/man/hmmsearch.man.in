@@ -311,6 +311,38 @@ queries, leading to slower than expected performance as the
 computationally intensive Forward/Backward algorithms shoulder an
 abnormally heavy load.
 
+.TP
+.B \-\-gpu
+Use CUDA acceleration for the MSV filter stage. This is an explicit
+opt-in mode and requires a CUDA-enabled build. If CUDA is unavailable
+or the selected device cannot be used,
+.B hmmsearch
+fails rather than falling back to the CPU MSV filter.
+
+.TP
+.BI \-\-gpu-device " <n>"
+Select CUDA device
+.IR <n>
+for
+.BR \-\-gpu .
+The default is 0.
+
+.TP
+.BI \-\-gpu-batch-seqs " <n>"
+Set the number of target sequences processed per CUDA MSV batch.
+Larger values reduce kernel launch overhead and are usually better for
+large target databases, but require more host and device memory. The
+default is 8192.
+
+.TP
+.BI \-\-gpu-msv-slack " <x>"
+Add
+.IR <x>
+nats of slack to GPU MSV survivor scores before continuing through the
+CPU bias, Viterbi, Forward, and domain definition stages. This can
+preserve sensitivity for borderline GPU/CPU MSV score differences at
+some cost in downstream CPU work. The default is 4.0.
+
 
 
 .SH OTHER OPTIONS
@@ -439,6 +471,5 @@ web page
 .nf
 http://eddylab.org
 .fi
-
 
 

@@ -26,10 +26,13 @@ PIC_CFLAGS     = @PIC_CFLAGS@
 NEON_CFLAGS    = @NEON_CFLAGS@
 SSE_CFLAGS     = @SSE_CFLAGS@
 VMX_CFLAGS     = @VMX_CFLAGS@
+NVCC           = @NVCC@
+CUDA_CFLAGS    = @CUDA_CFLAGS@
+CUDA_LDFLAGS   = @CUDA_LDFLAGS@
 CPPFLAGS       = @CPPFLAGS@
 LDFLAGS        = @LDFLAGS@
 DEFS           = @DEFS@
-LIBS           = -lhmmer -leasel -ldivsufsort  @LIBS@ @LIBGSL@ @PTHREAD_LIBS@ -lm
+LIBS           = -lhmmer -leasel -ldivsufsort  @LIBS@ @LIBGSL@ @PTHREAD_LIBS@ @CUDA_LIBS@ -lm
 
 AR        = @AR@
 RANLIB    = @RANLIB@
@@ -57,6 +60,7 @@ PROGS = alimask\
 	hmmpgmd\
 	hmmpgmd_shard\
 	hmmpress\
+	hmmseqdb\
 	hmmscan\
 	hmmsearch\
 	hmmsim\
@@ -82,6 +86,7 @@ PROGOBJS =\
 	hmmlogo.o\
 	hmmpgmd.o\
 	hmmpress.o\
+	hmmseqdb.o\
 	hmmscan.o\
 	hmmsearch.o\
 	hmmsim.o\
@@ -97,6 +102,7 @@ AUXPROGOBJS = \
 	hmmerfm-exactmatch.o
 
 HDRS =  hmmer.h \
+	cuda_msv.h \
 	cachedb.h \
 	p7_gbands.h \
 	p7_gmxb.h \
@@ -105,6 +111,7 @@ HDRS =  hmmer.h \
 
 OBJS =  build.o\
 	cachedb.o\
+	@CUDA_MSV_OBJ@\
 	cachedb_shard.o\
 	emit.o\
 	errors.o\
@@ -259,8 +266,9 @@ check: ${PROGS} ${AUXPROGS} ${UTESTS} ${ITESTS} .FORCE
 libhmmer.a: libhmmer-src.stamp .FORCE
 	${QUIET_SUBDIR0}${IMPLDIR} ${QUIET_SUBDIR1} libhmmer-impl.stamp
 
-libhmmer-src.stamp: ${OBJS}
-	${QUIET_AR}${AR} -r libhmmer.a $? > /dev/null 2>&1
+libhmmer-src.stamp: ${OBJS} Makefile
+	${QUIET_AR}rm -f libhmmer.a
+	${QUIET_AR}${AR} -r libhmmer.a ${OBJS} > /dev/null 2>&1
 	@${RANLIB} libhmmer.a
 	@echo "src_lib objects compiled:\c" > $@
 	@date >> $@
@@ -271,14 +279,17 @@ ${OBJS}:        ${HDRS} p7_config.h
 ${PROGOBJS}:    ${HDRS} p7_config.h
 ${AUXPROGOBJS}: ${HDRS} p7_config.h
 
+cuda_msv.o: cuda_msv.cu ${HDRS} p7_config.h
+	${QUIET_CC}${NVCC} ${CUDA_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
+
 ${PROGS} ${AUXPROGS}: % : %.o  libhmmer.a ../${ESLDIR}/libeasel.a 
-	${QUIET_GEN}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${LDFLAGS} ${MYLIBDIRS} -o $@ $@.o ${LIBS}
+	${QUIET_GEN}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${MYLIBDIRS} -o $@ $@.o ${LIBS}
 
 .c.o:
 	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS}  ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
 
 ${ITESTS}: % : %.o libhmmer.a ${HDRS} p7_config.h
-	${QUIET_GEN}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${LDFLAGS} ${MYLIBDIRS} -o $@ $@.o ${LIBS}
+	${QUIET_GEN}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${MYLIBDIRS} -o $@ $@.o ${LIBS}
 
 ${UTESTS}: libhmmer.a  ${HDRS} p7_config.h
 	@BASENAME=`echo $@ | sed -e 's/_utest//' | sed -e 's/^p7_//'` ;\
@@ -290,10 +301,10 @@ ${UTESTS}: libhmmer.a  ${HDRS} p7_config.h
            DFILE=${srcdir}/$${BASENAME}.c ;\
 	fi;\
 	if test ${V} ;\
-	   then echo "${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
+	   then echo "${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
 	   else echo '    ' GEN $@ ;\
         fi ;\
-	${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
+	${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
 
 ${BENCHMARKS}: libhmmer.a  ${HDRS} p7_config.h
 	@BASENAME=`echo $@ | sed -e 's/_benchmark//' | sed -e 's/^p7_//'` ;\
@@ -305,10 +316,10 @@ ${BENCHMARKS}: libhmmer.a  ${HDRS} p7_config.h
            DFILE=${srcdir}/$${BASENAME}.c ;\
 	fi;\
 	if test ${V} ;\
-	   then echo "${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
+	   then echo "${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
 	   else echo '    ' GEN $@ ;\
         fi ;\
-	${CC} ${CFLAGS} ${PTHREAD_CFLAGS}  ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
+	${CC} ${CFLAGS} ${PTHREAD_CFLAGS}  ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
 
 ${STATS}: libhmmer.a ${HDRS} p7_config.h
 	@BASENAME=`echo $@ | sed -e 's/_stats//' | sed -e 's/^p7_//'` ;\
@@ -320,10 +331,10 @@ ${STATS}: libhmmer.a ${HDRS} p7_config.h
            DFILE=${srcdir}/$${BASENAME}.c ;\
 	fi;\
 	if test ${V} ;\
-	   then echo "${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
+	   then echo "${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
 	   else echo '    ' GEN $@ ;\
         fi ;\
-	${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
+	${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
 
 ${EXAMPLES}: libhmmer.a ${HDRS} p7_config.h
 	@BASENAME=`echo $@ | sed -e 's/_example[0-9]*//' | sed -e 's/^p7_//'` ;\
@@ -334,10 +345,10 @@ ${EXAMPLES}: libhmmer.a ${HDRS} p7_config.h
            DFILE=${srcdir}/$${BASENAME}.c ;\
 	fi;\
 	if test ${V} ;\
-	   then echo "${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
+	   then echo "${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
 	   else echo '    ' GEN $@ ;\
         fi ;\
-	${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
+	${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
 
 install:
 	for file in ${PROGS}; do \

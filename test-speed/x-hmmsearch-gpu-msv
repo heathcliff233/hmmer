@@ -1,0 +1,51 @@
+#! /usr/bin/perl
+
+use strict;
+use warnings;
+use Benchmark qw(:hireswallclock);
+
+my ($top_builddir, $hmmfile, $targetdb, $outfile) = @ARGV;
+if (!defined $outfile) {
+  die "Usage: $0 <top_builddir> <hmmfile> <targetdb> <outfile>\n";
+}
+
+my $hmmsearch = "$top_builddir/src/hmmsearch";
+my $hmmseqdb  = "$top_builddir/src/hmmseqdb";
+my $gpudb     = "$outfile.dsqdb";
+open(my $out, ">", $outfile) or die "failed to open $outfile";
+
+my $t0 = Benchmark->new;
+my $cpu = `$hmmsearch --cpu 0 $hmmfile $targetdb 2>&1`;
+my $t1 = Benchmark->new;
+die "CPU hmmsearch failed\n$cpu" if $?;
+
+my $build = `$hmmseqdb $targetdb $gpudb 2>&1`;
+die "hmmseqdb failed\n$build" if $?;
+
+my $t2 = Benchmark->new;
+my $gpu = `$hmmsearch --gpu --cpu 0 $hmmfile $gpudb 2>&1`;
+my $t3 = Benchmark->new;
+die "GPU hmmsearch failed\n$gpu" if $?;
+
+my $cpu_wall = timediff($t1, $t0)->real;
+my $gpu_wall = timediff($t3, $t2)->real;
+my ($h2d)    = $gpu =~ /CUDA MSV H2D time:\s+(\S+)/;
+my ($kern)   = $gpu =~ /CUDA MSV kernel time:\s+(\S+)/;
+my ($d2h)    = $gpu =~ /CUDA MSV D2H time:\s+(\S+)/;
+my ($seqs)   = $gpu =~ /CUDA MSV sequences:\s+(\d+)/;
+my ($res)    = $gpu =~ /CUDA MSV residues:\s+(\d+)/;
+my ($cpu_msv)= $cpu =~ /Passed MSV filter:\s+(\d+)/;
+my ($gpu_msv)= $gpu =~ /Passed MSV filter:\s+(\d+)/;
+
+die "CPU/GPU MSV pass counts differ: $cpu_msv vs $gpu_msv\n" if $cpu_msv ne $gpu_msv;
+
+printf $out "cpu_wall %.6f\n", $cpu_wall;
+printf $out "gpu_wall %.6f\n", $gpu_wall;
+printf $out "gpu_h2d %.6f\n", $h2d;
+printf $out "gpu_kernel %.6f\n", $kern;
+printf $out "gpu_d2h %.6f\n", $d2h;
+printf $out "gpu_sequences %d\n", $seqs;
+printf $out "gpu_residues %d\n", $res;
+printf $out "end_to_end_speedup %.6f\n", $cpu_wall / $gpu_wall if $gpu_wall > 0;
+printf $out "gpu_msv_device_seconds %.6f\n", $h2d + $kern + $d2h;
+close($out);

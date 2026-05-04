@@ -82,12 +82,17 @@ ifndef V
 		        ${MAKE} -s -C $$subdir
 endif
 
-.PHONY: all dev check pdf install install-strip uninstall clean distclean TAGS
+.PHONY: all dev check pdf install install-strip uninstall clean distclean TAGS patch-easel
+
+patch-easel:
+	@if test -f ${srcdir}/patches/easel-dsqdata-open-sized.patch; then \
+	  cd ${ESLDIR} && { patch -p1 --dry-run < ../${srcdir}/patches/easel-dsqdata-open-sized.patch >/dev/null 2>&1 && patch -p1 < ../${srcdir}/patches/easel-dsqdata-open-sized.patch || patch -p1 -R --dry-run < ../${srcdir}/patches/easel-dsqdata-open-sized.patch >/dev/null 2>&1; }; \
+	fi
 
 # all: Compile all documented executables.
 #      (Excludes test programs.)
 #
-all:
+all: patch-easel
 	${QUIET_SUBDIR0}${ESLDIR}     ${QUIET_SUBDIR1} all
 	${QUIET_SUBDIR0}${SADIR}      ${QUIET_SUBDIR1} all
 	${QUIET_SUBDIR0}src           ${QUIET_SUBDIR1} all
@@ -95,7 +100,7 @@ all:
 
 # dev: compile all executables, including drivers.
 #
-dev:
+dev: patch-easel
 	${QUIET_SUBDIR0}${ESLDIR}  ${QUIET_SUBDIR1} dev
 	${QUIET_SUBDIR0}${SADIR}   ${QUIET_SUBDIR1} all
 	${QUIET_SUBDIR0}src        ${QUIET_SUBDIR1} dev
@@ -103,13 +108,13 @@ dev:
 
 # tests: compile all test drivers for 'make check'
 #
-tests:
+tests: patch-easel
 	${QUIET_SUBDIR0}${ESLDIR}  ${QUIET_SUBDIR1} tests
 	${QUIET_SUBDIR0}src        ${QUIET_SUBDIR1} tests
 
 # check: Run test suites.
 #
-check:
+check: patch-easel
 	@command -v python3 >/dev/null 2>&1 || { echo >&2 "python3 is required for 'make check', but is not in your PATH. Aborting."; exit 1; }
 	${QUIET_SUBDIR0}${ESLDIR}  ${QUIET_SUBDIR1} tests
 	${QUIET_SUBDIR0}${SADIR}   ${QUIET_SUBDIR1} all

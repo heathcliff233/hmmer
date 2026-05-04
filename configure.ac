@@ -67,6 +67,7 @@ m4_include([easel/m4/ax_gcc_func_attribute.m4])
 m4_include([easel/m4/esl_neon.m4])
 m4_include([easel/m4/esl_sse.m4])
 m4_include([easel/m4/esl_vmx.m4])
+m4_include([easel/m4/esl_cuda.m4])
 
 m4_include([easel/m4/ax_prog_cc_mpi.m4])
 m4_include([easel/m4/ax_pthread.m4])
@@ -205,6 +206,8 @@ AC_ARG_ENABLE(vmx,     [AS_HELP_STRING([--enable-vmx],     [enable our Altivec/V
 
 AC_ARG_ENABLE(threads, [AS_HELP_STRING([--enable-threads], [enable POSIX threads parallelization])],     enable_threads=$enableval, enable_threads=check)
 AC_ARG_ENABLE(mpi,     [AS_HELP_STRING([--enable-mpi],     [enable MPI parallelization])],               enable_mpi=$enableval,     enable_mpi=no)
+AC_ARG_ENABLE(cuda,    [AS_HELP_STRING([--enable-cuda],    [enable CUDA GPU acceleration])],             enable_cuda=$enableval,    enable_cuda=check)
+AC_ARG_WITH(cuda-arch, [AS_HELP_STRING([--with-cuda-arch=sm_XX], [CUDA architecture for GPU code])],      CUDA_ARCH=$withval,        CUDA_ARCH=sm_89)
 
 AC_ARG_ENABLE(pic,     [AS_HELP_STRING([--enable-pic],     [enable position-independent code])],         enable_pic=$enableval,     enable_pic=no)
 
@@ -445,6 +448,35 @@ AC_SUBST(IMPL_CHOICE)
 AC_SUBST(SSE4_CFLAGS)
 AC_SUBST(AVX_CFLAGS)
 AC_SUBST(AVX512_CFLAGS)
+
+NVCC=
+CUDA_CFLAGS=
+CUDA_LDFLAGS=
+CUDA_LIBS=
+CUDA_MSV_OBJ=cuda_msv_stub.o
+if test "$enable_cuda" = "yes" || test "$enable_cuda" = "check"; then
+  cuda_path="$PATH$PATH_SEPARATOR/usr/local/cuda/bin$PATH_SEPARATOR/usr/local/cuda-12.6/bin"
+  ESL_CUDA([
+    AC_DEFINE([HMMER_CUDA], 1, [Enable CUDA GPU acceleration])
+    AC_DEFINE([eslENABLE_CUDA], 1, [Enable CUDA GPU acceleration])
+    NVCC=$esl_nvcc
+    CUDA_CFLAGS="-arch=${CUDA_ARCH}"
+    CUDA_LDFLAGS="-L/usr/local/cuda/lib64"
+    CUDA_LIBS="-lcudart"
+    CUDA_MSV_OBJ=cuda_msv.o
+    enable_cuda=yes
+    ],[
+    if test "$enable_cuda" = "yes"; then
+      AC_MSG_FAILURE([Unable to find nvcc for --enable-cuda])
+    fi
+    enable_cuda=no
+    ])
+fi
+AC_SUBST(NVCC)
+AC_SUBST(CUDA_CFLAGS)
+AC_SUBST(CUDA_LDFLAGS)
+AC_SUBST(CUDA_LIBS)
+AC_SUBST(CUDA_MSV_OBJ)
 
 
 # For x86 processors check if the flush to zero macro is available
@@ -783,8 +815,9 @@ HMMER configuration:
    compiler:             ${CC} ${CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${NEON_CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS}
    host:                 $host
    linker:               ${LDFLAGS}
-   libraries:            ${LIBS} ${LIBGSL} ${PTHREAD_LIBS}
-   DP implementation:    ${impl_choice}"
+   libraries:            ${LIBS} ${LIBGSL} ${PTHREAD_LIBS} ${CUDA_LIBS}
+   DP implementation:    ${impl_choice}
+   CUDA acceleration:    ${enable_cuda}"
 
 
 if test x"$HAVE_PYTHON3" = x"yes"; then echo "

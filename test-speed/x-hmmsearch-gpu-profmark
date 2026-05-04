@@ -1,0 +1,111 @@
+#! /usr/bin/env python3
+
+import argparse
+import pathlib
+import subprocess
+
+
+def run(cmd, stderr_path=None, stdout_path=None):
+    stdout = subprocess.DEVNULL if stdout_path is None else open(stdout_path, "w")
+    stderr = subprocess.PIPE if stderr_path is None else open(stderr_path, "w")
+    try:
+        r = subprocess.run(cmd, stdout=stdout, stderr=stderr, text=True)
+    finally:
+        if stdout_path is not None:
+            stdout.close()
+        if stderr_path is not None:
+            stderr.close()
+    if r.returncode:
+        detail = "" if stderr_path is not None else (r.stderr or "")
+        raise SystemExit("FAILED: {}\n{}".format(" ".join(cmd), detail))
+
+
+def timed(cmd, time_path):
+    shell_cmd = ["/usr/bin/time", "-p"] + cmd
+    run(shell_cmd, stderr_path=time_path)
+
+
+def parse_real(path):
+    for line in pathlib.Path(path).read_text().splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0] == "real":
+            return float(fields[1])
+    raise SystemExit("failed to parse real time from {}".format(path))
+
+
+def parse_stat(path, label):
+    for line in pathlib.Path(path).read_text().splitlines():
+        if label in line:
+            return line.split()[5]
+    return "NA"
+
+
+def names(path):
+    result = set()
+    for line in pathlib.Path(path).read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        result.add(line.split()[0])
+    return result
+
+
+parser = argparse.ArgumentParser(description="Run CPU/GPU hmmsearch timing on local profmark data")
+parser.add_argument("top_builddir")
+parser.add_argument("profmark_workdir")
+parser.add_argument("outdir")
+parser.add_argument("queries", nargs="+")
+parser.add_argument("--gpu-batch-seqs", default="8192")
+parser.add_argument("--gpu-batch-res", default="1572864")
+parser.add_argument("--gpu-msv-slack", default="2")
+args = parser.parse_args()
+
+top = pathlib.Path(args.top_builddir)
+work = pathlib.Path(args.profmark_workdir)
+out = pathlib.Path(args.outdir)
+queries = out / "queries"
+logs = out / "logs"
+queries.mkdir(parents=True, exist_ok=True)
+logs.mkdir(parents=True, exist_ok=True)
+
+hmmbuild = top / "src" / "hmmbuild"
+hmmseqdb = top / "src" / "hmmseqdb"
+hmmsearch = top / "src" / "hmmsearch"
+msafile = work / "pmark.train.msa"
+targetdb = work / "pmark.test.fa"
+gpu_targetdb = work / "pmark.test.gpudb"
+
+if not (gpu_targetdb.with_suffix(gpu_targetdb.suffix + ".dsqi")).exists():
+    run([str(hmmseqdb), str(targetdb), str(gpu_targetdb)], stdout_path=logs / "hmmseqdb.log")
+
+summary = logs / "profmark-gpu-summary.tsv"
+with summary.open("w") as s:
+    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tgpu_h2d\tgpu_kernel\tgpu_d2h\n")
+    for q in args.queries:
+        sto = queries / (q + ".sto")
+        hmm = queries / (q + ".hmm")
+        run(["easel/miniapps/esl-afetch", "-o", str(sto), str(msafile), q])
+        run([str(hmmbuild), str(hmm), str(sto)], stdout_path=logs / (q + ".hmmbuild.log"))
+
+        cpu_tbl = logs / (q + ".cpu.tbl")
+        gpu_tbl = logs / (q + ".gpu.tbl")
+        cpu_out = logs / (q + ".cpu.out")
+        gpu_out = logs / (q + ".gpu.out")
+        cpu_time = logs / (q + ".cpu.time")
+        gpu_time = logs / (q + ".gpu.time")
+
+        timed([str(hmmsearch), "--cpu", "0", "--noali", "-o", str(cpu_out), "--tblout", str(cpu_tbl), str(hmm), str(targetdb)], cpu_time)
+        timed([str(hmmsearch), "--gpu", "--cpu", "0", "--gpu-batch-seqs", args.gpu_batch_seqs,
+               "--gpu-batch-res", args.gpu_batch_res,
+               "--gpu-msv-slack", args.gpu_msv_slack, "--noali", "-o", str(gpu_out), "--tblout", str(gpu_tbl),
+               str(hmm), str(gpu_targetdb)], gpu_time)
+
+        cpu_wall = parse_real(cpu_time)
+        gpu_wall = parse_real(gpu_time)
+        cpu_names = names(cpu_tbl)
+        gpu_names = names(gpu_tbl)
+        h2d = parse_stat(gpu_out, "CUDA MSV H2D time:")
+        kernel = parse_stat(gpu_out, "CUDA MSV kernel time:")
+        d2h = parse_stat(gpu_out, "CUDA MSV D2H time:")
+        s.write("{}\t{:.3f}\t{:.3f}\t{:.3f}\t{}\t{}\t{}\t{}\t{}\n".format(
+            q, cpu_wall, gpu_wall, cpu_wall / gpu_wall if gpu_wall > 0 else 0.0,
+            len(cpu_names - gpu_names), len(gpu_names - cpu_names), h2d, kernel, d2h))

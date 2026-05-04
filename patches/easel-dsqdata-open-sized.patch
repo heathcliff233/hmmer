@@ -1,0 +1,53 @@
+diff --git a/esl_dsqdata.c b/esl_dsqdata.c
+index cc03cae..d5e3436 100644
+--- a/esl_dsqdata.c
++++ b/esl_dsqdata.c
+@@ -154,6 +154,15 @@ static uint32_t eslDSQDATA_MAGIC_V1SWAP = 0xb1d1d3c4; //  ... as above, but byte
+  */
+ int
+ esl_dsqdata_Open(ESL_ALPHABET **byp_abc, char *basename, int nconsumers, ESL_DSQDATA **ret_dd)
++{
++  return esl_dsqdata_OpenSized(byp_abc, basename, nconsumers,
++                               eslDSQDATA_CHUNK_MAXSEQ, eslDSQDATA_CHUNK_MAXPACKET,
++                               ret_dd);
++}
++
++int
++esl_dsqdata_OpenSized(ESL_ALPHABET **byp_abc, char *basename, int nconsumers,
++                      int chunk_maxseq, int chunk_maxpacket, ESL_DSQDATA **ret_dd)
+ {
+   ESL_DSQDATA *dd        = NULL;
+   int          bufsize   = 4096;
+@@ -168,6 +177,8 @@ esl_dsqdata_Open(ESL_ALPHABET **byp_abc, char *basename, int nconsumers, ESL_DSQ
+
+   ESL_DASSERT1(( nconsumers > 0   ));
+   ESL_DASSERT1(( byp_abc  != NULL ));  // either *byp_abc == NULL or *byp_abc = the caller's expected alphabet.
++  if (chunk_maxseq    <= 0) ESL_EXCEPTION(eslEINVAL, "chunk_maxseq must be positive");
++  if (chunk_maxpacket <= 0) ESL_EXCEPTION(eslEINVAL, "chunk_maxpacket must be positive");
+
+   ESL_ALLOC(dd, sizeof(ESL_DSQDATA));
+   dd->stubfp          = NULL;
+@@ -186,8 +197,8 @@ esl_dsqdata_Open(ESL_ALPHABET **byp_abc, char *basename, int nconsumers, ESL_DSQ
+   dd->nseq            = 0;
+   dd->nres            = 0;
+
+-  dd->chunk_maxseq    = eslDSQDATA_CHUNK_MAXSEQ;    // someday we may want to allow tuning these
+-  dd->chunk_maxpacket = eslDSQDATA_CHUNK_MAXPACKET;
++  dd->chunk_maxseq    = chunk_maxseq;
++  dd->chunk_maxpacket = chunk_maxpacket;
+   dd->do_byteswap     = FALSE;
+   dd->pack5           = FALSE;
+
+diff --git a/esl_dsqdata.h b/esl_dsqdata.h
+index c620118..dc72f2d 100644
+--- a/esl_dsqdata.h
++++ b/esl_dsqdata.h
+@@ -143,6 +143,8 @@ typedef struct esl_dsqdata_s {
+ /* Functions in the API
+  */
+ extern int  esl_dsqdata_Open   (ESL_ALPHABET **byp_abc, char *basename, int nconsumers, ESL_DSQDATA **ret_dd);
++extern int  esl_dsqdata_OpenSized(ESL_ALPHABET **byp_abc, char *basename, int nconsumers,
++                                  int chunk_maxseq, int chunk_maxpacket, ESL_DSQDATA **ret_dd);
+ extern int  esl_dsqdata_Read   (ESL_DSQDATA *dd, ESL_DSQDATA_CHUNK **ret_chu);
+ extern int  esl_dsqdata_Recycle(ESL_DSQDATA *dd, ESL_DSQDATA_CHUNK *chu);
+ extern int  esl_dsqdata_Close  (ESL_DSQDATA *dd);

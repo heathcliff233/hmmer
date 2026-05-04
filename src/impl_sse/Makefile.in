@@ -17,8 +17,9 @@ PIC_CFLAGS     = @PIC_CFLAGS@
 SSE_CFLAGS     = @SSE_CFLAGS@
 CPPFLAGS       = @CPPFLAGS@
 LDFLAGS        = @LDFLAGS@
+CUDA_LDFLAGS   = @CUDA_LDFLAGS@
 DEFS           = @DEFS@
-LIBS           = -lhmmer -leasel @LIBS@ -lm
+LIBS           = -lhmmer -leasel @LIBS@ @CUDA_LIBS@ -lm
 
 AR          = @AR@ 
 RANLIB      = @RANLIB@
@@ -96,8 +97,8 @@ dev:   ${UTESTS} ${BENCHMARKS} ${EXAMPLES}
 check: ${UTESTS}
 tests: ${UTESTS}
 
-libhmmer-impl.stamp: ${OBJS}
-	${QUIET_AR}${AR} -r ../libhmmer.a $? > /dev/null 2>&1
+libhmmer-impl.stamp: ${OBJS} Makefile ../libhmmer.a
+	${QUIET_AR}${AR} -r ../libhmmer.a ${OBJS} > /dev/null 2>&1
 	@${RANLIB} ../libhmmer.a
 	@echo "impl_lib objects compiled:\c" > $@
 	@date >> $@
@@ -119,10 +120,10 @@ ${UTESTS}: libhmmer-impl.stamp ../libhmmer.a ${HDRS} ../hmmer.h
            DFILE=${srcdir}/$${BASENAME}.c ;\
 	fi;\
 	if test ${V} ;\
-	   then echo "${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${SSE_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
+	   then echo "${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${SSE_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
 	   else echo '    ' GEN $@ ;\
 	fi ;\
-	${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${SSE_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
+	${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${SSE_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
 
 ${BENCHMARKS}: libhmmer-impl.stamp ../libhmmer.a ${HDRS} ../hmmer.h
 	@BASENAME=`echo $@ | sed -e 's/_benchmark//' | sed -e 's/^p7_//'`;\
@@ -134,10 +135,10 @@ ${BENCHMARKS}: libhmmer-impl.stamp ../libhmmer.a ${HDRS} ../hmmer.h
            DFILE=${srcdir}/$${BASENAME}.c ;\
 	fi;\
 	if test ${V} ;\
-	   then echo "${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${SSE_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
+	   then echo "${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${SSE_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}" ;\
 	   else echo '    ' GEN $@ ;\
 	fi ;\
-	${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${SSE_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
+	${CC} ${CFLAGS} ${PIC_CFLAGS} ${PTHREAD_CFLAGS} ${SSE_CFLAGS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${DEFS} ${MYLIBDIRS} ${MYINCDIRS} -D$${DFLAG} -o $@ $${DFILE} ${LIBS}
 
 ${EXAMPLES}: libhmmer-impl.stamp ../libhmmer.a ${HDRS} ../hmmer.h
 	@BASENAME=`echo $@ | sed -e 's/_example//'| sed -e 's/^p7_//'` ;\
@@ -171,7 +172,3 @@ endif
 
 distclean: clean
 	-rm -f Makefile 
-
-
-
-

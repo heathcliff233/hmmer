@@ -13,7 +13,9 @@
 
 #include "easel.h"
 #include "esl_alphabet.h"
+#include "esl_dsqdata.h"
 #include "esl_getopts.h"
+#include "esl_gumbel.h"
 #include "esl_msa.h"
 #include "esl_msafile.h"
 #include "esl_sq.h"
@@ -32,6 +34,7 @@
 #endif 
 
 #include "hmmer.h"
+#include "cuda_msv.h"
 
 typedef struct {
 #ifdef HMMER_THREADS
@@ -41,6 +44,10 @@ typedef struct {
   P7_PIPELINE      *pli;         /* work pipeline                           */
   P7_TOPHITS       *th;          /* top hit results                         */
   P7_OPROFILE      *om;          /* optimized query profile                 */
+  P7_CUDA_ENGINE   *cuda_engine; /* optional GPU MSV engine                 */
+  P7_CUDA_MSVPROFILE *cuda_msv;  /* optional GPU MSV profile                */
+  int               gpu_batch_seqs; /* target sequences per GPU MSV batch     */
+  float             gpu_msv_slack;  /* extra nats for GPU MSV survivor handoff */
 } WORKER_INFO;
 
 #define REPOPTS     "-E,-T,--cut_ga,--cut_nc,--cut_tc"
@@ -90,6 +97,11 @@ static ESL_OPTIONS options[] = {
   { "--F2",         eslARG_REAL,  "1e-3", NULL, NULL,    NULL,  NULL, "--max",          "Stage 2 (Vit) threshold: promote hits w/ P <= F2",             7 },
   { "--F3",         eslARG_REAL,  "1e-5", NULL, NULL,    NULL,  NULL, "--max",          "Stage 3 (Fwd) threshold: promote hits w/ P <= F3",             7 },
   { "--nobias",     eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL, "--max",          "turn off composition bias filter",                             7 },
+  { "--gpu",        eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, MPIOPTS,          "use CUDA GPU for the MSV filter (no CPU fallback)",            7 },
+  { "--gpu-device", eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,           "CUDA device id for --gpu",                                     99 },
+  { "--gpu-batch-seqs", eslARG_INT, "8192", NULL, "n>0", NULL, "--gpu", NULL,           "number of target sequences per CUDA MSV batch",                99 },
+  { "--gpu-batch-res", eslARG_INT, "1572864", NULL, "n>0", NULL, "--gpu", NULL,         "approximate target residues per CUDA MSV batch",               99 },
+  { "--gpu-msv-slack", eslARG_REAL,  "4.0", NULL, "x>=0", NULL, "--gpu", NULL,           "extra nats added to GPU MSV scores before CPU continuation",   99 },
 
 /* Other options */
   { "--nonull2",    eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL,  NULL,            "turn off biased composition score corrections",               12 },
@@ -139,7 +151,7 @@ struct cfg_s {
 };
 
 static int  serial_master(ESL_GETOPTS *go, struct cfg_s *cfg);
-static int  serial_loop  (WORKER_INFO *info, ESL_SQFILE *dbfp, int n_targetseqs);
+static int  serial_loop  (WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetseqs);
 
 #ifdef HMMER_THREADS
 #define BLOCK_SIZE 1000
@@ -248,6 +260,7 @@ output_header(FILE *ofp, const ESL_GETOPTS *go, char *hmmfile, char *seqfile)
   if (esl_opt_IsUsed(go, "--F2")         && fprintf(ofp, "# Vit filter P threshold:       <= %g\n",             esl_opt_GetReal(go, "--F2"))           < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
   if (esl_opt_IsUsed(go, "--F3")         && fprintf(ofp, "# Fwd filter P threshold:       <= %g\n",             esl_opt_GetReal(go, "--F3"))           < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
   if (esl_opt_IsUsed(go, "--nobias")     && fprintf(ofp, "# biased composition HMM filter:   off\n")                                                   < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--gpu")        && fprintf(ofp, "# CUDA MSV filter:                on [device %d]\n", esl_opt_GetInteger(go, "--gpu-device")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
   if (esl_opt_IsUsed(go, "--restrictdb_stkey") && fprintf(ofp, "# Restrict db to start at seq key: %s\n",            esl_opt_GetString(go, "--restrictdb_stkey"))  < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
   if (esl_opt_IsUsed(go, "--restrictdb_n")     && fprintf(ofp, "# Restrict db to # target seqs:    %d\n",            esl_opt_GetInteger(go, "--restrictdb_n")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
   if (esl_opt_IsUsed(go, "--ssifile")          && fprintf(ofp, "# Override ssi file to:            %s\n",            esl_opt_GetString(go, "--ssifile"))       < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
@@ -301,6 +314,19 @@ main(int argc, char **argv)
 
   if ( cfg.n_targetseq != -1 && cfg.n_targetseq < 1 )
     p7_Fail("--restrictdb_n must be >= 1\n");
+
+  if (esl_opt_GetBoolean(go, "--gpu")) {
+#ifdef HMMER_THREADS
+    if (esl_opt_GetInteger(go, "--cpu") > 0)
+      p7_Fail("--gpu currently requires serial hmmsearch; use --cpu 0\n");
+#endif
+    if (esl_opt_IsOn(go, "--tformat"))
+      p7_Fail("--gpu requires an hmmseqdb/dsqdata target database; --tformat is only for ordinary sequence files\n");
+    if (esl_opt_IsUsed(go, "--restrictdb_stkey") || esl_opt_IsUsed(go, "--restrictdb_n"))
+      p7_Fail("--gpu does not currently support restricted target database ranges\n");
+    if (esl_opt_GetInteger(go, "--gpu-batch-res") > 1572864)
+      p7_Fail("--gpu-batch-res is currently limited to 1572864 residues for dsqdata safety\n");
+  }
 
 
   /* Figure out who we are, and send control there: 
@@ -356,6 +382,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   FILE            *pfamtblfp= NULL;              /* output stream for pfam tabular output (--pfamtblout)    */
   P7_HMMFILE      *hfp      = NULL;              /* open input HMM file                             */
   ESL_SQFILE      *dbfp     = NULL;              /* open input sequence file                        */
+  ESL_DSQDATA     *dd       = NULL;              /* open dsqdata sequence database for --gpu         */
   P7_HMM          *hmm      = NULL;              /* one HMM query                                   */
   ESL_ALPHABET    *abc      = NULL;              /* digital alphabet                                */
   int              dbfmt    = eslSQFILE_UNKNOWN; /* format code for sequence database file          */
@@ -366,6 +393,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   int              hstatus  = eslOK;
   int              sstatus  = eslOK;
   int              i;
+  int              do_gpu   = esl_opt_GetBoolean(go, "--gpu");
 
   int              ncpus    = 0;
 
@@ -388,15 +416,19 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     if (dbfmt == eslSQFILE_UNKNOWN) p7_Fail("%s is not a recognized sequence database file format\n", esl_opt_GetString(go, "--tformat"));
   }
 
-  /* Open the target sequence database */
-  status = esl_sqfile_Open(cfg->dbfile, dbfmt, p7_SEQDBENV, &dbfp);
-  if      (status == eslENOTFOUND) p7_Fail("Failed to open sequence file %s for reading\n",          cfg->dbfile);
-  else if (status == eslEFORMAT)   p7_Fail("Sequence file %s is empty or misformatted\n",            cfg->dbfile);
-  else if (status == eslEINVAL)    p7_Fail("Can't autodetect format of a stdin or .gz seqfile");
-  else if (status != eslOK)        p7_Fail("Unexpected error %d opening sequence file %s\n", status, cfg->dbfile);  
+  /* Open the target sequence database. GPU mode opens dsqdata after the HMM
+   * alphabet is known, so the reader can validate that it is protein dsqdata.
+   */
+  if (!do_gpu) {
+    status = esl_sqfile_Open(cfg->dbfile, dbfmt, p7_SEQDBENV, &dbfp);
+    if      (status == eslENOTFOUND) p7_Fail("Failed to open sequence file %s for reading\n",          cfg->dbfile);
+    else if (status == eslEFORMAT)   p7_Fail("Sequence file %s is empty or misformatted\n",            cfg->dbfile);
+    else if (status == eslEINVAL)    p7_Fail("Can't autodetect format of a stdin or .gz seqfile");
+    else if (status != eslOK)        p7_Fail("Unexpected error %d opening sequence file %s\n", status, cfg->dbfile);
+  }
 
 
-  if (esl_opt_IsUsed(go, "--restrictdb_stkey") || esl_opt_IsUsed(go, "--restrictdb_n")) {
+  if (!do_gpu && (esl_opt_IsUsed(go, "--restrictdb_stkey") || esl_opt_IsUsed(go, "--restrictdb_n"))) {
     if (esl_opt_IsUsed(go, "--ssifile"))
       esl_sqfile_OpenSSI(dbfp, esl_opt_GetString(go, "--ssifile"));
     else
@@ -420,7 +452,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
 #ifdef HMMER_THREADS
   /* initialize thread data */
-  ncpus = ESL_MIN( esl_opt_GetInteger(go, "--cpu"), esl_threads_GetCPUCount());
+  ncpus = do_gpu ? 0 : ESL_MIN( esl_opt_GetInteger(go, "--cpu"), esl_threads_GetCPUCount());
   if (ncpus > 0)
     {
       threadObj = esl_threads_Create(&pipeline_thread);
@@ -437,11 +469,18 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     {
       /* One-time initializations after alphabet <abc> becomes known */
       output_header(ofp, go, cfg->hmmfile, cfg->dbfile);
-      esl_sqfile_SetDigital(dbfp, abc); //ReadBlock requires knowledge of the alphabet to decide how best to read blocks
+      if (abc->type != eslAMINO && do_gpu)
+        p7_Fail("--gpu is only supported for protein hmmsearch queries\n");
+      if (!do_gpu)
+        esl_sqfile_SetDigital(dbfp, abc); //ReadBlock requires knowledge of the alphabet to decide how best to read blocks
 
       for (i = 0; i < infocnt; ++i)
 	{
 	  info[i].bg    = p7_bg_Create(abc);
+    info[i].cuda_engine = NULL;
+    info[i].cuda_msv    = NULL;
+    info[i].gpu_batch_seqs = esl_opt_GetInteger(go, "--gpu-batch-seqs");
+    info[i].gpu_msv_slack  = esl_opt_GetReal(go, "--gpu-msv-slack");
 #ifdef HMMER_THREADS
 	  info[i].queue = queue;
 #endif
@@ -471,14 +510,14 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       /* seqfile may need to be rewound (multiquery mode) */
       if (nquery > 1)
       {
-        if (! esl_sqfile_IsRewindable(dbfp))
+        if (!do_gpu && ! esl_sqfile_IsRewindable(dbfp))
           esl_fatal("Target sequence file %s isn't rewindable; can't search it with multiple queries", cfg->dbfile);
 
-        if (! esl_opt_IsUsed(go, "--restrictdb_stkey") )
+        if (!do_gpu && ! esl_opt_IsUsed(go, "--restrictdb_stkey") )
           esl_sqfile_Position(dbfp, 0); //only re-set current position to 0 if we're not planning to set it in a moment
       }
 
-      if ( cfg->firstseq_key != NULL ) { //it's tempting to want to do this once and capture the offset position for future passes, but ncbi files make this non-trivial, so this keeps it general
+      if (!do_gpu && cfg->firstseq_key != NULL ) { //it's tempting to want to do this once and capture the offset position for future passes, but ncbi files make this non-trivial, so this keeps it general
         sstatus = esl_sqfile_PositionByKey(dbfp, cfg->firstseq_key);
         if (sstatus != eslOK)
           p7_Fail("Failure setting restrictdb_stkey to %d\n", cfg->firstseq_key);
@@ -494,14 +533,36 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       p7_ProfileConfig(hmm, info->bg, gm, 100, p7_LOCAL); /* 100 is a dummy length for now; and MSVFilter requires local mode */
       p7_oprofile_Convert(gm, om);                  /* <om> is now p7_LOCAL, multihit */
 
+      if (do_gpu) {
+        int chunk_maxseq    = esl_opt_GetInteger(go, "--gpu-batch-seqs");
+        int chunk_maxpacket = ESL_MAX(eslDSQDATA_CHUNK_MAXPACKET, (esl_opt_GetInteger(go, "--gpu-batch-res") + 5) / 6);
+        status = esl_dsqdata_OpenSized(&abc, cfg->dbfile, 1, chunk_maxseq, chunk_maxpacket, &dd);
+        if      (status == eslENOTFOUND) p7_Fail("--gpu requires an hmmseqdb/dsqdata target database; failed to open %s: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
+        else if (status == eslEFORMAT)   p7_Fail("--gpu target database %s is not compatible protein dsqdata: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
+        else if (status != eslOK)        p7_Fail("Unexpected error %d opening dsqdata target database %s\n", status, cfg->dbfile);
+        if (abc->type != eslAMINO)       p7_Fail("--gpu requires a protein hmmseqdb/dsqdata target database\n");
+      }
+
       for (i = 0; i < infocnt; ++i)
       {
         /* Create processing pipeline and hit list */
         info[i].th  = p7_tophits_Create();
         info[i].om  = p7_oprofile_Clone(om);
         info[i].pli = p7_pipeline_Create(go, om->M, 100, FALSE, p7_SEARCH_SEQS); /* L_hint = 100 is just a dummy for now */
+        info[i].pli->cuda_engine = info[i].cuda_engine;
+        info[i].pli->cuda_msv    = info[i].cuda_msv;
         status = p7_pli_NewModel(info[i].pli, info[i].om, info[i].bg);
         if (status == eslEINVAL) p7_Fail(info->pli->errbuf);
+
+        if (do_gpu)
+        {
+          status = p7_cuda_engine_Create(esl_opt_GetInteger(go, "--gpu-device"), &info[i].cuda_engine, errbuf, sizeof(errbuf));
+          if (status != eslOK) p7_Fail("--gpu requested, but CUDA initialization failed: %s\n", errbuf);
+          status = p7_cuda_msvprofile_Create(info[i].om, &info[i].cuda_msv, errbuf, sizeof(errbuf));
+          if (status != eslOK) p7_Fail("--gpu requested, but CUDA MSV profile creation failed: %s\n", errbuf);
+          info[i].pli->cuda_engine = info[i].cuda_engine;
+          info[i].pli->cuda_msv    = info[i].cuda_msv;
+        }
 
 #ifdef HMMER_THREADS
         if (ncpus > 0) esl_threads_AddThread(threadObj, &info[i]);
@@ -510,21 +571,21 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
 #ifdef HMMER_THREADS
       if (ncpus > 0)  sstatus = thread_loop(threadObj, queue, dbfp, cfg->n_targetseq);
-      else            sstatus = serial_loop(info, dbfp, cfg->n_targetseq);
+      else            sstatus = serial_loop(info, dbfp, dd, cfg->n_targetseq);
 #else
-      sstatus = serial_loop(info, dbfp, cfg->n_targetseq);
+      sstatus = serial_loop(info, dbfp, dd, cfg->n_targetseq);
 #endif
       switch(sstatus)
       {
       case eslEFORMAT:
         esl_fatal("Parse failed (sequence file %s):\n%s\n",
-            dbfp->filename, esl_sqfile_GetErrorBuf(dbfp));
+            do_gpu ? cfg->dbfile : dbfp->filename, do_gpu ? (dd ? dd->errbuf : "") : esl_sqfile_GetErrorBuf(dbfp));
         break;
       case eslEOF:
         /* do nothing */
         break;
       default:
-        esl_fatal("Unexpected error %d reading sequence file %s", sstatus, dbfp->filename);
+        esl_fatal("Unexpected error %d reading sequence file %s", sstatus, do_gpu ? cfg->dbfile : dbfp->filename);
       }
 
       /* merge the results of the search results */
@@ -535,6 +596,10 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
         p7_pipeline_Destroy(info[i].pli);
         p7_tophits_Destroy(info[i].th);
+        p7_cuda_msvprofile_Destroy(info[i].cuda_msv);
+        p7_cuda_engine_Destroy(info[i].cuda_engine);
+        info[i].cuda_msv    = NULL;
+        info[i].cuda_engine = NULL;
         p7_oprofile_Destroy(info[i].om);
       }
 
@@ -575,10 +640,18 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
       p7_pipeline_Destroy(info->pli);
       p7_tophits_Destroy(info->th);
+      p7_cuda_msvprofile_Destroy(info->cuda_msv);
+      p7_cuda_engine_Destroy(info->cuda_engine);
+      info->cuda_msv    = NULL;
+      info->cuda_engine = NULL;
       p7_oprofile_Destroy(info->om);
       p7_oprofile_Destroy(om);
       p7_profile_Destroy(gm);
       p7_hmm_Destroy(hmm);
+      if (dd) {
+        esl_dsqdata_Close(dd);
+        dd = NULL;
+      }
 
       hstatus = p7_hmmfile_Read(hfp, &abc, &hmm);
     } /* end outer loop over query HMMs */
@@ -617,7 +690,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
   free(info);
   p7_hmmfile_Close(hfp);
-  esl_sqfile_Close(dbfp);
+  if (dbfp) esl_sqfile_Close(dbfp);
   esl_alphabet_Destroy(abc);
   esl_stopwatch_Destroy(w);
 
@@ -1286,11 +1359,84 @@ mpi_worker(ESL_GETOPTS *go, struct cfg_s *cfg)
 #endif /*HMMER_MPI*/
 
 static int
-serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, int n_targetseqs)
+serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetseqs)
 {
   int      sstatus;
   ESL_SQ   *dbsq     = NULL;   /* one target sequence (digital)  */
   int seq_cnt = 0;
+  int status;
+  int i;
+  float nullsc;
+  float usc;
+  float seq_score;
+  double P;
+  char errbuf[eslERRBUFSIZE];
+  ESL_DSQDATA_CHUNK *chu = NULL;
+  float *gpu_scores = NULL;
+  int *gpu_statuses = NULL;
+  ESL_DSQ *dbsq_dsqmem = NULL;
+  int64_t  dbsq_salloc = 0;
+
+  if (info->cuda_engine != NULL) {
+    if (dd == NULL) return eslEINVAL;
+    dbsq = esl_sq_CreateDigital(info->om->abc);
+    if (dbsq == NULL) { status = eslEMEM; goto ERROR; }
+    dbsq_dsqmem = dbsq->dsq;
+    dbsq_salloc = dbsq->salloc;
+    ESL_ALLOC(gpu_scores, sizeof(float) * eslDSQDATA_CHUNK_MAXSEQ);
+    ESL_ALLOC(gpu_statuses, sizeof(int) * eslDSQDATA_CHUNK_MAXSEQ);
+    while (n_targetseqs == -1 || seq_cnt < n_targetseqs) {
+      sstatus = esl_dsqdata_Read(dd, &chu);
+      if (sstatus != eslOK) break;
+      if (info->gpu_batch_seqs > 0 && chu->N > info->gpu_batch_seqs)
+        p7_Fail("--gpu-batch-seqs %d is smaller than dsqdata chunk size %d; rebuild or use --gpu-batch-seqs >= %d\n",
+                info->gpu_batch_seqs, chu->N, chu->N);
+
+      status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+      if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch MSV failed: %s\n", errbuf);
+
+      for (i = 0; i < chu->N && (n_targetseqs == -1 || seq_cnt < n_targetseqs); i++, seq_cnt++) {
+        dbsq->dsq    = dbsq_dsqmem;
+        dbsq->salloc = dbsq_salloc;
+        esl_sq_Reuse(dbsq);
+        status = esl_sq_SetName(dbsq, chu->name[i]);
+        if (status == eslOK) status = esl_sq_SetAccession(dbsq, chu->acc[i]);
+        if (status == eslOK) status = esl_sq_SetDesc(dbsq, chu->desc[i]);
+        if (status == eslOK) status = esl_sq_SetCoordComplete(dbsq, chu->L[i]);
+        if (status != eslOK) goto ERROR;
+        dbsq->tax_id = chu->taxid[i];
+        dbsq->dsq    = chu->dsq[i];
+
+        p7_pli_NewSeq(info->pli, dbsq);
+        if (dbsq->n == 0) { dbsq->dsq = NULL; p7_pipeline_Reuse(info->pli); continue; }
+        if (dbsq->n > 100000) ESL_EXCEPTION(eslETYPE, "Target sequence length > 100K, over comparison pipeline limit.\n(Did you mean to use nhmmer/nhmmscan?)");
+        p7_bg_NullOne(info->bg, dbsq->dsq, dbsq->n, &nullsc);
+        usc = gpu_scores[i];
+        seq_score = (usc - nullsc) / eslCONST_LOG2;
+        P = (gpu_statuses[i] == eslERANGE) ? 0.0 : esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
+        if (P <= info->pli->F1 || seq_score >= 0.0) {
+          p7_bg_SetLength(info->bg, dbsq->n);
+          p7_oprofile_ReconfigLength(info->om, dbsq->n);
+          p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
+          info->pli->n_past_msv++;
+          p7_Pipeline_PostMSV(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack);
+        }
+        p7_pipeline_Reuse(info->pli);
+        dbsq->dsq = NULL;
+      }
+      dbsq->dsq = NULL;
+      esl_dsqdata_Recycle(dd, chu);
+      chu = NULL;
+    }
+    if (n_targetseqs!=-1 && seq_cnt==n_targetseqs) sstatus = eslEOF;
+    if (chu) esl_dsqdata_Recycle(dd, chu);
+    dbsq->dsq    = dbsq_dsqmem;
+    dbsq->salloc = dbsq_salloc;
+    esl_sq_Destroy(dbsq);
+    free(gpu_scores);
+    free(gpu_statuses);
+    return sstatus;
+  }
 
   dbsq = esl_sq_CreateDigital(info->om->abc);
 
@@ -1314,6 +1460,17 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, int n_targetseqs)
   esl_sq_Destroy(dbsq);
 
   return sstatus;
+
+ERROR:
+  if (chu) esl_dsqdata_Recycle(dd, chu);
+  if (dbsq && dbsq_dsqmem) {
+    dbsq->dsq    = dbsq_dsqmem;
+    dbsq->salloc = dbsq_salloc;
+  }
+  if (dbsq) esl_sq_Destroy(dbsq);
+  free(gpu_scores);
+  free(gpu_statuses);
+  return eslEMEM;
 }
 
 #ifdef HMMER_THREADS
@@ -1427,5 +1584,3 @@ pipeline_thread(void *arg)
 }
 #endif   /* HMMER_THREADS */
  
-
-

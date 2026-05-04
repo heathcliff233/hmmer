@@ -19,6 +19,7 @@
 #include "esl_vectorops.h"
 
 #include "hmmer.h"
+#include "cuda_msv.h"
 
 #include "esl_sqio.h" //!!!!DEBUG
 
@@ -247,6 +248,8 @@ p7_pipeline_Create(const ESL_GETOPTS *go, int M_hint, int L_hint, int long_targe
   pli->mode            = mode;
   pli->show_accessions = (go && esl_opt_GetBoolean(go, "--acc")   ? TRUE  : FALSE);
   pli->show_alignments = (go && esl_opt_GetBoolean(go, "--noali") ? FALSE : TRUE);
+  pli->cuda_engine     = NULL;
+  pli->cuda_msv        = NULL;
   pli->hfp             = NULL;
   pli->errbuf[0]       = '\0';
 
@@ -696,19 +699,10 @@ p7_pipeline_Merge(P7_PIPELINE *p1, P7_PIPELINE *p2)
 int
 p7_Pipeline(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_TOPHITS *hitlist)
 {
-  P7_HIT          *hit     = NULL;     /* ptr to the current hit output data      */
-  float            usc, vfsc, fwdsc;   /* filter scores                           */
-  float            filtersc;           /* HMM null filter score                   */
+  float            usc;                /* MSV score                                */
   float            nullsc;             /* null model score                        */
-  float            seqbias;  
-  float            seq_score;          /* the corrected per-seq bit score */
-  float            sum_score;           /* the corrected reconstruction score for the seq */
-  float            pre_score, pre2_score; /* uncorrected bit scores for seq */
-  double           P;                /* P-value of a hit */
-  double           lnP;              /* log P-value of a hit */
-  int              Ld;               /* # of residues in envelopes */
-  int              d;
-  int              status;
+  double           P;                  /* P-value of a hit                         */
+  float            seq_score;          /* MSV bit score                             */
   
   if (sq->n == 0) return eslOK;    /* silently skip length 0 seqs; they'd cause us all sorts of weird problems */
   if (sq->n > 100000) ESL_EXCEPTION(eslETYPE, "Target sequence length > 100K, over comparison pipeline limit.\n(Did you mean to use nhmmer/nhmmscan?)");
@@ -724,6 +718,26 @@ p7_Pipeline(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, cons
   P = esl_gumbel_surv(seq_score,  om->evparam[p7_MMU],  om->evparam[p7_MLAMBDA]);
   if (P > pli->F1) return eslOK;
   pli->n_past_msv++;
+
+  return p7_Pipeline_PostMSV(pli, om, bg, sq, ntsq, hitlist, nullsc, usc);
+}
+
+int
+p7_Pipeline_PostMSV(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
+                    P7_TOPHITS *hitlist, float nullsc, float usc)
+{
+  P7_HIT          *hit     = NULL;     /* ptr to the current hit output data      */
+  float            vfsc, fwdsc;        /* filter scores                           */
+  float            filtersc;           /* HMM null filter score                   */
+  float            seqbias;
+  float            seq_score;          /* the corrected per-seq bit score */
+  float            sum_score;           /* the corrected reconstruction score for the seq */
+  float            pre_score, pre2_score; /* uncorrected bit scores for seq */
+  double           P;                /* P-value of a hit */
+  double           lnP;              /* log P-value of a hit */
+  int              Ld;               /* # of residues in envelopes */
+  int              d;
+  int              status;
 
   /* biased composition HMM filtering */
   if (pli->do_biasfilter)
@@ -1795,6 +1809,15 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# Mc/sec: %.2f\n", 
         (double) pli->nres * (double) pli->nnodes / (w->elapsed * 1.0e6));
   }
+  if (pli->cuda_engine != NULL) {
+    P7_CUDA_MSV_STATS stats;
+    p7_cuda_engine_GetStats(pli->cuda_engine, &stats);
+    fprintf(ofp, "# CUDA MSV H2D time: %.6f sec\n", stats.h2d_seconds);
+    fprintf(ofp, "# CUDA MSV kernel time: %.6f sec\n", stats.kernel_seconds);
+    fprintf(ofp, "# CUDA MSV D2H time: %.6f sec\n", stats.d2h_seconds);
+    fprintf(ofp, "# CUDA MSV sequences: %" PRIu64 "\n", stats.nseqs);
+    fprintf(ofp, "# CUDA MSV residues: %" PRIu64 "\n", stats.nres);
+  }
 
   return eslOK;
 }
@@ -2075,5 +2098,3 @@ main(int argc, char **argv)
 }
 #endif /*p7PIPELINE_EXAMPLE2*/
 /*--------------- end, scan mode (HMM db) example ---------------*/
-
-

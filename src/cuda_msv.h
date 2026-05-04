@@ -1,0 +1,44 @@
+/* CUDA MSV filter interface.
+ *
+ * This is intentionally separate from the selected SIMD implementation.
+ */
+#ifndef P7_CUDA_MSV_INCLUDED
+#define P7_CUDA_MSV_INCLUDED
+
+#include <stdint.h>
+
+#include "easel.h"
+#include "esl_dsqdata.h"
+#include "hmmer.h"
+
+typedef struct p7_cuda_msv_profile_s P7_CUDA_MSVPROFILE;
+typedef struct p7_cuda_msv_engine_s  P7_CUDA_ENGINE;
+
+typedef struct p7_cuda_msv_stats_s {
+  double   h2d_seconds;
+  double   kernel_seconds;
+  double   d2h_seconds;
+  uint64_t nseqs;
+  uint64_t nres;
+} P7_CUDA_MSV_STATS;
+
+extern int  p7_cuda_Available(char *errbuf, int errbuf_size);
+extern int  p7_cuda_engine_Create(int device_id, P7_CUDA_ENGINE **ret_engine, char *errbuf, int errbuf_size);
+extern void p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine);
+extern void p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_STATS *stats);
+
+extern int  p7_cuda_msvprofile_Create(const P7_OPROFILE *om, P7_CUDA_MSVPROFILE **ret_cuom, char *errbuf, int errbuf_size);
+extern void p7_cuda_msvprofile_Destroy(P7_CUDA_MSVPROFILE *cuom);
+extern int  p7_cuda_msvprofile_UpdateLength(P7_CUDA_MSVPROFILE *cuom, const P7_OPROFILE *om, int L, char *errbuf, int errbuf_size);
+
+extern int  p7_cuda_MSVFilter(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                              const ESL_DSQ *dsq, int L, float *ret_sc,
+                              char *errbuf, int errbuf_size);
+extern int  p7_cuda_MSVFilterBatch(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                   ESL_SQ_BLOCK *block, float *scores, int *statuses,
+                                   char *errbuf, int errbuf_size);
+extern int  p7_cuda_MSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                          ESL_DSQDATA_CHUNK *chu, float *scores, int *statuses,
+                                          char *errbuf, int errbuf_size);
+
+#endif /*P7_CUDA_MSV_INCLUDED*/
