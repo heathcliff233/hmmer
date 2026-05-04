@@ -171,7 +171,8 @@ Current bottleneck interpretation:
 - CPU survivor continuation after GPU MSV/bias is larger than CUDA kernel, transfer, and dsqdata read costs in the current profmark runs.
 - Null scoring is currently too small to justify moving to GPU as an isolated optimization.
 - Bias filtering is suitable for GPU only when it reuses the MSV sequence batch upload; a separate bias dsq upload erased most of the benefit.
-- Viterbi/Forward/domain continuation are now the main CPU costs to evaluate next. Forward/Backward may be partially suitable but need careful matrix/state ownership; domain definition is less obviously suitable because it is workflow-heavy and depends on posterior/domain data structures.
+- Viterbi is the next bounded candidate because it remains a scalar filter. It should be attempted only with post-bias survivor compaction and explicit score/overflow parity against the optimized 16-bit CPU filter.
+- Forward/Backward may be partially suitable but need careful matrix/state ownership because ForwardParser output feeds BackwardParser and domain definition. Domain definition is less obviously suitable because it is workflow-heavy and depends on posterior/domain data structures.
 
 Use ignored local `benchmark-data/` for larger datasets and run logs.
 
