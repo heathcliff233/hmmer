@@ -1,0 +1,170 @@
+# GPU Support TODO
+
+This is a planning document for future GPU work. Do not treat it as implemented behavior.
+
+## Current Direction
+
+The first GPU milestone should be an opt-in CUDA acceleration path for protein `hmmsearch`, focused on the MSV filter stage only.
+
+Locked decisions:
+
+- Use native CUDA, not Triton. HMMER is a C/autotools CLI codebase, and CUDA can be called from C through a small C ABI around `.cu` implementation files.
+- Add GPU code under a new additive `src/cuda/` area. Do not make it the active `impl_*` backend and do not replace the selected SSE/NEON/VMX implementation.
+- Start with `hmmsearch --gpu`; leave `phmmer`, `jackhmmer`, `hmmscan`, daemon paths, and nucleotide programs for later milestones.
+- Accelerate full MSV-compatible filtering first, not SSV-only.
+- Keep biased-composition filtering, Viterbi, Forward/Backward, domain definition, null2, hit storage, thresholding, and output on CPU for v1.
+- Do not change the pressed HMM database files (`.h3m/.h3i/.h3f/.h3p`) in v1.
+- Treat the old `origin/cuda` branch as reference material only. It targets a substantially different codebase/version and should not be ported mechanically.
+
+## Current Codebase Facts
+
+The normal protein sequence-search path is centered on `p7_Pipeline()` in `src/p7_pipeline.c`.
+
+For ordinary `hmmsearch`, the relevant early sequence of work is:
+
+1. `hmmsearch.c` reads target sequences as `ESL_SQ`/`ESL_SQ_BLOCK`.
+2. The caller configures `P7_BG` and `P7_OPROFILE` for each target length.
+3. `p7_Pipeline()` computes the base null score with `p7_bg_NullOne()`.
+4. `p7_Pipeline()` calls `p7_MSVFilter()`.
+5. The host computes the MSV bit score and Gumbel P-value and applies `pli->F1`.
+6. Survivors continue through bias filtering and later CPU stages.
+
+The MSV implementation is part of the selected optimized implementation. In the SSE path, `src/impl_sse/msvfilter.c:p7_MSVFilter()` first tries `p7_SSVFilter()` and falls back to full byte MSV DP when SSV cannot produce a result. The byte profile conversion rules live in the optimized profile implementation, for example `src/impl_sse/p7_oprofile.c`.
+
+`P7_OPROFILE` is intentionally implementation-specific. A CUDA MSV profile should therefore be a separate GPU-specific object built from generic/profile data, not a flattened or copied SSE/NEON/VMX layout.
+
+## Intended GPU Design
+
+Add a small CUDA runtime layer with C-callable entry points. The HMMER C side should own command-line options, input validation, pipeline accounting, hit reporting, and CPU continuation. The CUDA side should own device memory, CUDA streams/events, profile upload, sequence batch upload, and MSV kernels.
+
+Planned objects and interfaces:
+
+- `P7_CUDA_MSVPROFILE`: GPU-specific MSV profile data derived from generic/profile scores and MSV byteification rules.
+- `P7_CUDA_ENGINE` or equivalent runtime object: device selection, stream ownership, buffers, and batch limits.
+- `P7_CUDA_MSV_RESULT`: per-sequence status and score data sufficient for the host to reconstruct `usc`, detect overflow/high-score pass cases, and decide whether the sequence passed `F1`.
+
+Initial kernel strategy:
+
+- Map one warp to one sequence/profile comparison.
+- Implement correctness-first full byte MSV DP using shared memory for the byte shift.
+- Return enough integer state to reconstruct the CPU-style MSV score on host.
+- Treat MSV overflow/high-score behavior as a pass into downstream CPU stages.
+- Tune later with warp shuffle instructions and alternative block-level mapping only after CPU/GPU parity is proven.
+
+The host should compute or reconstruct:
+
+- sequence null score;
+- MSV `usc`;
+- MSV bit score;
+- MSV Gumbel P-value;
+- `pli->F1` pass/fail;
+- pipeline counters.
+
+Avoid GPU floating-point decisions in v1 where host reconstruction can preserve CPU behavior more closely.
+
+## Pipeline Integration TODO
+
+Split `p7_Pipeline()` without changing its public CPU behavior:
+
+- keep the existing `p7_Pipeline()` as the CPU reference path;
+- factor the downstream work after a successful MSV filter into a helper that accepts known `nullsc` and `usc`;
+- call that helper from both the existing CPU path and the future `hmmsearch --gpu` survivor path.
+
+The post-MSV helper must preserve:
+
+- zero-length and over-limit sequence behavior;
+- bias filter behavior and `--nobias`/`--max` semantics;
+- scan/search mode distinctions, even though v1 GPU should use search mode only;
+- thresholding, counters, domain definition, and output ordering;
+- existing error conventions and `pli->errbuf` usage.
+
+For explicit `--gpu`, failures should be clear and non-silent:
+
+- HMMER built without CUDA support;
+- no usable CUDA device;
+- invalid or non-GPU-capable sequence database;
+- CUDA runtime failure;
+- internal CPU/GPU validation mismatch in debug/test modes.
+
+Do not silently fall back to CPU when the user explicitly requested GPU.
+
+## Sequence Database TODO
+
+Sequence length should be handled during sequence database construction, not discovered ad hoc during GPU search.
+
+Use Easel `dsqdata` as the base for protein GPU sequence databases:
+
+- add a GPU-capable v2 format or compatible extension;
+- store per-sequence length in index metadata;
+- preserve existing `max_seqlen`, `nseq`, `nres`, packed digitized sequence data, and sequence metadata;
+- keep existing v1 readers compatible for current users;
+- reject unsupported huge protein sequences at construction time with a clear diagnostic;
+- expose a HMMER-facing builder command, tentatively `hmmseqdb <seqfile> <seqdb>`.
+
+Why construction-time lengths matter:
+
+- MSV length-dependent byte parameters need sequence length.
+- Null score depends on target length.
+- GPU batch planning should be possible before unpacking sequence payloads.
+- Length-aware batching can reduce wasted work and improve memory transfer planning.
+
+For v1, `hmmsearch --gpu` should require a GPU-capable protein `dsqdata` database. Ordinary FASTA should remain on the CPU path.
+
+Do not conflate this with `makehmmerdb`: `makehmmerdb` is currently the nucleotide/FM-index database builder for `nhmmer`. Nucleotide GPU support should later revisit `makehmmerdb` for long-target length/window metadata, but that is not part of the first protein `hmmsearch` GPU milestone.
+
+## Build And CLI TODO
+
+Build-system work:
+
+- add optional CUDA detection to `configure.ac`;
+- generate an appropriate `HAVE_CUDA`/`HMMER_CUDA` style feature define following local conventions;
+- add `src/cuda/` build rules without disturbing selected `src/impl_*`;
+- make CUDA architecture configurable instead of hardcoding a single `sm_*`;
+- keep non-CUDA builds clean and warning-free.
+
+CLI work:
+
+- add `hmmsearch --gpu` as an explicit opt-in;
+- add hidden or expert knobs for batch sizing, such as `--gpu-batch-seqs` and `--gpu-batch-res`;
+- report GPU use in the `hmmsearch` header;
+- make invalid combinations fail early with direct messages.
+
+Future CLI:
+
+- add `hmmseqdb` to build GPU-capable protein sequence databases;
+- document that v1 GPU search expects `hmmseqdb`/GPU-capable `dsqdata` input.
+
+## Validation TODO
+
+Correctness tests should come before performance tuning.
+
+Required test categories:
+
+- `dsqdata` v2 write/read round trip, including per-sequence lengths.
+- Compatibility tests showing existing v1 `dsqdata` readers still work.
+- `hmmseqdb` smoke tests for protein FASTA input and rejection of unsupported inputs.
+- CUDA MSV parity against CPU `p7_MSVFilter()` across varied model sizes, residue distributions, and sequence lengths.
+- Overflow/high-score behavior parity.
+- End-to-end `hmmsearch --gpu` versus CPU `hmmsearch` on small deterministic fixtures.
+- Error tests for non-CUDA builds, missing devices, non-GPU-capable sequence databases, and invalid options.
+
+Performance tests should separately measure:
+
+- sequence DB read/unpack cost;
+- host-to-device transfer cost;
+- kernel throughput;
+- survivor handoff cost into CPU post-MSV stages;
+- sensitivity of throughput to batch sequence count and residue count.
+
+Use ignored local `benchmark-data/` for larger datasets and run logs.
+
+## Deferred Work
+
+Do not include these in the first implementation milestone unless explicitly requested:
+
+- GPU Viterbi, Forward/Backward, null2, or domain definition.
+- GPU `hmmscan`, pressed HMM DB format changes, or profile database GPU indexing.
+- GPU `phmmer` or `jackhmmer`.
+- GPU daemon/cache integration.
+- Nucleotide `nhmmer`/`nhmmscan` GPU acceleration.
+- Rewriting CPU optimized implementations around CUDA abstractions.

@@ -18,6 +18,8 @@ The ordinary pipeline is used by protein profile search, protein sequence search
 
 The exact thresholds are controlled by `--F1`, `--F2`, `--F3`, `-E`, `-T`, domain thresholds, inclusion thresholds, bit cutoffs, and `--max`/bias options. A threshold change often affects printed counters, daemon stats, and tests that inspect outputs.
 
+For planned GPU support, preserve the CPU behavior of this pipeline while factoring a post-MSV helper that can accept a known MSV score and null score from a batch GPU prefilter. See `agents_docs/gpu-support-todo.md` before changing the early MSV/null/bias boundary.
+
 ## Domain Definition
 
 `P7_DOMAINDEF` is reusable state, not a final result container. It manages posterior decoding, envelopes, domain clustering, null2 correction, and alignment display construction. Start in `p7_domaindef.c` for boundary or posterior changes; check `p7_alidisplay.c`, `p7_tophits.c`, and tabular/text outputs after changing it.

@@ -8,6 +8,8 @@ The installed program list is defined in `src/Makefile.in`. Treat each CLI file 
 
 Start with `src/hmmsearch.c`, then inspect `p7_pipeline.c`, `p7_tophits.c`, `p7_domaindef.c`, HMM file/profile code, and the relevant DP/filter implementation.
 
+Planned GPU work adds an explicit `hmmsearch --gpu` path for protein targets. It should batch a GPU-capable sequence database through CUDA MSV filtering, then continue survivors through the existing CPU pipeline. See `agents_docs/gpu-support-todo.md`.
+
 ## Protein Model Scan: `hmmscan`
 
 `hmmscan` searches protein query sequences against a pressed HMM database. It relies on `hmmpress` output files and staged reads: the MSV filter profile first, then the rest of the optimized profile only for models that need later stages.
@@ -54,6 +56,8 @@ Start with `src/hmmpress.c` and `src/p7_hmmfile.c`.
 `makehmmerdb` builds target databases for accelerated nucleotide long-target search. It uses `libdivsufsort` to construct suffix arrays/BWT/FM-index data and writes metadata plus FM blocks.
 
 Start with `src/makehmmerdb.c`, `src/fm_general.c`, `src/fm_alphabet.c`, and `libdivsufsort/`.
+
+Do not reuse `makehmmerdb` for the first protein GPU sequence database builder. The planned builder is a separate HMMER-facing command, tentatively `hmmseqdb`, using GPU-capable Easel `dsqdata`; nucleotide/FM-index GPU metadata belongs to later `nhmmer` work.
 
 ## Daemon Search
 

@@ -46,6 +46,8 @@ Useful source-local tests include:
 
 Run `make check` for broad behavior changes. For a focused change, run the relevant unit test and one or more integration scripts through the configured test harness, then escalate to `make check` when risk touches shared pipeline, output, file formats, or parallel behavior.
 
+Planned GPU support needs dedicated tests before performance work: CUDA MSV parity against CPU `p7_MSVFilter()`, GPU-capable `dsqdata` length metadata round trips, `hmmseqdb` construction smoke tests, and end-to-end `hmmsearch --gpu` versus CPU output comparisons. See `agents_docs/gpu-support-todo.md`.
+
 ## Documentation
 
 - `documentation/man/`: installed man pages. Edit `*.man.in` sources; generated `*.man` files are configured outputs.
