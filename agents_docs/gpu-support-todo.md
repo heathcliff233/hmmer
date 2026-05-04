@@ -164,6 +164,12 @@ Performance tests should separately measure:
 - survivor handoff cost into CPU post-MSV stages;
 - sensitivity of throughput to batch sequence count and residue count.
 
+Current bottleneck interpretation:
+
+- CPU survivor continuation after GPU MSV is larger than CUDA kernel, transfer, and dsqdata read costs in the current full-profmark runs.
+- Null scoring is currently too small to justify moving to GPU as an isolated optimization.
+- Bias filtering is measurable, but Viterbi/Forward/domain continuation are larger CPU costs; evaluate those stages before prioritizing a GPU bias filter.
+
 Use ignored local `benchmark-data/` for larger datasets and run logs.
 
 Current benchmark guidance:
