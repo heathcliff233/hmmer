@@ -27,6 +27,11 @@ FLOAT_COLUMNS = [
     "gpu_vit_d2h",
     "gpu_vit_sequences",
     "gpu_vit_residues",
+    "gpu_bck_h2d",
+    "gpu_bck_kernel",
+    "gpu_bck_d2h",
+    "gpu_bck_sequences",
+    "gpu_bck_residues",
     "stage_null",
     "stage_msv_host",
     "stage_bias",
@@ -47,6 +52,7 @@ COUNT_COLUMNS = [
     "gpu_batches",
     "gpu_fwd_batches",
     "gpu_vit_batches",
+    "gpu_bck_batches",
 ]
 
 

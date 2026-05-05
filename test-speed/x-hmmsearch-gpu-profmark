@@ -77,6 +77,8 @@ parser.add_argument("--gpu-vit-prefilter", action="store_true")
 parser.add_argument("--gpu-vit-compare", action="store_true")
 parser.add_argument("--gpu-fwd-prefilter", action="store_true")
 parser.add_argument("--gpu-fwd-compare", action="store_true")
+parser.add_argument("--gpu-fb-parser", action="store_true")
+parser.add_argument("--gpu-fb-compare", action="store_true")
 parser.add_argument("--gpu-vit-min-seqs", default="1")
 parser.add_argument("--gpu-fwd-min-seqs", default="1")
 args = parser.parse_args()
@@ -101,7 +103,7 @@ if not (gpu_targetdb.with_suffix(gpu_targetdb.suffix + ".dsqi")).exists():
 
 summary = logs / "profmark-gpu-summary.tsv"
 with summary.open("w") as s:
-    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tpast_msv\tpast_bias\tpast_vit\tpast_fwd\tgpu_batches\tgpu_fwd_batches\tgpu_vit_batches\tgpu_batch_seqs\tgpu_batch_res\tgpu_load_seqs\tgpu_load_res\tgpu_vit_min_seqs\tgpu_fwd_min_seqs\tgpu_read\tgpu_meta\tgpu_survivor\tgpu_h2d\tgpu_kernel\tgpu_d2h\tgpu_bias_h2d\tgpu_bias_kernel\tgpu_bias_d2h\tgpu_fwd_h2d\tgpu_fwd_kernel\tgpu_fwd_d2h\tgpu_fwd_sequences\tgpu_fwd_residues\tgpu_vit_h2d\tgpu_vit_kernel\tgpu_vit_d2h\tgpu_vit_sequences\tgpu_vit_residues\tstage_null\tstage_msv_host\tstage_bias\tstage_vit\tstage_fwd\tstage_bck\tstage_domain\tstage_null2_output\n")
+    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tpast_msv\tpast_bias\tpast_vit\tpast_fwd\tgpu_batches\tgpu_fwd_batches\tgpu_vit_batches\tgpu_bck_batches\tgpu_batch_seqs\tgpu_batch_res\tgpu_load_seqs\tgpu_load_res\tgpu_vit_min_seqs\tgpu_fwd_min_seqs\tgpu_read\tgpu_meta\tgpu_survivor\tgpu_h2d\tgpu_kernel\tgpu_d2h\tgpu_bias_h2d\tgpu_bias_kernel\tgpu_bias_d2h\tgpu_fwd_h2d\tgpu_fwd_kernel\tgpu_fwd_d2h\tgpu_fwd_sequences\tgpu_fwd_residues\tgpu_vit_h2d\tgpu_vit_kernel\tgpu_vit_d2h\tgpu_vit_sequences\tgpu_vit_residues\tgpu_bck_h2d\tgpu_bck_kernel\tgpu_bck_d2h\tgpu_bck_sequences\tgpu_bck_residues\tstage_null\tstage_msv_host\tstage_bias\tstage_vit\tstage_fwd\tstage_bck\tstage_domain\tstage_null2_output\n")
     for q in args.queries:
         sto = queries / (q + ".sto")
         hmm = queries / (q + ".hmm")
@@ -127,6 +129,10 @@ with summary.open("w") as s:
             gpu_cmd.append("--gpu-fwd-prefilter")
         if args.gpu_fwd_compare:
             gpu_cmd.append("--gpu-fwd-compare")
+        if args.gpu_fb_parser:
+            gpu_cmd.append("--gpu-fb-parser")
+        if args.gpu_fb_compare:
+            gpu_cmd.append("--gpu-fb-compare")
         if args.gpu_vit_prefilter:
             gpu_cmd.append("--gpu-vit-prefilter")
         if args.gpu_vit_compare:
@@ -154,6 +160,11 @@ with summary.open("w") as s:
         vit_d2h = parse_stat(gpu_out, "CUDA Viterbi D2H time:")
         vit_sequences = parse_stat(gpu_out, "CUDA Viterbi sequences:")
         vit_residues = parse_stat(gpu_out, "CUDA Viterbi residues:")
+        bck_h2d = parse_stat(gpu_out, "CUDA Backward H2D time:")
+        bck_kernel = parse_stat(gpu_out, "CUDA Backward kernel time:")
+        bck_d2h = parse_stat(gpu_out, "CUDA Backward D2H time:")
+        bck_sequences = parse_stat(gpu_out, "CUDA Backward sequences:")
+        bck_residues = parse_stat(gpu_out, "CUDA Backward residues:")
         gpu_read = parse_stat(gpu_out, "GPU dsqdata read/unpack time:")
         gpu_meta = parse_stat(gpu_out, "GPU sequence metadata time:")
         gpu_survivor = parse_stat(gpu_out, "GPU CPU survivor time:")
@@ -164,6 +175,7 @@ with summary.open("w") as s:
         gpu_batches = parse_stat(gpu_out, "CUDA MSV batches:")
         gpu_fwd_batches = parse_stat(gpu_out, "CUDA Forward batches:")
         gpu_vit_batches = parse_stat(gpu_out, "CUDA Viterbi batches:")
+        gpu_bck_batches = parse_stat(gpu_out, "CUDA Backward batches:")
         stage_null = parse_stat(gpu_out, "Stage null time:")
         stage_msv_host = parse_stat(gpu_out, "Stage MSV host time:")
         stage_bias = parse_stat(gpu_out, "Stage bias time:")
@@ -177,13 +189,14 @@ with summary.open("w") as s:
             "{:.3f}".format(cpu_wall / gpu_wall if gpu_wall > 0 else 0.0),
             str(len(cpu_names - gpu_names)), str(len(gpu_names - cpu_names)),
             past_msv, past_bias, past_vit, past_fwd,
-            gpu_batches, gpu_fwd_batches, gpu_vit_batches,
+            gpu_batches, gpu_fwd_batches, gpu_vit_batches, gpu_bck_batches,
             args.gpu_batch_seqs, args.gpu_batch_res, args.gpu_load_seqs, args.gpu_load_res,
             args.gpu_vit_min_seqs, args.gpu_fwd_min_seqs,
             gpu_read, gpu_meta, gpu_survivor, h2d, kernel, d2h,
             bias_h2d, bias_kernel, bias_d2h,
             fwd_h2d, fwd_kernel, fwd_d2h, fwd_sequences, fwd_residues,
             vit_h2d, vit_kernel, vit_d2h, vit_sequences, vit_residues,
+            bck_h2d, bck_kernel, bck_d2h, bck_sequences, bck_residues,
             stage_null, stage_msv_host, stage_bias, stage_vit, stage_fwd,
             stage_bck, stage_domain, stage_null2_output,
         ]

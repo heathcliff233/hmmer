@@ -65,11 +65,13 @@ typedef struct {
   int               gpu_load_res;   /* target residues per dsqdata load       */
   float             gpu_msv_slack;  /* optional extra nats for experiments     */
   int               gpu_fwd_prefilter; /* experimental CUDA Forward score gate  */
+  int               gpu_fb_parser;     /* experimental CUDA Forward/Backward parser state */
   int               gpu_vit_prefilter; /* experimental CUDA Viterbi score gate  */
   int               gpu_fwd_min_seqs;  /* min candidates for CUDA Forward batch */
   int               gpu_vit_min_seqs;  /* min candidates for CUDA Viterbi batch */
   int               gpu_fwd_compare;   /* debug CUDA-vs-CPU Forward score check */
   int               gpu_vit_compare;   /* debug CUDA-vs-CPU Viterbi score check */
+  int               gpu_fb_compare;    /* debug CUDA-vs-CPU parser state check  */
 } WORKER_INFO;
 
 static double
@@ -84,6 +86,9 @@ static int gpu_search_batch_Init(GPU_SEARCH_BATCH *batch);
 static void gpu_search_batch_Reset(GPU_SEARCH_BATCH *batch);
 static void gpu_search_batch_Destroy(GPU_SEARCH_BATCH *batch);
 static int gpu_search_batch_AddChunk(GPU_SEARCH_BATCH *batch, ESL_DSQDATA_CHUNK *chu);
+static int gpu_PostFwd(WORKER_INFO *info, const ESL_SQ *dbsq, float nullsc, float filtersc, float fwdsc, char *errbuf, int errbuf_size);
+static void gpu_CompareParserState(WORKER_INFO *info, const ESL_SQ *dbsq, const P7_OMX *cpu_oxf, const P7_OMX *cpu_oxb,
+                                   float cpu_fwdsc, float gpu_fwdsc, float gpu_bcksc);
 
 static int
 gpu_search_batch_Init(GPU_SEARCH_BATCH *batch)
@@ -168,6 +173,83 @@ gpu_search_batch_AddChunk(GPU_SEARCH_BATCH *batch, ESL_DSQDATA_CHUNK *chu)
   return eslOK;
 }
 
+static void
+gpu_CompareParserState(WORKER_INFO *info, const ESL_SQ *dbsq, const P7_OMX *cpu_oxf, const P7_OMX *cpu_oxb,
+                       float cpu_fwdsc, float gpu_fwdsc, float gpu_bcksc)
+{
+  float cpu_bcksc = 0.0f;
+  float max_fwd = 0.0f;
+  float max_bck = 0.0f;
+  int   max_fwd_i = 0;
+  int   max_fwd_s = 0;
+  int   max_bck_i = 0;
+  int   max_bck_s = 0;
+
+  if (!info || !dbsq || !cpu_oxf || !cpu_oxb) return;
+  if (cpu_oxb->xmx[p7X_N] > 0.0f) cpu_bcksc = cpu_oxb->totscale + logf(cpu_oxb->xmx[p7X_N]);
+
+  for (int i = 0; i <= dbsq->n; i++) {
+    for (int s = 0; s < p7X_NXCELLS; s++) {
+      float df = fabsf(cpu_oxf->xmx[i*p7X_NXCELLS+s] - info->pli->oxf->xmx[i*p7X_NXCELLS+s]);
+      float db = fabsf(cpu_oxb->xmx[i*p7X_NXCELLS+s] - info->pli->oxb->xmx[i*p7X_NXCELLS+s]);
+      if (df > max_fwd) { max_fwd = df; max_fwd_i = i; max_fwd_s = s; }
+      if (db > max_bck) { max_bck = db; max_bck_i = i; max_bck_s = s; }
+    }
+  }
+
+  if (fabsf(cpu_fwdsc - gpu_fwdsc) > 0.01f || fabsf(cpu_bcksc - gpu_bcksc) > 0.01f || max_fwd > 0.01f || max_bck > 0.01f) {
+    fprintf(stderr, "CUDAFB\t%s\tL=%ld\tcpu_fwd=%.6f\tgpu_fwd=%.6f\tcpu_bck=%.6f\tgpu_bck=%.6f\tmax_fwd=%.6f@%d/%d\tmax_bck=%.6f@%d/%d\n",
+            dbsq->name ? dbsq->name : "-", (long) dbsq->n,
+            cpu_fwdsc, gpu_fwdsc, cpu_bcksc, gpu_bcksc,
+            max_fwd, max_fwd_i, max_fwd_s, max_bck, max_bck_i, max_bck_s);
+  }
+}
+
+static int
+gpu_PostFwd(WORKER_INFO *info, const ESL_SQ *dbsq, float nullsc, float filtersc, float fwdsc, char *errbuf, int errbuf_size)
+{
+  P7_OMX *cpu_oxf = NULL;
+  P7_OMX *cpu_oxb = NULL;
+  float gpu_fwdsc = 0.0f;
+  float gpu_bcksc = 0.0f;
+  float seq_score;
+  double P;
+  double t0;
+  int status;
+
+  if (!info || !dbsq) return eslEINVAL;
+  if (!info->gpu_fb_parser) {
+    return p7_Pipeline_PostFwd(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, filtersc, fwdsc);
+  }
+
+  seq_score = (fwdsc - filtersc) / eslCONST_LOG2;
+  P = esl_exp_surv(seq_score, info->om->evparam[p7_FTAU], info->om->evparam[p7_FLAMBDA]);
+  if (P > info->pli->F3) return eslOK;
+
+  if (info->gpu_fb_compare) {
+    cpu_oxf = p7_omx_Create(info->om->M, 0, dbsq->n);
+    cpu_oxb = p7_omx_Create(info->om->M, 0, dbsq->n);
+    if (!cpu_oxf || !cpu_oxb) { status = eslEMEM; goto ERROR; }
+    p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, cpu_oxf, &fwdsc);
+    p7_BackwardParser(dbsq->dsq, dbsq->n, info->om, cpu_oxf, cpu_oxb, NULL);
+  }
+
+  t0 = hmmsearch_WallTime();
+  status = p7_cuda_ForwardBackwardParser(info->cuda_engine, info->cuda_msv, dbsq->dsq, dbsq->n,
+                                         info->pli->oxf, info->pli->oxb, &gpu_fwdsc, &gpu_bcksc,
+                                         errbuf, errbuf_size);
+  info->pli->time_bck += hmmsearch_WallTime() - t0;
+  if (status != eslOK) goto ERROR;
+
+  if (info->gpu_fb_compare) gpu_CompareParserState(info, dbsq, cpu_oxf, cpu_oxb, fwdsc, gpu_fwdsc, gpu_bcksc);
+  status = p7_Pipeline_PostFwdWithParserMatrices(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, filtersc, gpu_fwdsc);
+
+ERROR:
+  p7_omx_Destroy(cpu_oxf);
+  p7_omx_Destroy(cpu_oxb);
+  return status;
+}
+
 #define REPOPTS     "-E,-T,--cut_ga,--cut_nc,--cut_tc"
 #define DOMREPOPTS  "--domE,--domT,--cut_ga,--cut_nc,--cut_tc"
 #define INCOPTS     "--incE,--incT,--cut_ga,--cut_nc,--cut_tc"
@@ -224,10 +306,12 @@ static ESL_OPTIONS options[] = {
   { "--gpu-msv-slack", eslARG_REAL,  "0.0", NULL, "x>=0", NULL, "--gpu", NULL,           "experimental extra nats added to GPU MSV scores",              99 },
   { "--gpu-vit-prefilter", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,          "experimental CUDA Viterbi score prefilter before CPU Forward", 99 },
   { "--gpu-fwd-prefilter", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,          "experimental CUDA Forward score prefilter before CPU Forward", 99 },
+  { "--gpu-fb-parser", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,              "experimental CUDA Forward/Backward parser state handoff",      99 },
   { "--gpu-vit-min-seqs", eslARG_INT, "1", NULL, "n>0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Viterbi prefilter",   99 },
   { "--gpu-fwd-min-seqs", eslARG_INT, "1", NULL, "n>0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Forward prefilter",   99 },
   { "--gpu-fwd-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "debug compare CUDA Forward scores to CPU Forward scores",      99 },
   { "--gpu-vit-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "debug compare CUDA Viterbi scores to CPU Viterbi scores",      99 },
+  { "--gpu-fb-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,             "debug compare CUDA parser state to CPU Forward/Backward",      99 },
 
 /* Other options */
   { "--nonull2",    eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL,  NULL,            "turn off biased composition score corrections",               12 },
@@ -618,10 +702,12 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     info[i].gpu_msv_slack  = esl_opt_GetReal(go, "--gpu-msv-slack");
     info[i].gpu_vit_prefilter = esl_opt_GetBoolean(go, "--gpu-vit-prefilter");
     info[i].gpu_fwd_prefilter = esl_opt_GetBoolean(go, "--gpu-fwd-prefilter");
+    info[i].gpu_fb_parser     = esl_opt_GetBoolean(go, "--gpu-fb-parser");
     info[i].gpu_vit_min_seqs  = esl_opt_GetInteger(go, "--gpu-vit-min-seqs");
     info[i].gpu_fwd_min_seqs  = esl_opt_GetInteger(go, "--gpu-fwd-min-seqs");
     info[i].gpu_fwd_compare   = esl_opt_GetBoolean(go, "--gpu-fwd-compare");
     info[i].gpu_vit_compare   = esl_opt_GetBoolean(go, "--gpu-vit-compare");
+    info[i].gpu_fb_compare    = esl_opt_GetBoolean(go, "--gpu-fb-compare");
 #ifdef HMMER_THREADS
 	  info[i].queue = queue;
 #endif
@@ -1641,7 +1727,8 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
                     t0 = hmmsearch_WallTime();
                     p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
                     info->pli->time_fwd += hmmsearch_WallTime() - t0;
-                    p7_Pipeline_PostFwd(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, gpu_filtersc[i], fwdsc);
+                    status = gpu_PostFwd(info, dbsq, nullsc, gpu_filtersc[i], fwdsc, errbuf, sizeof(errbuf));
+                    if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
                   }
                 } else {
                   gpu_vit_idx[gpu_vit_n++] = i;
@@ -1653,7 +1740,21 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
                 if (passed) gpu_fwd_idx[gpu_fwd_n++] = i;
               } else {
                 if (info->gpu_vit_compare) gpu_vit_idx[gpu_vit_n++] = i;
-                p7_Pipeline_PostMSVWithFilter(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack, gpu_filtersc[i]);
+                if (info->gpu_fb_parser) {
+                  float fwdsc;
+                  status = p7_Pipeline_PostMSVWithFilterPreFwd(info->pli, info->om, info->bg, dbsq, usc + info->gpu_msv_slack, gpu_filtersc[i], &passed);
+                  if (status != eslOK) goto ERROR;
+                  if (passed) {
+                    p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
+                    t0 = hmmsearch_WallTime();
+                    p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
+                    info->pli->time_fwd += hmmsearch_WallTime() - t0;
+                    status = gpu_PostFwd(info, dbsq, nullsc, gpu_filtersc[i], fwdsc, errbuf, sizeof(errbuf));
+                    if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
+                  }
+                } else {
+                  p7_Pipeline_PostMSVWithFilter(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack, gpu_filtersc[i]);
+                }
               }
             }
           } else {
@@ -1671,7 +1772,8 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
                   t0 = hmmsearch_WallTime();
                   p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
                   info->pli->time_fwd += hmmsearch_WallTime() - t0;
-                  p7_Pipeline_PostFwd(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, nullsc, fwdsc);
+                  status = gpu_PostFwd(info, dbsq, nullsc, nullsc, fwdsc, errbuf, sizeof(errbuf));
+                  if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
                 }
               } else {
                 gpu_vit_idx[gpu_vit_n++] = i;
@@ -1683,7 +1785,21 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
               if (passed) gpu_fwd_idx[gpu_fwd_n++] = i;
             } else {
               if (info->gpu_vit_compare) gpu_vit_idx[gpu_vit_n++] = i;
-              p7_Pipeline_PostMSVWithFilter(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack, nullsc);
+              if (info->gpu_fb_parser) {
+                float fwdsc;
+                status = p7_Pipeline_PostMSVWithFilterPreFwd(info->pli, info->om, info->bg, dbsq, usc + info->gpu_msv_slack, nullsc, &passed);
+                if (status != eslOK) goto ERROR;
+                if (passed) {
+                  p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
+                  t0 = hmmsearch_WallTime();
+                  p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
+                  info->pli->time_fwd += hmmsearch_WallTime() - t0;
+                  status = gpu_PostFwd(info, dbsq, nullsc, nullsc, fwdsc, errbuf, sizeof(errbuf));
+                  if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
+                }
+              } else {
+                p7_Pipeline_PostMSVWithFilter(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack, nullsc);
+              }
             }
           }
           info->pli->time_gpu_survivor += hmmsearch_WallTime() - t0;
@@ -1764,7 +1880,8 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
               t0 = hmmsearch_WallTime();
               p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
               info->pli->time_fwd += hmmsearch_WallTime() - t0;
-              p7_Pipeline_PostFwd(info->pli, info->om, info->bg, dbsq, NULL, info->th, gpu_nullsc[i], filtersc, fwdsc);
+              status = gpu_PostFwd(info, dbsq, gpu_nullsc[i], filtersc, fwdsc, errbuf, sizeof(errbuf));
+              if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
             }
           }
           p7_pipeline_Reuse(info->pli);
@@ -1809,7 +1926,8 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
             t0 = hmmsearch_WallTime();
             p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
             info->pli->time_fwd += hmmsearch_WallTime() - t0;
-            p7_Pipeline_PostFwd(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, filtersc, fwdsc);
+            status = gpu_PostFwd(info, dbsq, nullsc, filtersc, fwdsc, errbuf, sizeof(errbuf));
+            if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
             p7_pipeline_Reuse(info->pli);
             dbsq->dsq = NULL;
             continue;
@@ -1848,7 +1966,10 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
               dbsq->dsq = NULL;
               continue;
             }
-            if (cpu_pass) p7_Pipeline_PostFwd(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, filtersc, cpu_fwdsc);
+            if (cpu_pass) {
+              status = gpu_PostFwd(info, dbsq, nullsc, filtersc, cpu_fwdsc, errbuf, sizeof(errbuf));
+              if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
+            }
             p7_pipeline_Reuse(info->pli);
             dbsq->dsq = NULL;
             continue;
@@ -1871,8 +1992,10 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
               info->pli->time_fwd += hmmsearch_WallTime() - t0;
               seq_score = (fwdsc - filtersc) / eslCONST_LOG2;
               P = esl_exp_surv(seq_score, info->om->evparam[p7_FTAU], info->om->evparam[p7_FLAMBDA]);
-              if (P <= info->pli->F3)
-                p7_Pipeline_PostFwd(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, filtersc, fwdsc);
+              if (P <= info->pli->F3) {
+                status = gpu_PostFwd(info, dbsq, nullsc, filtersc, fwdsc, errbuf, sizeof(errbuf));
+                if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
+              }
             }
           } else if (gpu_fwd_statuses[j] == eslERANGE) {
             float filtersc = info->pli->do_biasfilter ? gpu_filtersc[i] : nullsc;
@@ -1881,7 +2004,8 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
             t0 = hmmsearch_WallTime();
             p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
             info->pli->time_fwd += hmmsearch_WallTime() - t0;
-            p7_Pipeline_PostFwd(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, filtersc, fwdsc);
+            status = gpu_PostFwd(info, dbsq, nullsc, filtersc, fwdsc, errbuf, sizeof(errbuf));
+            if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
           }
           p7_pipeline_Reuse(info->pli);
           dbsq->dsq = NULL;

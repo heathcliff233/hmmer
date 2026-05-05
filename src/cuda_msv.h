@@ -27,6 +27,9 @@ typedef struct p7_cuda_msv_stats_s {
   double   vit_h2d_seconds;
   double   vit_kernel_seconds;
   double   vit_d2h_seconds;
+  double   bck_h2d_seconds;
+  double   bck_kernel_seconds;
+  double   bck_d2h_seconds;
   uint64_t nseqs;
   uint64_t nres;
   uint64_t nbatches;
@@ -36,6 +39,9 @@ typedef struct p7_cuda_msv_stats_s {
   uint64_t vit_nseqs;
   uint64_t vit_nres;
   uint64_t vit_nbatches;
+  uint64_t bck_nseqs;
+  uint64_t bck_nres;
+  uint64_t bck_nbatches;
 } P7_CUDA_MSV_STATS;
 
 extern int  p7_cuda_Available(char *errbuf, int errbuf_size);
@@ -67,5 +73,9 @@ extern int  p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_C
                                               ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                               float *scores, int *statuses,
                                               char *errbuf, int errbuf_size);
+extern int  p7_cuda_ForwardBackwardParser(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                           const ESL_DSQ *dsq, int L, P7_OMX *oxf, P7_OMX *oxb,
+                                           float *ret_fwdsc, float *ret_bcksc,
+                                           char *errbuf, int errbuf_size);
 
 #endif /*P7_CUDA_MSV_INCLUDED*/

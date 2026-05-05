@@ -43,6 +43,9 @@ p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_STATS *stats)
     stats->vit_h2d_seconds     = 0.0;
     stats->vit_kernel_seconds  = 0.0;
     stats->vit_d2h_seconds     = 0.0;
+    stats->bck_h2d_seconds     = 0.0;
+    stats->bck_kernel_seconds  = 0.0;
+    stats->bck_d2h_seconds     = 0.0;
     stats->nseqs           = 0;
     stats->nres            = 0;
     stats->nbatches        = 0;
@@ -52,6 +55,9 @@ p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_STATS *stats)
     stats->vit_nseqs       = 0;
     stats->vit_nres        = 0;
     stats->vit_nbatches    = 0;
+    stats->bck_nseqs       = 0;
+    stats->bck_nres        = 0;
+    stats->bck_nbatches    = 0;
   }
 }
 
@@ -134,6 +140,17 @@ p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
                                   ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                   float *scores, int *statuses,
                                   char *errbuf, int errbuf_size)
+{
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
+p7_cuda_ForwardBackwardParser(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                              const ESL_DSQ *dsq, int L, P7_OMX *oxf, P7_OMX *oxb,
+                              float *ret_fwdsc, float *ret_bcksc,
+                              char *errbuf, int errbuf_size)
 {
   if (errbuf && errbuf_size > 0)
     snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");

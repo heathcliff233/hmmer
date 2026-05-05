@@ -852,6 +852,21 @@ int
 p7_Pipeline_PostFwd(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
                     P7_TOPHITS *hitlist, float nullsc, float filtersc, float fwdsc)
 {
+  double           t0;
+
+  /* ok, it's for real. Now a Backwards parser pass, and hand it to domain definition workflow */
+  p7_omx_GrowTo(pli->oxb, om->M, 0, sq->n);
+  t0 = p7_pipeline_WallTime();
+  p7_BackwardParser(sq->dsq, sq->n, om, pli->oxf, pli->oxb, NULL);
+  pli->time_bck += p7_pipeline_WallTime() - t0;
+
+  return p7_Pipeline_PostFwdWithParserMatrices(pli, om, bg, sq, ntsq, hitlist, nullsc, filtersc, fwdsc);
+}
+
+int
+p7_Pipeline_PostFwdWithParserMatrices(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *sq, const ESL_SQ *ntsq,
+                                      P7_TOPHITS *hitlist, float nullsc, float filtersc, float fwdsc)
+{
   P7_HIT          *hit     = NULL;     /* ptr to the current hit output data      */
   float            seqbias;
   float            seq_score;          /* the corrected per-seq bit score */
@@ -869,12 +884,6 @@ p7_Pipeline_PostFwd(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, const ESL_SQ *
   P = esl_exp_surv(seq_score,  om->evparam[p7_FTAU],  om->evparam[p7_FLAMBDA]);
   if (P > pli->F3) return eslOK;
   pli->n_past_fwd++;
-
-  /* ok, it's for real. Now a Backwards parser pass, and hand it to domain definition workflow */
-  p7_omx_GrowTo(pli->oxb, om->M, 0, sq->n);
-  t0 = p7_pipeline_WallTime();
-  p7_BackwardParser(sq->dsq, sq->n, om, pli->oxf, pli->oxb, NULL);
-  pli->time_bck += p7_pipeline_WallTime() - t0;
 
   t0 = p7_pipeline_WallTime();
   status = p7_domaindef_ByPosteriorHeuristics(sq, ntsq, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, FALSE, NULL, NULL, NULL);
@@ -1929,6 +1938,9 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# CUDA Viterbi H2D time: %.6f sec\n", stats.vit_h2d_seconds);
     fprintf(ofp, "# CUDA Viterbi kernel time: %.6f sec\n", stats.vit_kernel_seconds);
     fprintf(ofp, "# CUDA Viterbi D2H time: %.6f sec\n", stats.vit_d2h_seconds);
+    fprintf(ofp, "# CUDA Backward H2D time: %.6f sec\n", stats.bck_h2d_seconds);
+    fprintf(ofp, "# CUDA Backward kernel time: %.6f sec\n", stats.bck_kernel_seconds);
+    fprintf(ofp, "# CUDA Backward D2H time: %.6f sec\n", stats.bck_d2h_seconds);
     fprintf(ofp, "# CUDA MSV sequences: %" PRIu64 "\n", stats.nseqs);
     fprintf(ofp, "# CUDA MSV residues: %" PRIu64 "\n", stats.nres);
     fprintf(ofp, "# CUDA MSV batches: %" PRIu64 "\n", stats.nbatches);
@@ -1938,6 +1950,9 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# CUDA Viterbi sequences: %" PRIu64 "\n", stats.vit_nseqs);
     fprintf(ofp, "# CUDA Viterbi residues: %" PRIu64 "\n", stats.vit_nres);
     fprintf(ofp, "# CUDA Viterbi batches: %" PRIu64 "\n", stats.vit_nbatches);
+    fprintf(ofp, "# CUDA Backward sequences: %" PRIu64 "\n", stats.bck_nseqs);
+    fprintf(ofp, "# CUDA Backward residues: %" PRIu64 "\n", stats.bck_nres);
+    fprintf(ofp, "# CUDA Backward batches: %" PRIu64 "\n", stats.bck_nbatches);
   }
   fprintf(ofp, "# Stage null time: %.6f sec\n", pli->time_null);
   fprintf(ofp, "# Stage MSV host time: %.6f sec\n", pli->time_msv);
