@@ -13,7 +13,7 @@ Last updated: 2026-05-05
   - `src/hmm/hmm_impl.cpp`
   - `tests/test_benchmark.cpp`
 
-No license file was present in the inspected checkout. Do not copy code from this repository into HMMER unless licensing is clarified. For the current GPU work, treat the repository only as a source of high-level CUDA DP design cues.
+No license file was present in the inspected checkout. Do not copy code from this repository into HMMER unless licensing is clarified. For the current GPU work, treat the repository only as a source of high-level CUDA DP design cues and implementation patterns to reason from.
 
 ## What It Implements
 
@@ -75,7 +75,7 @@ Do not start by porting the dense `cuda-hmm` kernels. Borrow ideas only where th
 
 The external project was not built, and that is intentional for this task. We are borrowing high-level CUDA DP design cues only, not copying, linking, vendoring, or treating the external repository as a dependency. Source inspection was sufficient because the model and state representation are visibly incompatible with HMMER's Plan7 optimized pipeline.
 
-Do not add CMake to this HMMER worktree just to evaluate or reuse ideas from `cuda-hmm`. HMMER remains an autotools project, and any GPU implementation that lands here should be native to the existing `configure`/`Makefile.in` flow. If a future task needs to reproduce an external benchmark, do that outside this repository and record only the relevant observations.
+Do not add CMake to this HMMER worktree just to evaluate or reuse ideas from `cuda-hmm`. No CMake integration is needed because this is not a migration or build dependency. HMMER remains an autotools project, and any GPU implementation that lands here should be native to the existing `configure`/`Makefile.in` flow. If a future task needs to reproduce an external benchmark, do that outside this repository and record only the relevant observations.
 
 Current local environment check:
 
