@@ -1,4 +1,13 @@
 #include "p7_cuda_internal.h"
+#include <sys/time.h>
+
+static inline double
+seconds_now_fwd(void)
+{
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (double) tv.tv_sec + (double) tv.tv_usec * 1e-6;
+}
 
 __device__ static inline uint8_t
 u8_sub_sat(uint8_t a, uint8_t b)
@@ -543,7 +552,11 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(engine->d_fwd_filtersc, filtersc, sizeof(float) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(fwd filtersc)")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(h2d1);
-  cudaEventSynchronize(h2d1);
+  {
+    double tw0 = seconds_now_fwd();
+    cudaEventSynchronize(h2d1);
+    engine->stats.dispatch_wait_seconds += (seconds_now_fwd() - tw0);
+  }
 
   cudaEventRecord(k0);
   if (use_prefix) {
@@ -575,7 +588,11 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_forward_pass_kernel launch")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(k1);
-  cudaEventSynchronize(k1);
+  {
+    double tw0 = seconds_now_fwd();
+    cudaEventSynchronize(k1);
+    engine->stats.dispatch_wait_seconds += (seconds_now_fwd() - tw0);
+  }
 
   cudaEventRecord(d2h0);
   if (scores) {
@@ -586,17 +603,26 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(passed, engine->d_fwd_passed, sizeof(int) * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(fwd passed)")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(d2h1);
-  cudaEventSynchronize(d2h1);
+  {
+    double tw0 = seconds_now_fwd();
+    cudaEventSynchronize(d2h1);
+    engine->stats.dispatch_wait_seconds += (seconds_now_fwd() - tw0);
+  }
 
   engine->stats.fwd_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.fwd_kernel_seconds += elapsed_seconds(k0, k1);
   engine->stats.fwd_d2h_seconds    += elapsed_seconds(d2h0, d2h1);
   engine->stats.fwd_nseqs          += nidx;
+  engine->stats.fwd_prefilter_nseqs += nidx;
   for (int i = 0; i < nidx; i++) {
     int si = seqidx ? seqidx[i] : i;
-    if (si >= 0 && si < nseq) engine->stats.fwd_nres += h_lengths[si];
+    if (si >= 0 && si < nseq) {
+      engine->stats.fwd_nres += h_lengths[si];
+      engine->stats.fwd_prefilter_nres += h_lengths[si];
+    }
   }
   engine->stats.fwd_nbatches       += 1;
+  engine->stats.fwd_prefilter_nbatches += 1;
 
 CUDA_ERROR:
   cudaEventDestroy(h2d0);

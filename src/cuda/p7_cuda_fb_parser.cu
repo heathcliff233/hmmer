@@ -1282,6 +1282,9 @@ p7_cuda_ForwardBackwardParser(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   engine->stats.fwd_nseqs          += 1;
   engine->stats.fwd_nres           += L;
   engine->stats.fwd_nbatches       += 1;
+  engine->stats.fwd_parser_nseqs   += 1;
+  engine->stats.fwd_parser_nres    += L;
+  engine->stats.fwd_parser_nbatches += 1;
   engine->stats.bck_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.bck_kernel_seconds += elapsed_seconds(bk0, bk1);
   engine->stats.bck_d2h_seconds    += elapsed_seconds(d2h0, d2h1);
@@ -1564,6 +1567,8 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
   engine->stats.fwd_d2h_seconds    += elapsed_seconds(d2h0, d2h1) * 0.5;
   engine->stats.fwd_nseqs          += nidx;
   engine->stats.fwd_nbatches       += 1;
+  engine->stats.fwd_parser_nseqs   += nidx;
+  engine->stats.fwd_parser_nbatches += 1;
   engine->stats.bck_h2d_seconds    += 0.0;
   engine->stats.bck_kernel_seconds += elapsed_seconds(bk0, bk1);
   engine->stats.bck_d2h_seconds    += elapsed_seconds(d2h0, d2h1) * 0.5;
@@ -1574,6 +1579,7 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
     if (si >= 0 && si < nseq) {
       engine->stats.fwd_nres += h_lengths[si];
       engine->stats.bck_nres += h_lengths[si];
+      engine->stats.fwd_parser_nres += h_lengths[si];
     }
   }
 

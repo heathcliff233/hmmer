@@ -30,8 +30,16 @@ typedef struct {
   int               gpu_fwd_prefilter; /* experimental CUDA Forward score gate  */
   int               gpu_fb_parser;     /* experimental CUDA Forward/Backward parser state */
   int               gpu_vit_prefilter; /* experimental CUDA Viterbi score gate  */
+  int               gpu_vit_largem;    /* allow Viterbi prefilter on large-M models */
+  int               gpu_fwd_largem;    /* allow Forward prefilter on large-M models */
   int               gpu_fwd_min_seqs;  /* min candidates for CUDA Forward batch */
   int               gpu_vit_min_seqs;  /* min candidates for CUDA Viterbi batch */
+  int               gpu_fwd_min_res;   /* min residues for CUDA Forward batch */
+  int               gpu_vit_min_res;   /* min residues for CUDA Viterbi batch */
+  int               gpu_fwd_collect_seqs; /* preferred Forward candidate slab size */
+  int               gpu_vit_collect_seqs; /* preferred Viterbi candidate slab size */
+  int               gpu_fwd_collect_res;  /* preferred Forward candidate slab residues */
+  int               gpu_vit_collect_res;  /* preferred Viterbi candidate slab residues */
   int               gpu_fwd_compare;   /* debug CUDA-vs-CPU Forward score check */
   int               gpu_vit_compare;   /* debug CUDA-vs-CPU Viterbi score check */
   int               gpu_fb_compare;    /* debug CUDA-vs-CPU parser state check  */

@@ -1,4 +1,13 @@
 #include "p7_cuda_internal.h"
+#include <sys/time.h>
+
+static inline double
+seconds_now_vit(void)
+{
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (double) tv.tv_sec + (double) tv.tv_usec * 1e-6;
+}
 
 __device__ static inline int16_t
 i16_add_sat(int16_t a, int16_t b)
@@ -337,7 +346,11 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(engine->d_vit_filtersc, filtersc, sizeof(float) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vit filtersc)")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(h2d1);
-  cudaEventSynchronize(h2d1);
+  {
+    double tw0 = seconds_now_vit();
+    cudaEventSynchronize(h2d1);
+    engine->stats.dispatch_wait_seconds += (seconds_now_vit() - tw0);
+  }
 
   cudaEventRecord(k0);
   {
@@ -361,7 +374,11 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_pass_kernel launch")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(k1);
-  cudaEventSynchronize(k1);
+  {
+    double tw0 = seconds_now_vit();
+    cudaEventSynchronize(k1);
+    engine->stats.dispatch_wait_seconds += (seconds_now_vit() - tw0);
+  }
 
   cudaEventRecord(d2h0);
   if (scores) {
@@ -372,7 +389,11 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(passed, engine->d_vit_passed, sizeof(int) * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vit passed)")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(d2h1);
-  cudaEventSynchronize(d2h1);
+  {
+    double tw0 = seconds_now_vit();
+    cudaEventSynchronize(d2h1);
+    engine->stats.dispatch_wait_seconds += (seconds_now_vit() - tw0);
+  }
 
   engine->stats.vit_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.vit_kernel_seconds += elapsed_seconds(k0, k1);

@@ -54,6 +54,8 @@ COUNT_COLUMNS = [
     "past_fwd",
     "gpu_batches",
     "gpu_fwd_batches",
+    "gpu_fwd_prefilter_batches",
+    "gpu_fwd_parser_batches",
     "gpu_vit_batches",
     "gpu_bck_batches",
 ]

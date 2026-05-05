@@ -55,6 +55,12 @@ p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_STATS *stats)
     stats->fwd_nseqs       = 0;
     stats->fwd_nres        = 0;
     stats->fwd_nbatches    = 0;
+    stats->fwd_prefilter_nseqs = 0;
+    stats->fwd_prefilter_nres = 0;
+    stats->fwd_prefilter_nbatches = 0;
+    stats->fwd_parser_nseqs = 0;
+    stats->fwd_parser_nres = 0;
+    stats->fwd_parser_nbatches = 0;
     stats->vit_nseqs       = 0;
     stats->vit_nres        = 0;
     stats->vit_nbatches    = 0;

@@ -1260,10 +1260,19 @@ typedef struct p7_pipeline_s {
   double        exact_gpu_h2d;              /* exclusive CUDA host-to-device bucket */
   double        exact_gpu_kernel;           /* exclusive CUDA kernel bucket */
   double        exact_gpu_d2h;              /* exclusive CUDA device-to-host bucket */
+  double        exact_gpu_dispatch_wait;    /* host-side wait for queued CUDA work */
+  double        exact_overlap_hidden_h2d;   /* H2D time hidden by overlap (diagnostic) */
+  double        exact_overlap_hidden_d2h;   /* D2H time hidden by overlap (diagnostic) */
   double        exact_host_survivor_orchestration; /* exclusive host survivor setup */
   double        exact_cpu_postfwd_domain_null2_output; /* exclusive CPU post-Fwd work */
   double        exact_other;                /* residual exclusive wall bucket */
   double        exact_wall;                 /* enclosing elapsed wall for exact buckets */
+  uint64_t      gpu_vit_candidates_total;   /* Viterbi GPU candidate count */
+  uint64_t      gpu_fwd_candidates_total;   /* Forward GPU candidate count */
+  uint64_t      gpu_vit_launches;           /* CUDA Viterbi launch count */
+  uint64_t      gpu_fwd_launches;           /* CUDA Forward launch count */
+  double        gpu_vit_avg_candidates_per_launch; /* derived Viterbi launch density */
+  double        gpu_fwd_avg_candidates_per_launch; /* derived Forward launch density */
 
   enum p7_pipemodes_e mode;    	/* p7_SCAN_MODELS | p7_SEARCH_SEQS          */
   int           long_targets;   /* TRUE if the target sequences are expected to be very long (e.g. dna chromosome search in nhmmer) */

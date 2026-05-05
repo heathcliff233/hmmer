@@ -64,6 +64,12 @@ static int gpu_ProcessFbBatch(WORKER_INFO *info, ESL_DSQDATA_CHUNK *chu, ESL_SQ 
                               char *errbuf, int errbuf_size);
 static void gpu_CompareParserState(WORKER_INFO *info, const ESL_SQ *dbsq, const P7_OMX *cpu_oxf, const P7_OMX *cpu_oxb,
                                    float cpu_fwdsc, float gpu_fwdsc, float gpu_bcksc);
+static int gpu_CandidateResidues(const ESL_DSQDATA_CHUNK *chu, const int *idx, int n);
+static void gpu_ResolveSurvivorThresholds(const WORKER_INFO *info, int M,
+                                          int *vit_min_cands, int *fwd_min_cands,
+                                          int *vit_collect_cands, int *fwd_collect_cands,
+                                          int *vit_min_res, int *fwd_min_res,
+                                          int *vit_collect_res, int *fwd_collect_res);
 
 static int
 gpu_AppendFwdCandidate(WORKER_INFO *info, int *gpu_fwd_idx, float *gpu_fwd_filtersc_subset,
@@ -74,6 +80,68 @@ gpu_AppendFwdCandidate(WORKER_INFO *info, int *gpu_fwd_idx, float *gpu_fwd_filte
   gpu_fwd_filtersc_subset[*gpu_fwd_n] = filtersc;
   (*gpu_fwd_n)++;
   return eslOK;
+}
+
+static int
+gpu_CandidateResidues(const ESL_DSQDATA_CHUNK *chu, const int *idx, int n)
+{
+  int64_t total = 0;
+  int j;
+
+  if (!chu || !idx || n <= 0) return 0;
+  for (j = 0; j < n; j++) {
+    int si = idx[j];
+    if (si < 0 || si >= chu->N) continue;
+    total += (int64_t) chu->L[si];
+    if (total >= INT32_MAX) return INT32_MAX;
+  }
+  return (int) total;
+}
+
+static void
+gpu_ResolveSurvivorThresholds(const WORKER_INFO *info, int M,
+                              int *vit_min_cands, int *fwd_min_cands,
+                              int *vit_collect_cands, int *fwd_collect_cands,
+                              int *vit_min_res, int *fwd_min_res,
+                              int *vit_collect_res, int *fwd_collect_res)
+{
+  int batch_seqs, batch_res, mscale;
+  int auto_vit_min_cands, auto_fwd_min_cands;
+  int auto_vit_collect_cands, auto_fwd_collect_cands;
+  int auto_vit_min_res, auto_fwd_min_res;
+  int auto_vit_collect_res, auto_fwd_collect_res;
+
+  batch_seqs = ESL_MAX(1, info->gpu_batch_seqs);
+  batch_res  = ESL_MAX(1, info->gpu_batch_res);
+  mscale     = ESL_MAX(1, M);
+
+  auto_vit_min_cands     = ESL_MAX(32, ESL_MIN(256, batch_seqs / 64));
+  auto_fwd_min_cands     = ESL_MAX(24, ESL_MIN(192, batch_seqs / 96));
+  auto_vit_collect_cands = ESL_MAX(auto_vit_min_cands, ESL_MIN(1024, batch_seqs / 8));
+  auto_fwd_collect_cands = ESL_MAX(auto_fwd_min_cands, ESL_MIN(768, batch_seqs / 10));
+
+  auto_vit_min_res       = ESL_MAX(25000, ESL_MIN(batch_res / 8, mscale * 120));
+  auto_fwd_min_res       = ESL_MAX(50000, ESL_MIN(batch_res / 6, mscale * 220));
+  auto_vit_collect_res   = ESL_MAX(auto_vit_min_res, ESL_MIN(batch_res / 3, mscale * 480));
+  auto_fwd_collect_res   = ESL_MAX(auto_fwd_min_res, ESL_MIN(batch_res / 2, mscale * 700));
+
+  *vit_min_cands = (info->gpu_vit_min_seqs > 0) ? info->gpu_vit_min_seqs : auto_vit_min_cands;
+  *fwd_min_cands = (info->gpu_fwd_min_seqs > 0) ? info->gpu_fwd_min_seqs : auto_fwd_min_cands;
+  *vit_collect_cands = (info->gpu_vit_collect_seqs > 0) ? info->gpu_vit_collect_seqs : auto_vit_collect_cands;
+  *fwd_collect_cands = (info->gpu_fwd_collect_seqs > 0) ? info->gpu_fwd_collect_seqs : auto_fwd_collect_cands;
+  *vit_min_res = (info->gpu_vit_min_res > 0) ? info->gpu_vit_min_res : auto_vit_min_res;
+  *fwd_min_res = (info->gpu_fwd_min_res > 0) ? info->gpu_fwd_min_res : auto_fwd_min_res;
+  *vit_collect_res = (info->gpu_vit_collect_res > 0) ? info->gpu_vit_collect_res : auto_vit_collect_res;
+  *fwd_collect_res = (info->gpu_fwd_collect_res > 0) ? info->gpu_fwd_collect_res : auto_fwd_collect_res;
+
+  *vit_min_cands     = ESL_MAX(1, *vit_min_cands);
+  *fwd_min_cands     = ESL_MAX(1, *fwd_min_cands);
+  *vit_collect_cands = ESL_MAX(*vit_min_cands, *vit_collect_cands);
+  *fwd_collect_cands = ESL_MAX(*fwd_min_cands, *fwd_collect_cands);
+  *vit_min_res       = ESL_MAX(1, *vit_min_res);
+  *fwd_min_res       = ESL_MAX(1, *fwd_min_res);
+  *vit_collect_res   = ESL_MAX(*vit_min_res, *vit_collect_res);
+  *fwd_collect_res   = ESL_MAX(*fwd_min_res, *fwd_collect_res);
 }
 
 static int
@@ -667,11 +735,21 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
   int64_t  batch_res = 0;
   int64_t  effective_load_res = 0;
   double   t0;
-  int      gpu_vit_active = info->gpu_vit_prefilter && info->om->M <= 512;
-  int      gpu_fwd_active = info->gpu_fwd_prefilter && info->om->M <= 256;
+  int      gpu_vit_active = info->gpu_vit_prefilter && (info->gpu_vit_largem || info->om->M <= 512);
+  int      gpu_fwd_active = info->gpu_fwd_prefilter && (info->gpu_fwd_largem || info->om->M <= 256);
   int      vit_cmp_status_mismatch = 0;
   int      vit_cmp_pass_mismatch = 0;
   int      vit_cmp_score_drift = 0;
+  int      gpu_vit_res = 0;
+  int      gpu_fwd_res = 0;
+  int      gpu_vit_min_cands;
+  int      gpu_fwd_min_cands;
+  int      gpu_vit_collect_cands;
+  int      gpu_fwd_collect_cands;
+  int      gpu_vit_min_res;
+  int      gpu_fwd_min_res;
+  int      gpu_vit_collect_res;
+  int      gpu_fwd_collect_res;
 
   gpu_search_batch_Init(&batch);
   if (dd == NULL) return eslEINVAL;
@@ -693,6 +771,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
     ESL_ALLOC(gpu_vit_passed, sizeof(int) * gpu_capacity);
     ESL_ALLOC(gpu_fwd_idx, sizeof(int) * gpu_capacity);
     ESL_ALLOC(gpu_vit_idx, sizeof(int) * gpu_capacity);
+    gpu_ResolveSurvivorThresholds(info, info->om->M,
+                                  &gpu_vit_min_cands, &gpu_fwd_min_cands,
+                                  &gpu_vit_collect_cands, &gpu_fwd_collect_cands,
+                                  &gpu_vit_min_res, &gpu_fwd_min_res,
+                                  &gpu_vit_collect_res, &gpu_fwd_collect_res);
     effective_load_res = (int64_t) 6 * ESL_MAX(eslDSQDATA_CHUNK_MAXPACKET, (info->gpu_load_res + 5) / 6);
     while (n_targetseqs == -1 || seq_cnt < n_targetseqs) {
       gpu_search_batch_Reset(&batch);
@@ -738,6 +821,8 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
 
       gpu_fwd_n = 0;
       gpu_vit_n = 0;
+      gpu_fwd_res = 0;
+      gpu_vit_res = 0;
       gpu_fb_n = 0;
       gpu_processed_n = 0;
       for (i = 0; i < search_chu->N && (n_targetseqs == -1 || seq_cnt + i < n_targetseqs); i++, gpu_processed_n++) {
@@ -774,6 +859,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                   if (gpu_fwd_active) {
                     status = gpu_AppendFwdCandidate(info, gpu_fwd_idx, gpu_fwd_filtersc_subset, &gpu_fwd_n, i, previt.filtersc);
                     if (status != eslOK) goto ERROR;
+                    gpu_fwd_res += (int) dbsq->n;
                   } else {
                     float fwdsc;
                     status = gpu_MaterializeSeq(info, dbsq, dbsq_dsqmem, dbsq_salloc, search_chu, i);
@@ -794,22 +880,26 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                 } else {
                   gpu_vit_idx[gpu_vit_n++] = i;
                   gpu_vit_filtersc_subset[gpu_vit_n-1] = previt.filtersc;
+                  gpu_vit_res += (int) dbsq->n;
                 }
               } else if (gpu_fwd_active) {
                 if (info->gpu_vit_compare) {
                   gpu_vit_idx[gpu_vit_n++] = i;
                   gpu_vit_filtersc_subset[gpu_vit_n-1] = previt.filtersc;
+                  gpu_vit_res += (int) dbsq->n;
                 }
                 status = p7_Pipeline_PostMSVWithFilterPreFwd(info->pli, info->om, info->bg, dbsq, usc + info->gpu_msv_slack, previt.filtersc, &passed);
                 if (status != eslOK) goto ERROR;
                 if (passed) {
                   status = gpu_AppendFwdCandidate(info, gpu_fwd_idx, gpu_fwd_filtersc_subset, &gpu_fwd_n, i, previt.filtersc);
                   if (status != eslOK) goto ERROR;
+                  gpu_fwd_res += (int) dbsq->n;
                 }
               } else {
                 if (info->gpu_vit_compare) {
                   gpu_vit_idx[gpu_vit_n++] = i;
                   gpu_vit_filtersc_subset[gpu_vit_n-1] = previt.filtersc;
+                  gpu_vit_res += (int) dbsq->n;
                 }
                 if (info->gpu_fb_parser) {
                   float fwdsc;
@@ -846,8 +936,16 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       }
 
       if ((info->gpu_vit_compare || gpu_vit_active) && gpu_vit_n > 0) {
-        int run_cuda_vit = info->gpu_vit_compare || gpu_vit_n >= info->gpu_vit_min_seqs;
+        int run_cuda_vit;
+        int enough_min;
+        int enough_collect;
+        gpu_vit_res = gpu_CandidateResidues(search_chu, gpu_vit_idx, gpu_vit_n);
+        info->pli->gpu_vit_candidates_total += (uint64_t) gpu_vit_n;
+        enough_min = (gpu_vit_n >= gpu_vit_min_cands || gpu_vit_res >= gpu_vit_min_res);
+        enough_collect = (gpu_vit_n >= gpu_vit_collect_cands || gpu_vit_res >= gpu_vit_collect_res);
+        run_cuda_vit = info->gpu_vit_compare || (enough_min && enough_collect);
         if (run_cuda_vit) {
+          info->pli->gpu_vit_launches++;
           t0 = hmmsearch_WallTime();
           status = p7_cuda_ViterbiFilterDsqdataSubset(info->cuda_engine, info->cuda_msv, search_chu,
                                                       gpu_vit_idx, gpu_vit_n, gpu_vit_filtersc_subset,
@@ -925,6 +1023,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
             if (gpu_fwd_active) {
               status = gpu_AppendFwdCandidate(info, gpu_fwd_idx, gpu_fwd_filtersc_subset, &gpu_fwd_n, i, filtersc);
               if (status != eslOK) goto ERROR;
+              gpu_fwd_res += (int) dbsq->n;
             } else {
               float fwdsc;
               status = gpu_MaterializeSeq(info, dbsq, dbsq_dsqmem, dbsq_salloc, search_chu, i);
@@ -949,9 +1048,17 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       }
 
       if (gpu_fwd_active && gpu_fwd_n > 0) {
-        int run_cuda_fwd = info->gpu_fwd_compare || gpu_fwd_n >= info->gpu_fwd_min_seqs;
+        int run_cuda_fwd;
+        int enough_min;
+        int enough_collect;
         float *fwd_score_ret = (info->gpu_fwd_compare || !info->gpu_fb_parser) ? gpu_fwd_scores : NULL;
+        gpu_fwd_res = gpu_CandidateResidues(search_chu, gpu_fwd_idx, gpu_fwd_n);
+        info->pli->gpu_fwd_candidates_total += (uint64_t) gpu_fwd_n;
+        enough_min = (gpu_fwd_n >= gpu_fwd_min_cands || gpu_fwd_res >= gpu_fwd_min_res);
+        enough_collect = (gpu_fwd_n >= gpu_fwd_collect_cands || gpu_fwd_res >= gpu_fwd_collect_res);
+        run_cuda_fwd = info->gpu_fwd_compare || (enough_min && enough_collect);
         if (run_cuda_fwd) {
+          info->pli->gpu_fwd_launches++;
           t0 = hmmsearch_WallTime();
           status = p7_cuda_ForwardFilterDsqdataSubset(info->cuda_engine, info->cuda_msv, search_chu,
                                                       gpu_fwd_idx, gpu_fwd_n, gpu_fwd_filtersc_subset,

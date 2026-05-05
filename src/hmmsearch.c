@@ -108,8 +108,16 @@ static ESL_OPTIONS options[] = {
   { "--gpu-vit-prefilter", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,          "experimental CUDA Viterbi score prefilter before CPU Forward", 99 },
   { "--gpu-fwd-prefilter", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,          "experimental CUDA Forward score prefilter before CPU Forward", 99 },
   { "--gpu-fb-parser", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,              "experimental CUDA Forward/Backward parser state handoff",      99 },
-  { "--gpu-vit-min-seqs", eslARG_INT, "1", NULL, "n>0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Viterbi prefilter",   99 },
-  { "--gpu-fwd-min-seqs", eslARG_INT, "1", NULL, "n>0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Forward prefilter",   99 },
+  { "--gpu-vit-largem", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu-vit-prefilter", NULL, "allow CUDA Viterbi prefilter on large models (M>512)",       99 },
+  { "--gpu-fwd-largem", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu-fwd-prefilter", NULL, "allow CUDA Forward prefilter on large models (M>256)",       99 },
+  { "--gpu-vit-min-seqs", eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Viterbi prefilter (0=auto)",   99 },
+  { "--gpu-fwd-min-seqs", eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Forward prefilter (0=auto)",   99 },
+  { "--gpu-vit-min-res",  eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidate residues needed for CUDA Viterbi prefilter (0=auto)", 99 },
+  { "--gpu-fwd-min-res",  eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidate residues needed for CUDA Forward prefilter (0=auto)", 99 },
+  { "--gpu-vit-collect-seqs", eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,          "preferred candidate slab size before CUDA Viterbi launch (0=auto)",     99 },
+  { "--gpu-fwd-collect-seqs", eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,          "preferred candidate slab size before CUDA Forward launch (0=auto)",     99 },
+  { "--gpu-vit-collect-res",  eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,          "preferred candidate residues before CUDA Viterbi launch (0=auto)",      99 },
+  { "--gpu-fwd-collect-res",  eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,          "preferred candidate residues before CUDA Forward launch (0=auto)",      99 },
   { "--gpu-fwd-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "debug compare CUDA Forward scores to CPU Forward scores",      99 },
   { "--gpu-vit-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "debug compare CUDA Viterbi scores to CPU Viterbi scores",      99 },
   { "--gpu-fb-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,             "debug compare CUDA parser state to CPU Forward/Backward",      99 },
@@ -504,9 +512,17 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     info[i].gpu_msv_slack  = esl_opt_GetReal(go, "--gpu-msv-slack");
     info[i].gpu_vit_prefilter = esl_opt_GetBoolean(go, "--gpu-vit-prefilter");
     info[i].gpu_fwd_prefilter = esl_opt_GetBoolean(go, "--gpu-fwd-prefilter");
+    info[i].gpu_vit_largem    = esl_opt_GetBoolean(go, "--gpu-vit-largem");
+    info[i].gpu_fwd_largem    = esl_opt_GetBoolean(go, "--gpu-fwd-largem");
     info[i].gpu_fb_parser     = esl_opt_GetBoolean(go, "--gpu-fb-parser");
     info[i].gpu_vit_min_seqs  = esl_opt_GetInteger(go, "--gpu-vit-min-seqs");
     info[i].gpu_fwd_min_seqs  = esl_opt_GetInteger(go, "--gpu-fwd-min-seqs");
+    info[i].gpu_vit_min_res   = esl_opt_GetInteger(go, "--gpu-vit-min-res");
+    info[i].gpu_fwd_min_res   = esl_opt_GetInteger(go, "--gpu-fwd-min-res");
+    info[i].gpu_vit_collect_seqs = esl_opt_GetInteger(go, "--gpu-vit-collect-seqs");
+    info[i].gpu_fwd_collect_seqs = esl_opt_GetInteger(go, "--gpu-fwd-collect-seqs");
+    info[i].gpu_vit_collect_res  = esl_opt_GetInteger(go, "--gpu-vit-collect-res");
+    info[i].gpu_fwd_collect_res  = esl_opt_GetInteger(go, "--gpu-fwd-collect-res");
     info[i].gpu_fwd_compare   = esl_opt_GetBoolean(go, "--gpu-fwd-compare");
     info[i].gpu_vit_compare   = esl_opt_GetBoolean(go, "--gpu-vit-compare");
     info[i].gpu_fb_compare    = esl_opt_GetBoolean(go, "--gpu-fb-compare");
