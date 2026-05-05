@@ -78,5 +78,5 @@ The external project was not built in this environment because `cmake` was not i
 Current local environment check:
 
 - `g++` is available.
-- `cmake` was not available during this assessment.
-- `nvcc` was not available in the active shell during this assessment, though earlier CUDA-enabled builds in this worktree were already recorded in `agents_docs/gpu-support-progress.md`.
+- `cmake` was not available during this assessment, so the external project was still not built.
+- `nvcc` is available at `/usr/local/cuda/bin/nvcc` and reports CUDA 12.6.85. HMMER's `./configure --enable-cuda --with-cuda-arch=sm_89` finds that path even when `CUDA_HOME` is unset because the generated CUDA search path includes `/usr/local/cuda/bin`.
