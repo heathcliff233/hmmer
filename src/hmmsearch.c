@@ -2192,13 +2192,13 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
               P = esl_exp_surv(seq_score, info->om->evparam[p7_FTAU], info->om->evparam[p7_FLAMBDA]);
               if (P <= info->pli->F3) {
                 if (info->gpu_fb_parser) {
-                status = gpu_fb_batch_Add(info, &gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
-                                          &gpu_fb_n, &gpu_fb_alloc, i, nullsc, filtersc, fwdsc);
-                if (status != eslOK) goto ERROR;
-              } else {
-                status = gpu_PostFwd(info, dbsq, nullsc, filtersc, fwdsc, errbuf, sizeof(errbuf));
-                if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
-              }
+                  status = gpu_fb_batch_Add(info, &gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
+                                            &gpu_fb_n, &gpu_fb_alloc, i, nullsc, filtersc, fwdsc);
+                  if (status != eslOK) goto ERROR;
+                } else {
+                  status = gpu_PostFwd(info, dbsq, nullsc, filtersc, fwdsc, errbuf, sizeof(errbuf));
+                  if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
+                }
               }
             }
           } else if (gpu_fwd_statuses[j] == eslERANGE) {
@@ -2209,13 +2209,13 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
             p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
             info->pli->time_fwd += hmmsearch_WallTime() - t0;
             if (info->gpu_fb_parser) {
-                status = gpu_fb_batch_Add(info, &gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
-                                          &gpu_fb_n, &gpu_fb_alloc, i, nullsc, filtersc, fwdsc);
-                if (status != eslOK) goto ERROR;
-              } else {
-                status = gpu_PostFwd(info, dbsq, nullsc, filtersc, fwdsc, errbuf, sizeof(errbuf));
-                if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
-              }
+              status = gpu_fb_batch_Add(info, &gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
+                                        &gpu_fb_n, &gpu_fb_alloc, i, nullsc, filtersc, fwdsc);
+              if (status != eslOK) goto ERROR;
+            } else {
+              status = gpu_PostFwd(info, dbsq, nullsc, filtersc, fwdsc, errbuf, sizeof(errbuf));
+              if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser failed: %s\n", errbuf);
+            }
           }
           p7_pipeline_Reuse(info->pli);
           dbsq->dsq = NULL;
