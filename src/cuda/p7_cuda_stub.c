@@ -2,7 +2,7 @@
 
 #include <stdio.h>
 
-#include "cuda_msv.h"
+#include "p7_cuda.h"
 
 int
 p7_cuda_Available(char *errbuf, int errbuf_size)

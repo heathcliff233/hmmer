@@ -29,6 +29,7 @@ VMX_CFLAGS     = @VMX_CFLAGS@
 NVCC           = @NVCC@
 CUDA_CFLAGS    = @CUDA_CFLAGS@
 CUDA_LDFLAGS   = @CUDA_LDFLAGS@
+CUDA_OBJ       = @CUDA_OBJ@
 CPPFLAGS       = @CPPFLAGS@
 LDFLAGS        = @LDFLAGS@
 DEFS           = @DEFS@
@@ -102,16 +103,19 @@ AUXPROGOBJS = \
 	hmmerfm-exactmatch.o
 
 HDRS =  hmmer.h \
-	cuda_msv.h \
-	cachedb.h \
-	p7_gbands.h \
+		cuda_msv.h \
+		cuda/p7_cuda.h \
+		cuda/p7_cuda_internal.h \
+		cachedb.h \
+		hmmsearch_internal.h \
+		p7_gbands.h \
 	p7_gmxb.h \
 	p7_gmxchk.h \
 	p7_hmmcache.h
 
 OBJS =  build.o\
 	cachedb.o\
-	@CUDA_MSV_OBJ@\
+		${CUDA_OBJ}\
 	cachedb_shard.o\
 	emit.o\
 	errors.o\
@@ -136,8 +140,9 @@ OBJS =  build.o\
 	hmmdwrkr.o\
 	hmmdwrkr_shard.o\
 	hmmdutils.o\
-	hmmer.o\
-	logsum.o\
+		hmmer.o\
+		hmmsearch_gpu.o\
+		logsum.o\
 	modelconfig.o\
 	modelstats.o\
 	mpisupport.o\
@@ -279,8 +284,11 @@ ${OBJS}:        ${HDRS} p7_config.h
 ${PROGOBJS}:    ${HDRS} p7_config.h
 ${AUXPROGOBJS}: ${HDRS} p7_config.h
 
-cuda_msv.o: cuda_msv.cu ${HDRS} p7_config.h
+cuda/%.o: cuda/%.cu ${HDRS} p7_config.h
 	${QUIET_CC}${NVCC} ${CUDA_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
+
+cuda/p7_cuda_stub.o: cuda/p7_cuda_stub.c ${HDRS} p7_config.h
+	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
 
 ${PROGS} ${AUXPROGS}: % : %.o  libhmmer.a ../${ESLDIR}/libeasel.a 
 	${QUIET_GEN}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${MYLIBDIRS} -o $@ $@.o ${LIBS}
@@ -369,6 +377,7 @@ uninstall:
 clean:
 	${QUIET_SUBDIR0}${IMPLDIR} ${QUIET_SUBDIR1} clean
 	-rm -f *.o *~ Makefile.bak core ${PROGS} ${AUXPROGS} TAGS gmon.out
+	-rm -f cuda/*.o
 	-rm -f libhmmer.a libhmmer-src.stamp
 	-rm -f ${UTESTS}
 	-rm -f ${ITESTS}

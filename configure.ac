@@ -453,7 +453,7 @@ NVCC=
 CUDA_CFLAGS=
 CUDA_LDFLAGS=
 CUDA_LIBS=
-CUDA_MSV_OBJ=cuda_msv_stub.o
+CUDA_OBJ='cuda/p7_cuda_stub.o'
 if test "$enable_cuda" = "yes" || test "$enable_cuda" = "check"; then
   cuda_path="$PATH$PATH_SEPARATOR/usr/local/cuda/bin$PATH_SEPARATOR/usr/local/cuda-12.6/bin"
   ESL_CUDA([
@@ -463,7 +463,7 @@ if test "$enable_cuda" = "yes" || test "$enable_cuda" = "check"; then
     CUDA_CFLAGS="-arch=${CUDA_ARCH}"
     CUDA_LDFLAGS="-L/usr/local/cuda/lib64"
     CUDA_LIBS="-lcudart"
-    CUDA_MSV_OBJ=cuda_msv.o
+    CUDA_OBJ='cuda/p7_cuda_runtime.o cuda/p7_cuda_msv.o cuda/p7_cuda_bias.o cuda/p7_cuda_viterbi.o cuda/p7_cuda_forward.o cuda/p7_cuda_fb_parser.o'
     enable_cuda=yes
     ],[
     if test "$enable_cuda" = "yes"; then
@@ -476,7 +476,7 @@ AC_SUBST(NVCC)
 AC_SUBST(CUDA_CFLAGS)
 AC_SUBST(CUDA_LDFLAGS)
 AC_SUBST(CUDA_LIBS)
-AC_SUBST(CUDA_MSV_OBJ)
+AC_SUBST(CUDA_OBJ)
 
 
 # For x86 processors check if the flush to zero macro is available
