@@ -1315,6 +1315,325 @@ cuda_backward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, co
 }
 
 __global__ static void
+cuda_backward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
+                                               const int *seqidx, int nidx, const size_t *x_offsets,
+                                               const float *rfv, const float *tfv, int M, int Q, int Kp,
+                                               float xf_e_loop, float xf_e_move, float xf_n_loop_base, float xf_n_move_base,
+                                               float xf_c_loop_base, float xf_c_move_base, float xf_j_loop_base, float xf_j_move_base,
+                                               float nj, const float *xfwd, float *xbck, float *scores, int *statuses)
+{
+  extern __shared__ float bck_parser_parallel_mem[];
+  int b = blockIdx.x;
+  int tid = threadIdx.x;
+  int T = blockDim.x;
+  int N = Q * 4;
+  float *next = bck_parser_parallel_mem;
+  float *curr = next + (size_t) N * 3;
+  float *bcoef = curr + (size_t) N * 3;
+  float *scanA = bcoef + N;
+  float *scanB = scanA + T;
+  __shared__ float sxE, sxN, sxJ, sxB, sxC, stotscale;
+  __shared__ float sscale, sinv;
+  __shared__ int si, L;
+  __shared__ const uint8_t *sdsq;
+  __shared__ const float *sxfwd;
+  __shared__ float *sxbck;
+  __shared__ float xf_n_loop, xf_n_move, xf_c_loop, xf_c_move, xf_j_loop, xf_j_move;
+
+  if (b >= nidx) return;
+  if (tid == 0) {
+    si = seqidx ? seqidx[b] : b;
+    L = lengths[si];
+    sdsq = dsq + offsets[si];
+    sxfwd = xfwd + x_offsets[b];
+    sxbck = xbck + x_offsets[b];
+    float pmove = (2.0f + nj) / ((float) L + 2.0f + nj);
+    float ploop = 1.0f - pmove;
+    xf_n_loop = xf_n_loop_base >= 0.0f ? xf_n_loop_base : ploop;
+    xf_n_move = xf_n_move_base >= 0.0f ? xf_n_move_base : pmove;
+    xf_c_loop = xf_c_loop_base >= 0.0f ? xf_c_loop_base : ploop;
+    xf_c_move = xf_c_move_base >= 0.0f ? xf_c_move_base : pmove;
+    xf_j_loop = xf_j_loop_base >= 0.0f ? xf_j_loop_base : ploop;
+    xf_j_move = xf_j_move_base >= 0.0f ? xf_j_move_base : pmove;
+    sxJ = 0.0f;
+    sxB = 0.0f;
+    sxN = 0.0f;
+    sxC = xf_c_move;
+    sxE = sxC * xf_e_move;
+    stotscale = 0.0f;
+  }
+  __syncthreads();
+
+  for (int c = tid; c < N; c += T) {
+    next[c * 3 + 0] = sxE;
+    next[c * 3 + 1] = sxE;
+    next[c * 3 + 2] = 0.0f;
+  }
+  __syncthreads();
+
+  if (tid < T) {
+    float a0, b0, a1, b1;
+    int c0 = N - 1 - tid * 2;
+    int c1 = c0 - 1;
+    if (c0 >= 0 && c0 < N) {
+      a0 = next[c0 * 3 + 1];
+      b0 = (c0 + 1 < N) ? tfv[fwd_tfv_idx(p7O_DD, cell_q(c0, Q), cell_lane(c0, Q), Q)] : 0.0f;
+      if (c1 >= 0) {
+        a1 = next[c1 * 3 + 1];
+        b1 = tfv[fwd_tfv_idx(p7O_DD, cell_q(c1, Q), cell_lane(c1, Q), Q)];
+        scanA[tid] = a1 + b1 * a0;
+        scanB[tid] = b1 * b0;
+      } else {
+        scanA[tid] = a0;
+        scanB[tid] = b0;
+      }
+    } else if (tid < T) {
+      scanA[tid] = 0.0f;
+      scanB[tid] = 1.0f;
+    }
+  }
+  __syncthreads();
+  for (int off = 1; off < T; off <<= 1) {
+    float a_prev = 0.0f, b_prev = 1.0f, a_cur = 0.0f, b_cur = 1.0f;
+    if (tid < T) {
+      a_cur = scanA[tid];
+      b_cur = scanB[tid];
+      if (tid >= off) {
+        a_prev = scanA[tid - off];
+        b_prev = scanB[tid - off];
+      }
+    }
+    __syncthreads();
+    if (tid < T && tid >= off) {
+      scanA[tid] = a_cur + b_cur * a_prev;
+      scanB[tid] = b_cur * b_prev;
+    }
+    __syncthreads();
+  }
+  if (tid < T) {
+    int c0 = N - 1 - tid * 2;
+    int c1 = c0 - 1;
+    float incoming = (tid == 0) ? 0.0f : scanA[tid - 1];
+    if (c0 >= 0 && c0 < N) {
+      float b0 = (c0 + 1 < N) ? tfv[fwd_tfv_idx(p7O_DD, cell_q(c0, Q), cell_lane(c0, Q), Q)] : 0.0f;
+      float d0 = next[c0 * 3 + 1] + b0 * incoming;
+      next[c0 * 3 + 1] = d0;
+      if (c1 >= 0) {
+        float b1 = tfv[fwd_tfv_idx(p7O_DD, cell_q(c1, Q), cell_lane(c1, Q), Q)];
+        next[c1 * 3 + 1] = next[c1 * 3 + 1] + b1 * d0;
+      }
+    }
+  }
+  __syncthreads();
+  for (int c = tid; c < N - 1; c += T) {
+    next[c * 3 + 0] += next[(c + 1) * 3 + 1] * tfv[fwd_tfv_idx(p7O_MD, cell_q(c, Q), cell_lane(c, Q), Q)];
+  }
+  __syncthreads();
+
+  if (tid == 0) {
+    sscale = sxfwd[L * p7X_NXCELLS + p7X_SCALE];
+    if (sscale > 1.0f) {
+      sinv = 1.0f / sscale;
+      sxE *= sinv;
+      sxN *= sinv;
+      sxC *= sinv;
+      sxJ *= sinv;
+      sxB *= sinv;
+      stotscale += logf(sscale);
+    } else {
+      sinv = 1.0f;
+    }
+    sxbck[L * p7X_NXCELLS + p7X_E]     = sxE;
+    sxbck[L * p7X_NXCELLS + p7X_N]     = sxN;
+    sxbck[L * p7X_NXCELLS + p7X_J]     = sxJ;
+    sxbck[L * p7X_NXCELLS + p7X_B]     = sxB;
+    sxbck[L * p7X_NXCELLS + p7X_C]     = sxC;
+    sxbck[L * p7X_NXCELLS + p7X_SCALE] = sscale;
+  }
+  __syncthreads();
+  if (sscale > 1.0f) {
+    for (int c = tid; c < N * 3; c += T) next[c] *= sinv;
+  }
+  __syncthreads();
+
+  for (int i = L - 1; i >= 1; i--) {
+    uint8_t x = sdsq[i + 1];
+    if (x >= Kp) {
+      if (tid == 0) {
+        scores[b * 2 + 1] = 0.0f;
+        statuses[b * 2 + 1] = eslEINVAL;
+      }
+      return;
+    }
+
+    float partial = 0.0f;
+    for (int c = tid; c < N; c += T) {
+      int q = cell_q(c, Q);
+      int lane = cell_lane(c, Q);
+      float mpv = next[c * 3 + 0] * rfv[((int) x * Q + q) * 4 + lane];
+      partial += mpv * tfv[fwd_tfv_idx(p7O_BM, q, lane, Q)];
+    }
+    scanA[tid] = partial;
+    __syncthreads();
+    for (int off = T >> 1; off > 0; off >>= 1) {
+      if (tid < off) scanA[tid] += scanA[tid + off];
+      __syncthreads();
+    }
+    if (tid == 0) {
+      sxB = scanA[0];
+      sxC = sxC * xf_c_loop;
+      sxJ = (sxB * xf_j_move) + (sxJ * xf_j_loop);
+      sxN = (sxB * xf_n_move) + (sxN * xf_n_loop);
+      sxE = (sxC * xf_e_move) + (sxJ * xf_e_loop);
+    }
+    __syncthreads();
+
+    for (int c = tid; c < N; c += T) {
+      int cell = c * 3;
+      float mpv = 0.0f;
+      if (c + 1 < N) {
+        int nq = cell_q(c + 1, Q);
+        int nlane = cell_lane(c + 1, Q);
+        mpv = next[(c + 1) * 3 + 0] * rfv[((int) x * Q + nq) * 4 + nlane];
+      }
+      int q = cell_q(c, Q);
+      int lane = cell_lane(c, Q);
+      curr[cell + 2] = next[cell + 2] * tfv[fwd_tfv_idx(p7O_II, q, lane, Q)];
+      curr[cell + 0] = next[cell + 2] * tfv[fwd_tfv_idx(p7O_MI, q, lane, Q)];
+      if (c + 1 < N) {
+        int nq = cell_q(c + 1, Q);
+        int nlane = cell_lane(c + 1, Q);
+        curr[cell + 2] += mpv * tfv[fwd_tfv_idx(p7O_IM, nq, nlane, Q)];
+        curr[cell + 1]  = mpv * tfv[fwd_tfv_idx(p7O_DM, nq, nlane, Q)];
+        curr[cell + 0] += mpv * tfv[fwd_tfv_idx(p7O_MM, nq, nlane, Q)];
+      } else {
+        curr[cell + 1] = 0.0f;
+      }
+      curr[cell + 0] += sxE;
+      curr[cell + 1] += sxE;
+      bcoef[c] = (c + 1 < N) ? tfv[fwd_tfv_idx(p7O_DD, q, lane, Q)] : 0.0f;
+    }
+    __syncthreads();
+
+    if (tid < T) {
+      int c0 = N - 1 - tid * 2;
+      int c1 = c0 - 1;
+      if (c0 >= 0 && c0 < N) {
+        float a0 = curr[c0 * 3 + 1];
+        float b0 = bcoef[c0];
+        if (c1 >= 0) {
+          float a1 = curr[c1 * 3 + 1];
+          float b1 = bcoef[c1];
+          scanA[tid] = a1 + b1 * a0;
+          scanB[tid] = b1 * b0;
+        } else {
+          scanA[tid] = a0;
+          scanB[tid] = b0;
+        }
+      } else {
+        scanA[tid] = 0.0f;
+        scanB[tid] = 1.0f;
+      }
+    }
+    __syncthreads();
+    for (int off = 1; off < T; off <<= 1) {
+      float a_prev = 0.0f, b_prev = 1.0f, a_cur = 0.0f, b_cur = 1.0f;
+      if (tid < T) {
+        a_cur = scanA[tid];
+        b_cur = scanB[tid];
+        if (tid >= off) {
+          a_prev = scanA[tid - off];
+          b_prev = scanB[tid - off];
+        }
+      }
+      __syncthreads();
+      if (tid < T && tid >= off) {
+        scanA[tid] = a_cur + b_cur * a_prev;
+        scanB[tid] = b_cur * b_prev;
+      }
+      __syncthreads();
+    }
+    if (tid < T) {
+      int c0 = N - 1 - tid * 2;
+      int c1 = c0 - 1;
+      float incoming = (tid == 0) ? 0.0f : scanA[tid - 1];
+      if (c0 >= 0 && c0 < N) {
+        float d0 = curr[c0 * 3 + 1] + bcoef[c0] * incoming;
+        curr[c0 * 3 + 1] = d0;
+        if (c1 >= 0) curr[c1 * 3 + 1] = curr[c1 * 3 + 1] + bcoef[c1] * d0;
+      }
+    }
+    __syncthreads();
+    for (int c = tid; c < N - 1; c += T) {
+      curr[c * 3 + 0] += curr[(c + 1) * 3 + 1] * tfv[fwd_tfv_idx(p7O_MD, cell_q(c, Q), cell_lane(c, Q), Q)];
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+      sscale = sxfwd[i * p7X_NXCELLS + p7X_SCALE];
+      if (sscale > 1.0f) {
+        sinv = 1.0f / sscale;
+        sxE *= sinv;
+        sxN *= sinv;
+        sxJ *= sinv;
+        sxB *= sinv;
+        sxC *= sinv;
+        stotscale += logf(sscale);
+      } else {
+        sinv = 1.0f;
+      }
+      sxbck[i * p7X_NXCELLS + p7X_E]     = sxE;
+      sxbck[i * p7X_NXCELLS + p7X_N]     = sxN;
+      sxbck[i * p7X_NXCELLS + p7X_J]     = sxJ;
+      sxbck[i * p7X_NXCELLS + p7X_B]     = sxB;
+      sxbck[i * p7X_NXCELLS + p7X_C]     = sxC;
+      sxbck[i * p7X_NXCELLS + p7X_SCALE] = sscale;
+    }
+    __syncthreads();
+    if (sscale > 1.0f) {
+      for (int c = tid; c < N * 3; c += T) curr[c] *= sinv;
+    }
+    __syncthreads();
+
+    float *tmp = next;
+    next = curr;
+    curr = tmp;
+  }
+
+  if (tid == 0) {
+    if (L >= 1) {
+      uint8_t x = sdsq[1];
+      if (x >= Kp) {
+        scores[b * 2 + 1] = 0.0f;
+        statuses[b * 2 + 1] = eslEINVAL;
+        return;
+      }
+      sxB = 0.0f;
+      for (int c = 0; c < N; c++) {
+        int q = cell_q(c, Q);
+        int lane = cell_lane(c, Q);
+        float mpv = next[c * 3 + 0] * rfv[((int) x * Q + q) * 4 + lane];
+        sxB += mpv * tfv[fwd_tfv_idx(p7O_BM, q, lane, Q)];
+      }
+      sxN = (sxB * xf_n_move) + (sxN * xf_n_loop);
+    }
+    sxbck[p7X_E]     = 0.0f;
+    sxbck[p7X_N]     = sxN;
+    sxbck[p7X_J]     = 0.0f;
+    sxbck[p7X_B]     = sxB;
+    sxbck[p7X_C]     = 0.0f;
+    sxbck[p7X_SCALE] = 1.0f;
+    if (isnan(sxN) || (L > 0 && sxN == 0.0f) || isinf(sxN)) {
+      scores[b * 2 + 1] = 0.0f;
+      statuses[b * 2 + 1] = eslERANGE;
+    } else {
+      scores[b * 2 + 1] = stotscale + logf(sxN);
+      statuses[b * 2 + 1] = eslOK;
+    }
+  }
+}
+
+__global__ static void
 cuda_msv_kernel(const uint8_t *dsq, int L, const uint8_t *rbv, int M, int Q, int Kp,
                 uint8_t tbm_b, uint8_t tec_b, uint8_t tjb_b, uint8_t base_b, uint8_t bias_b,
                 int *raw_sc, int *overflow)
@@ -2472,8 +2791,11 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
   int *h_offsets = NULL;
   int *h_lengths = NULL;
   int reuse_batch = FALSE;
+  int use_parallel_bck = FALSE;
+  int bck_threads = 1;
   size_t xbytes;
   size_t shmem;
+  size_t bck_shmem;
   cudaEvent_t h2d0, h2d1, fk0, fk1, bk0, bk1, d2h0, d2h1;
 
   if (!engine || !cuom || !chu || !seqidx || nidx < 0 || !x_offsets || !xf || !xb || !scores || !statuses) return eslEINVAL;
@@ -2487,6 +2809,12 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
     if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA Forward/Backward parser profile M=%d exceeds v1 shared-memory limit", cuom->M);
     return eslERANGE;
   }
+  if (cuom->Qf * 4 <= 1024) {
+    bck_threads = next_pow2_at_least((cuom->Qf * 4 + 1) / 2, 32);
+    if (bck_threads <= 512) use_parallel_bck = TRUE;
+  }
+  bck_shmem = use_parallel_bck ? (sizeof(float) * ((size_t) cuom->Qf * 4 * 3 * 2 + (size_t) cuom->Qf * 4 + (size_t) bck_threads * 2))
+                               : shmem;
   if (total_xcells == 0 || total_xcells > SIZE_MAX / sizeof(float)) return eslERANGE;
   xbytes = sizeof(float) * total_xcells;
 
@@ -2598,16 +2926,29 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
   cudaEventSynchronize(fk1);
 
   cudaEventRecord(bk0);
-  cuda_backward_parser_xmx_batch_kernel<<<nidx, 1, shmem>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths,
-                                                            engine->d_parser_seqidx, nidx, engine->d_parser_x_offsets,
-                                                            cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
-                                                            cuom->xf_e_loop, cuom->xf_e_move,
-                                                            cuom->xf_n_loop, cuom->xf_n_move,
-                                                            cuom->xf_c_loop, cuom->xf_c_move,
-                                                            cuom->xf_j_loop, cuom->xf_j_move,
-                                                            cuom->nj, engine->d_parser_xf, engine->d_parser_xb,
-                                                            engine->d_parser_scores, engine->d_parser_statuses);
-  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_backward_parser_xmx_batch_kernel launch")) != eslOK) goto CUDA_ERROR;
+  if (use_parallel_bck) {
+    cuda_backward_parser_xmx_batch_parallel_kernel<<<nidx, bck_threads, bck_shmem>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths,
+                                                                                     engine->d_parser_seqidx, nidx, engine->d_parser_x_offsets,
+                                                                                     cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                                                     cuom->xf_e_loop, cuom->xf_e_move,
+                                                                                     cuom->xf_n_loop, cuom->xf_n_move,
+                                                                                     cuom->xf_c_loop, cuom->xf_c_move,
+                                                                                     cuom->xf_j_loop, cuom->xf_j_move,
+                                                                                     cuom->nj, engine->d_parser_xf, engine->d_parser_xb,
+                                                                                     engine->d_parser_scores, engine->d_parser_statuses);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_backward_parser_xmx_batch_parallel_kernel launch")) != eslOK) goto CUDA_ERROR;
+  } else {
+    cuda_backward_parser_xmx_batch_kernel<<<nidx, 1, shmem>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths,
+                                                              engine->d_parser_seqidx, nidx, engine->d_parser_x_offsets,
+                                                              cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                              cuom->xf_e_loop, cuom->xf_e_move,
+                                                              cuom->xf_n_loop, cuom->xf_n_move,
+                                                              cuom->xf_c_loop, cuom->xf_c_move,
+                                                              cuom->xf_j_loop, cuom->xf_j_move,
+                                                              cuom->nj, engine->d_parser_xf, engine->d_parser_xb,
+                                                              engine->d_parser_scores, engine->d_parser_statuses);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_backward_parser_xmx_batch_kernel launch")) != eslOK) goto CUDA_ERROR;
+  }
   cudaEventRecord(bk1);
   cudaEventSynchronize(bk1);
 
