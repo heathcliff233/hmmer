@@ -26,6 +26,7 @@ GPU status snapshot:
 
 - The current `hmmsearch --gpu` path is protein-only, opt-in, and requires `hmmseqdb`/Easel protein `dsqdata` input.
 - The repository applies an Easel `dsqdata` chunk-sizing patch at build time from `patches/easel-dsqdata-open-sized.patch`; do not edit the submodule in place for this work.
+- Keep GPU work in the existing autotools build. Do not add CMake to this repository for external CUDA-HMM references; those projects are design references only. Borrow high-level implementation ideas where useful, but do not copy code, vendor sources, link external libraries, or add external build support.
 - CUDA currently accelerates MSV plus the biased-composition filter in the GPU path. Bias reuses the uploaded MSV sequence batch; avoid a second dsq transfer when adding adjacent GPU stages.
 - `hmmsearch --gpu` separates dsqdata load sizing (`--gpu-load-seqs`, `--gpu-load-res`) from CUDA search-batch sizing (`--gpu-batch-seqs`, `--gpu-batch-res`) and can pack multiple loaded chunks into one CUDA filter batch. The measured default remains 32,768 sequences / 8M residues for both load and search; larger 12M search batches reduced launches but did not improve all-13 profmark wall time.
 - Current profmark runs show real end-to-end speedups on representative protein queries. The current all-13 stage-count run in `benchmark-data/profmark-current/gpu-stage-suitability/counts-13/` recorded CPU wall 25.41 sec, GPU wall 14.66 sec, aggregate speedup 1.733x, four CPU-only hits from known SSV/MSV sensitivity gaps, and no GPU-only hits. Treat `benchmark-data/profmark-current` as the real benchmark, not tutorial-sized inputs.
@@ -97,7 +98,7 @@ Use `agents_docs/` only for files relevant to the task:
 - `agents_docs/tests-docs-benchmarks.md`: build targets, tests, docs, benchmarks, local benchmark data.
 - `agents_docs/gpu-support-todo.md`: planned CUDA GPU support, `hmmsearch --gpu`, GPU-capable sequence database construction, and open validation/tuning work.
 - `agents_docs/gpu-support-progress.md`: current GPU implementation status, benchmark results, and remaining gaps.
-- `agents_docs/cuda-hmm-migration.md`: assessment of the external `divinrkz/cuda-hmm` Viterbi/Forward/Backward implementation and why it is not directly portable to HMMER Plan7.
+- `agents_docs/cuda-hmm-reference.md`: reference notes for the external `divinrkz/cuda-hmm` Viterbi/Forward/Backward implementation, including which high-level CUDA DP ideas are useful and why its code/build system should not be copied into HMMER.
 
 ## Code Navigation
 

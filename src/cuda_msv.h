@@ -21,9 +21,21 @@ typedef struct p7_cuda_msv_stats_s {
   double   bias_h2d_seconds;
   double   bias_kernel_seconds;
   double   bias_d2h_seconds;
+  double   fwd_h2d_seconds;
+  double   fwd_kernel_seconds;
+  double   fwd_d2h_seconds;
+  double   vit_h2d_seconds;
+  double   vit_kernel_seconds;
+  double   vit_d2h_seconds;
   uint64_t nseqs;
   uint64_t nres;
   uint64_t nbatches;
+  uint64_t fwd_nseqs;
+  uint64_t fwd_nres;
+  uint64_t fwd_nbatches;
+  uint64_t vit_nseqs;
+  uint64_t vit_nres;
+  uint64_t vit_nbatches;
 } P7_CUDA_MSV_STATS;
 
 extern int  p7_cuda_Available(char *errbuf, int errbuf_size);
@@ -47,5 +59,13 @@ extern int  p7_cuda_MSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_
 extern int  p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
                                            ESL_DSQDATA_CHUNK *chu, float *filtersc,
                                            char *errbuf, int errbuf_size);
+extern int  p7_cuda_ForwardScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                              ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                              float *scores, int *statuses,
+                                              char *errbuf, int errbuf_size);
+extern int  p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                              ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                              float *scores, int *statuses,
+                                              char *errbuf, int errbuf_size);
 
 #endif /*P7_CUDA_MSV_INCLUDED*/

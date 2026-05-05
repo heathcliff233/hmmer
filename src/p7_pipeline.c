@@ -1923,9 +1923,21 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# CUDA bias H2D time: %.6f sec\n", stats.bias_h2d_seconds);
     fprintf(ofp, "# CUDA bias kernel time: %.6f sec\n", stats.bias_kernel_seconds);
     fprintf(ofp, "# CUDA bias D2H time: %.6f sec\n", stats.bias_d2h_seconds);
+    fprintf(ofp, "# CUDA Forward H2D time: %.6f sec\n", stats.fwd_h2d_seconds);
+    fprintf(ofp, "# CUDA Forward kernel time: %.6f sec\n", stats.fwd_kernel_seconds);
+    fprintf(ofp, "# CUDA Forward D2H time: %.6f sec\n", stats.fwd_d2h_seconds);
+    fprintf(ofp, "# CUDA Viterbi H2D time: %.6f sec\n", stats.vit_h2d_seconds);
+    fprintf(ofp, "# CUDA Viterbi kernel time: %.6f sec\n", stats.vit_kernel_seconds);
+    fprintf(ofp, "# CUDA Viterbi D2H time: %.6f sec\n", stats.vit_d2h_seconds);
     fprintf(ofp, "# CUDA MSV sequences: %" PRIu64 "\n", stats.nseqs);
     fprintf(ofp, "# CUDA MSV residues: %" PRIu64 "\n", stats.nres);
     fprintf(ofp, "# CUDA MSV batches: %" PRIu64 "\n", stats.nbatches);
+    fprintf(ofp, "# CUDA Forward sequences: %" PRIu64 "\n", stats.fwd_nseqs);
+    fprintf(ofp, "# CUDA Forward residues: %" PRIu64 "\n", stats.fwd_nres);
+    fprintf(ofp, "# CUDA Forward batches: %" PRIu64 "\n", stats.fwd_nbatches);
+    fprintf(ofp, "# CUDA Viterbi sequences: %" PRIu64 "\n", stats.vit_nseqs);
+    fprintf(ofp, "# CUDA Viterbi residues: %" PRIu64 "\n", stats.vit_nres);
+    fprintf(ofp, "# CUDA Viterbi batches: %" PRIu64 "\n", stats.vit_nbatches);
   }
   fprintf(ofp, "# Stage null time: %.6f sec\n", pli->time_null);
   fprintf(ofp, "# Stage MSV host time: %.6f sec\n", pli->time_msv);
