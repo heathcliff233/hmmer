@@ -73,10 +73,10 @@ Do not start by porting the dense `cuda-hmm` kernels. A safe HMMER path should b
 
 ## Verification Notes
 
-The external project was not built in this environment because `cmake` was not installed. Source inspection was sufficient for the migration decision because the model and state representation are visibly incompatible with HMMER's Plan7 optimized pipeline.
+The external project was not built, and that is acceptable for this task. We are borrowing high-level CUDA DP design cues only, not copying or linking code from the external repository. Source inspection was sufficient for the migration decision because the model and state representation are visibly incompatible with HMMER's Plan7 optimized pipeline.
 
 Current local environment check:
 
 - `g++` is available.
-- `cmake` was not available during this assessment, so the external project was still not built.
+- `cmake` was not available during this assessment, but it is not required for the current design-reference use.
 - `nvcc` is available at `/usr/local/cuda/bin/nvcc` and reports CUDA 12.6.85. HMMER's `./configure --enable-cuda --with-cuda-arch=sm_89` finds that path even when `CUDA_HOME` is unset because the generated CUDA search path includes `/usr/local/cuda/bin`.
