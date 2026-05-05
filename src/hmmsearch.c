@@ -2182,7 +2182,13 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
             seq_score = (gpu_fwd_scores[j] - filtersc) / eslCONST_LOG2;
             P = esl_exp_surv(seq_score, info->om->evparam[p7_FTAU], info->om->evparam[p7_FLAMBDA]);
             cutoff_sc = info->om->evparam[p7_FTAU] - log(info->pli->F3) / info->om->evparam[p7_FLAMBDA];
-            if (seq_score >= cutoff_sc - grayzone_nats) rerun_cpu = TRUE;
+            if (P <= info->pli->F3 && info->gpu_fb_parser) {
+              status = gpu_fb_batch_Add(info, &gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
+                                        &gpu_fb_n, &gpu_fb_alloc, i, nullsc, filtersc, gpu_fwd_scores[j]);
+              if (status != eslOK) goto ERROR;
+            } else if (seq_score >= cutoff_sc - grayzone_nats) {
+              rerun_cpu = TRUE;
+            }
             if (rerun_cpu) {
               p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
               t0 = hmmsearch_WallTime();
