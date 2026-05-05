@@ -236,13 +236,22 @@ static void
 gpu_CompareParserState(WORKER_INFO *info, const ESL_SQ *dbsq, const P7_OMX *cpu_oxf, const P7_OMX *cpu_oxb,
                        float cpu_fwdsc, float gpu_fwdsc, float gpu_bcksc)
 {
+  P7_DOMAINDEF *cpu_ddef = NULL;
+  P7_DOMAINDEF *gpu_ddef = NULL;
   float cpu_bcksc = 0.0f;
   float max_fwd = 0.0f;
   float max_bck = 0.0f;
+  float max_mocc = 0.0f;
+  float max_btot = 0.0f;
+  float max_etot = 0.0f;
   int   max_fwd_i = 0;
   int   max_fwd_s = 0;
   int   max_bck_i = 0;
   int   max_bck_s = 0;
+  int   max_mocc_i = 0;
+  int   max_btot_i = 0;
+  int   max_etot_i = 0;
+  int   status;
 
   if (!info || !dbsq || !cpu_oxf || !cpu_oxb) return;
   if (cpu_oxb->xmx[p7X_N] > 0.0f) cpu_bcksc = cpu_oxb->totscale + logf(cpu_oxb->xmx[p7X_N]);
@@ -256,12 +265,33 @@ gpu_CompareParserState(WORKER_INFO *info, const ESL_SQ *dbsq, const P7_OMX *cpu_
     }
   }
 
-  if (fabsf(cpu_fwdsc - gpu_fwdsc) > 0.01f || fabsf(cpu_bcksc - gpu_bcksc) > 0.01f || max_fwd > 0.01f || max_bck > 0.01f) {
-    fprintf(stderr, "CUDAFB\t%s\tL=%ld\tcpu_fwd=%.6f\tgpu_fwd=%.6f\tcpu_bck=%.6f\tgpu_bck=%.6f\tmax_fwd=%.6f@%d/%d\tmax_bck=%.6f@%d/%d\n",
+  cpu_ddef = p7_domaindef_Create(NULL);
+  gpu_ddef = p7_domaindef_Create(NULL);
+  if (!cpu_ddef || !gpu_ddef) goto REPORT;
+  if ((status = p7_domaindef_GrowTo(cpu_ddef, dbsq->n)) != eslOK) goto REPORT;
+  if ((status = p7_domaindef_GrowTo(gpu_ddef, dbsq->n)) != eslOK) goto REPORT;
+  if ((status = p7_DomainDecoding(info->om, cpu_oxf, cpu_oxb, cpu_ddef)) != eslOK) goto REPORT;
+  if ((status = p7_DomainDecoding(info->om, info->pli->oxf, info->pli->oxb, gpu_ddef)) != eslOK) goto REPORT;
+  for (int i = 0; i <= dbsq->n; i++) {
+    float dm = fabsf(cpu_ddef->mocc[i] - gpu_ddef->mocc[i]);
+    float db = fabsf(cpu_ddef->btot[i] - gpu_ddef->btot[i]);
+    float de = fabsf(cpu_ddef->etot[i] - gpu_ddef->etot[i]);
+    if (dm > max_mocc) { max_mocc = dm; max_mocc_i = i; }
+    if (db > max_btot) { max_btot = db; max_btot_i = i; }
+    if (de > max_etot) { max_etot = de; max_etot_i = i; }
+  }
+
+REPORT:
+  if (fabsf(cpu_fwdsc - gpu_fwdsc) > 0.01f || fabsf(cpu_bcksc - gpu_bcksc) > 0.01f ||
+      max_fwd > 0.01f || max_bck > 0.01f || max_mocc > 0.01f || max_btot > 0.01f || max_etot > 0.01f) {
+    fprintf(stderr, "CUDAFB\t%s\tL=%ld\tcpu_fwd=%.6f\tgpu_fwd=%.6f\tcpu_bck=%.6f\tgpu_bck=%.6f\tmax_fwd=%.6f@%d/%d\tmax_bck=%.6f@%d/%d\tmax_mocc=%.6f@%d\tmax_btot=%.6f@%d\tmax_etot=%.6f@%d\n",
             dbsq->name ? dbsq->name : "-", (long) dbsq->n,
             cpu_fwdsc, gpu_fwdsc, cpu_bcksc, gpu_bcksc,
-            max_fwd, max_fwd_i, max_fwd_s, max_bck, max_bck_i, max_bck_s);
+            max_fwd, max_fwd_i, max_fwd_s, max_bck, max_bck_i, max_bck_s,
+            max_mocc, max_mocc_i, max_btot, max_btot_i, max_etot, max_etot_i);
   }
+  p7_domaindef_Destroy(cpu_ddef);
+  p7_domaindef_Destroy(gpu_ddef);
 }
 
 static int
