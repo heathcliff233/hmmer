@@ -23,6 +23,7 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 - Replace the CPU-compatible SSV/MSV boundary rescue only if a CUDA-native SSV-equivalent path preserves all-13 profmark parity and improves wall time.
 - Decide default policy for later-stage GPU work. Current evidence supports keeping `--gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser` opt-in until broader validation and auto-gating rules exist.
 - Broaden parser-state validation. Treat final hit parity and bounded posterior/domain inputs (`max_mocc`, `max_btot`, `max_etot`) as more meaningful than raw `p7X_SCALE` row differences alone.
+- Continue reducing CPU post-Fwd/domain/null2 costs after survivor-core migration; these remain the dominant accepted-scope CPU modules.
 - Investigate profile/candidate-shape auto-gating for short/fast CPU queries where later-stage CUDA launches can regress wall time.
 
 ## Validation Checklist
@@ -31,6 +32,7 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 - CUDA build: `./configure --enable-cuda --with-cuda-arch=sm_89`, `make -C src hmmsearch hmmseqdb generic_msv_utest`, and `make -C src/impl_sse msvfilter_utest msvfilter_benchmark`.
 - Functional smoke: CPU and GPU `hmmsearch --cpu 0` hit names should match on `tutorial/globins4.hmm` versus `hmmseqdb`-built `tutorial/globins45.fa` dsqdata.
 - Profmark validation: record wall time, CUDA timing, batch sizes/counts, pass counts, and `cpu_only`/`gpu_only` deltas with `test-speed/x-hmmsearch-gpu-profmark` and summarize with `test-speed/x-hmmsearch-gpu-profmark-summary`.
+- Exact timing validation: in GPU stats output, `Exact delta_vs_wall` must print `[OK]` and stay within `1e-6` seconds.
 
 ## Deferred Scope
 

@@ -64,9 +64,13 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_bias_eo)       cudaFree(engine->d_bias_eo);
   if (engine->d_fwd_scores)    cudaFree(engine->d_fwd_scores);
   if (engine->d_fwd_statuses)  cudaFree(engine->d_fwd_statuses);
+  if (engine->d_fwd_passed)    cudaFree(engine->d_fwd_passed);
+  if (engine->d_fwd_filtersc)  cudaFree(engine->d_fwd_filtersc);
   if (engine->d_fwd_seqidx)    cudaFree(engine->d_fwd_seqidx);
   if (engine->d_vit_scores)    cudaFree(engine->d_vit_scores);
   if (engine->d_vit_statuses)  cudaFree(engine->d_vit_statuses);
+  if (engine->d_vit_passed)    cudaFree(engine->d_vit_passed);
+  if (engine->d_vit_filtersc)  cudaFree(engine->d_vit_filtersc);
   if (engine->d_vit_seqidx)    cudaFree(engine->d_vit_seqidx);
   if (engine->d_fwd_prev)      cudaFree(engine->d_fwd_prev);
   if (engine->d_fwd_curr)      cudaFree(engine->d_fwd_curr);

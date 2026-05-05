@@ -189,11 +189,32 @@ cuda_viterbi_score_kernel(const uint8_t *dsq, const int *offsets, const int *len
     }
   }
 }
-extern "C" int
-p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
-                                  ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
-                                  float *scores, int *statuses,
-                                  char *errbuf, int errbuf_size)
+
+__global__ static void
+cuda_viterbi_pass_kernel(const float *scores, const int *statuses, const float *filtersc,
+                         int nidx, double mu, double lambda, double F2, int *passed)
+{
+  int bi = blockIdx.x * blockDim.x + threadIdx.x;
+  if (bi >= nidx) return;
+  if (statuses[bi] == eslERANGE) {
+    passed[bi] = TRUE;
+  } else if (statuses[bi] == eslOK) {
+    double bits = ((double) scores[bi] - (double) filtersc[bi]) / eslCONST_LOG2;
+    double y = lambda * (bits - mu);
+    double ey = exp(-y);
+    double P = (ey < eslSMALLX1) ? ey : 1.0 - exp(-ey);
+    passed[bi] = (P <= F2);
+  } else {
+    passed[bi] = FALSE;
+  }
+}
+
+static int
+p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                      ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                      const float *filtersc, double ev_mu, double ev_lambda, double F2,
+                      float *scores, int *statuses, int *passed,
+                      char *errbuf, int errbuf_size)
 {
   int status = eslOK;
   int nseq;
@@ -207,7 +228,9 @@ p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
   size_t shmem;
   cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
 
-  if (!engine || !cuom || !chu || !scores || !statuses) return eslEINVAL;
+  if (!engine || !cuom || !chu || !statuses) return eslEINVAL;
+  if (!scores && !passed) return eslEINVAL;
+  if (passed && !filtersc) return eslEINVAL;
   nseq = chu->N;
   if (nidx <= 0) return eslOK;
   if (nseq <= 0) return eslOK;
@@ -258,15 +281,27 @@ p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
   if (engine->vit_result_alloc < nidx) {
     if (engine->d_vit_scores) cudaFree(engine->d_vit_scores);
     if (engine->d_vit_statuses) cudaFree(engine->d_vit_statuses);
+    if (engine->d_vit_passed) cudaFree(engine->d_vit_passed);
+    if (engine->d_vit_filtersc) cudaFree(engine->d_vit_filtersc);
     if (engine->d_vit_seqidx) cudaFree(engine->d_vit_seqidx);
     engine->d_vit_scores = NULL;
     engine->d_vit_statuses = NULL;
+    engine->d_vit_passed = NULL;
+    engine->d_vit_filtersc = NULL;
     engine->d_vit_seqidx = NULL;
     engine->vit_result_alloc = 0;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_vit_scores, sizeof(float) * nidx), errbuf, errbuf_size, "cudaMalloc(vit scores)")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_vit_statuses, sizeof(int) * nidx), errbuf, errbuf_size, "cudaMalloc(vit statuses)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_vit_passed, sizeof(int) * nidx), errbuf, errbuf_size, "cudaMalloc(vit passed)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_vit_filtersc, sizeof(float) * nidx), errbuf, errbuf_size, "cudaMalloc(vit filtersc)")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_vit_seqidx, sizeof(int) * nidx), errbuf, errbuf_size, "cudaMalloc(vit seqidx)")) != eslOK) goto ERROR;
     engine->vit_result_alloc = nidx;
+  }
+  if (passed && engine->d_vit_filtersc == NULL) {
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_vit_filtersc, sizeof(float) * engine->vit_result_alloc), errbuf, errbuf_size, "cudaMalloc(vit filtersc)")) != eslOK) goto ERROR;
+  }
+  if (passed && engine->d_vit_passed == NULL) {
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_vit_passed, sizeof(int) * engine->vit_result_alloc), errbuf, errbuf_size, "cudaMalloc(vit passed)")) != eslOK) goto ERROR;
   }
   group_shmem = sizeof(int16_t) * (size_t) cuom->Qw * 8 * 3 * 2;
   if (group_shmem == 0 || group_shmem > (48u * 1024u)) {
@@ -298,6 +333,9 @@ p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
   if (seqidx) {
     if ((status = cuda_status(cudaMemcpy(engine->d_vit_seqidx, seqidx, sizeof(int) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vit seqidx)")) != eslOK) goto CUDA_ERROR;
   }
+  if (passed) {
+    if ((status = cuda_status(cudaMemcpy(engine->d_vit_filtersc, filtersc, sizeof(float) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vit filtersc)")) != eslOK) goto CUDA_ERROR;
+  }
   cudaEventRecord(h2d1);
   cudaEventSynchronize(h2d1);
 
@@ -315,12 +353,24 @@ p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
                                                            engine->d_vit_scores, engine->d_vit_statuses);
   }
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_score_kernel launch")) != eslOK) goto CUDA_ERROR;
+  if (passed) {
+    int pass_threads = 256;
+    int pass_blocks = (nidx + pass_threads - 1) / pass_threads;
+    cuda_viterbi_pass_kernel<<<pass_blocks, pass_threads>>>(engine->d_vit_scores, engine->d_vit_statuses, engine->d_vit_filtersc,
+                                                            nidx, ev_mu, ev_lambda, F2, engine->d_vit_passed);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_pass_kernel launch")) != eslOK) goto CUDA_ERROR;
+  }
   cudaEventRecord(k1);
   cudaEventSynchronize(k1);
 
   cudaEventRecord(d2h0);
-  if ((status = cuda_status(cudaMemcpy(scores, engine->d_vit_scores, sizeof(float) * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vit scores)")) != eslOK) goto CUDA_ERROR;
+  if (scores) {
+    if ((status = cuda_status(cudaMemcpy(scores, engine->d_vit_scores, sizeof(float) * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vit scores)")) != eslOK) goto CUDA_ERROR;
+  }
   if ((status = cuda_status(cudaMemcpy(statuses, engine->d_vit_statuses, sizeof(int) * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vit statuses)")) != eslOK) goto CUDA_ERROR;
+  if (passed) {
+    if ((status = cuda_status(cudaMemcpy(passed, engine->d_vit_passed, sizeof(int) * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vit passed)")) != eslOK) goto CUDA_ERROR;
+  }
   cudaEventRecord(d2h1);
   cudaEventSynchronize(d2h1);
 
@@ -345,4 +395,24 @@ ERROR:
   free(h_offsets);
   free(h_lengths);
   return status;
+}
+extern "C" int
+p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                  ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                  float *scores, int *statuses,
+                                  char *errbuf, int errbuf_size)
+{
+  return p7_cuda_ViterbiSubset(engine, cuom, chu, seqidx, nidx, NULL, 0.0f, 0.0f, 0.0f,
+                               scores, statuses, NULL, errbuf, errbuf_size);
+}
+
+extern "C" int
+p7_cuda_ViterbiFilterDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                   ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                   const float *filtersc, double ev_mu, double ev_lambda, double F2,
+                                   float *scores, int *statuses, int *passed,
+                                   char *errbuf, int errbuf_size)
+{
+  return p7_cuda_ViterbiSubset(engine, cuom, chu, seqidx, nidx, filtersc, ev_mu, ev_lambda, F2,
+                               scores, statuses, passed, errbuf, errbuf_size);
 }

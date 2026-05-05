@@ -1256,6 +1256,14 @@ typedef struct p7_pipeline_s {
   double        time_gpu_read;   /* dsqdata read/unpack wall time for GPU path */
   double        time_gpu_meta;   /* ESL_SQ metadata setup in GPU path          */
   double        time_gpu_survivor; /* CPU post-MSV continuation in GPU path     */
+  double        exact_io_read_unpack;       /* exclusive GPU path wall bucket */
+  double        exact_gpu_h2d;              /* exclusive CUDA host-to-device bucket */
+  double        exact_gpu_kernel;           /* exclusive CUDA kernel bucket */
+  double        exact_gpu_d2h;              /* exclusive CUDA device-to-host bucket */
+  double        exact_host_survivor_orchestration; /* exclusive host survivor setup */
+  double        exact_cpu_postfwd_domain_null2_output; /* exclusive CPU post-Fwd work */
+  double        exact_other;                /* residual exclusive wall bucket */
+  double        exact_wall;                 /* enclosing elapsed wall for exact buckets */
 
   enum p7_pipemodes_e mode;    	/* p7_SCAN_MODELS | p7_SEARCH_SEQS          */
   int           long_targets;   /* TRUE if the target sequences are expected to be very long (e.g. dna chromosome search in nhmmer) */

@@ -43,10 +43,14 @@ struct p7_cuda_msv_engine_s {
   float              *d_bias_eo;
   float              *d_fwd_scores;
   int                *d_fwd_statuses;
+  int                *d_fwd_passed;
+  float              *d_fwd_filtersc;
   int                *d_fwd_seqidx;
   int                 fwd_result_alloc;
   float              *d_vit_scores;
   int                *d_vit_statuses;
+  int                *d_vit_passed;
+  float              *d_vit_filtersc;
   int                *d_vit_seqidx;
   int                 vit_result_alloc;
   float              *d_fwd_prev;

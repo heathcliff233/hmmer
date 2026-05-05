@@ -75,10 +75,20 @@ extern int  p7_cuda_ForwardScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_C
                                               ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                               float *scores, int *statuses,
                                               char *errbuf, int errbuf_size);
+extern int  p7_cuda_ForwardFilterDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                               ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                               const float *filtersc, double ev_mu, double ev_lambda, double F3,
+                                               float *scores, int *statuses, int *passed,
+                                               char *errbuf, int errbuf_size);
 extern int  p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                               ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                               float *scores, int *statuses,
                                               char *errbuf, int errbuf_size);
+extern int  p7_cuda_ViterbiFilterDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                               ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                               const float *filtersc, double ev_mu, double ev_lambda, double F2,
+                                               float *scores, int *statuses, int *passed,
+                                               char *errbuf, int errbuf_size);
 extern int  p7_cuda_ForwardBackwardParser(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                            const ESL_DSQ *dsq, int L, P7_OMX *oxf, P7_OMX *oxb,
                                            float *ret_fwdsc, float *ret_bcksc,
