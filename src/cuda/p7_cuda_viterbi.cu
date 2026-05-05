@@ -1,18 +1,5 @@
 #include "p7_cuda_internal.h"
 
-__device__ static inline uint8_t
-u8_sub_sat(uint8_t a, uint8_t b)
-{
-  return (a > b) ? (uint8_t) (a - b) : 0;
-}
-
-__device__ static inline uint8_t
-u8_add_sat(uint8_t a, uint8_t b)
-{
-  unsigned int v = (unsigned int) a + (unsigned int) b;
-  return (v > 255) ? 255 : (uint8_t) v;
-}
-
 __device__ static inline int16_t
 i16_add_sat(int16_t a, int16_t b)
 {
@@ -37,11 +24,6 @@ vit_twv_idx(int t, int q, int lane, int Q)
   return (t == p7O_DD) ? (((7 * Q) + q) * 8 + lane) : (((q * 7) + t) * 8 + lane);
 }
 
-__device__ static inline int
-fwd_tfv_idx(int t, int q, int lane, int Q)
-{
-  return (t == p7O_DD) ? (((7 * Q) + q) * 4 + lane) : (((q * 7) + t) * 4 + lane);
-}
 __global__ static void
 cuda_viterbi_score_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
                           const int *seqidx, int nidx,
@@ -52,11 +34,15 @@ cuda_viterbi_score_kernel(const uint8_t *dsq, const int *offsets, const int *len
                           float *scores, int *statuses)
 {
   extern __shared__ int16_t vit_mem[];
-  int N = Q * 8;
-  int16_t *prev = vit_mem;
-  int16_t *curr = prev + (size_t) N * 3;
-  int bi = blockIdx.x;
+  int groups_per_block = blockDim.x >> 5;
+  int group = threadIdx.x >> 5;
   int lane = threadIdx.x & 31;
+  int bi = blockIdx.x * groups_per_block + group;
+  int N = Q * 8;
+  size_t group_stride = (size_t) N * 3 * 2;
+  int16_t *group_mem = vit_mem + ((size_t) group * group_stride);
+  int16_t *prev = group_mem;
+  int16_t *curr = prev + (size_t) N * 3;
   unsigned int mask = 0xff;
 
   if (bi >= nidx || lane >= 8) return;
@@ -215,6 +201,9 @@ p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
   int *h_offsets = NULL;
   int *h_lengths = NULL;
   int reuse_batch = FALSE;
+  int threads = 32;
+  int groups_per_block = 1;
+  size_t group_shmem;
   size_t shmem;
   cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
 
@@ -279,7 +268,18 @@ p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_vit_seqidx, sizeof(int) * nidx), errbuf, errbuf_size, "cudaMalloc(vit seqidx)")) != eslOK) goto ERROR;
     engine->vit_result_alloc = nidx;
   }
-  shmem = sizeof(int16_t) * (size_t) cuom->Qw * 8 * 3 * 2;
+  group_shmem = sizeof(int16_t) * (size_t) cuom->Qw * 8 * 3 * 2;
+  if (group_shmem == 0 || group_shmem > (48u * 1024u)) {
+    if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA Viterbi shared-memory requirement exceeds v1 limit");
+    status = eslERANGE;
+    goto ERROR;
+  }
+  while (groups_per_block < 4 && (size_t) (groups_per_block + 1) * group_shmem <= (48u * 1024u))
+    groups_per_block++;
+  if (groups_per_block > nidx) groups_per_block = nidx;
+  if (groups_per_block < 1) groups_per_block = 1;
+  threads = groups_per_block * 32;
+  shmem = group_shmem * (size_t) groups_per_block;
 
   cudaEventCreate(&h2d0);
   cudaEventCreate(&h2d1);
@@ -302,15 +302,18 @@ p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
   cudaEventSynchronize(h2d1);
 
   cudaEventRecord(k0);
-  cuda_viterbi_score_kernel<<<nidx, 32, shmem>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths,
-                                                 seqidx ? engine->d_vit_seqidx : NULL, nidx,
-                                                 cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,
-                                                 cuom->xw_n_loop, cuom->xw_n_move,
-                                                 cuom->xw_c_loop, cuom->xw_c_move,
-                                                 cuom->xw_j_loop, cuom->xw_j_move,
-                                                 cuom->xw_e_loop, cuom->xw_e_move,
-                                                 cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,
-                                                 engine->d_vit_scores, engine->d_vit_statuses);
+  {
+    int blocks = (nidx + groups_per_block - 1) / groups_per_block;
+    cuda_viterbi_score_kernel<<<blocks, threads, shmem>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths,
+                                                           seqidx ? engine->d_vit_seqidx : NULL, nidx,
+                                                           cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,
+                                                           cuom->xw_n_loop, cuom->xw_n_move,
+                                                           cuom->xw_c_loop, cuom->xw_c_move,
+                                                           cuom->xw_j_loop, cuom->xw_j_move,
+                                                           cuom->xw_e_loop, cuom->xw_e_move,
+                                                           cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,
+                                                           engine->d_vit_scores, engine->d_vit_statuses);
+  }
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_score_kernel launch")) != eslOK) goto CUDA_ERROR;
   cudaEventRecord(k1);
   cudaEventSynchronize(k1);
@@ -327,7 +330,7 @@ p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
   engine->stats.vit_nseqs          += nidx;
   for (int i = 0; i < nidx; i++) {
     int si = seqidx ? seqidx[i] : i;
-    if (si >= 0 && si < nseq) engine->stats.vit_nres += h_lengths[si];
+    if (si >= 0 && si < nseq) engine->stats.vit_nres += (uint64_t) chu->L[si];
   }
   engine->stats.vit_nbatches       += 1;
 

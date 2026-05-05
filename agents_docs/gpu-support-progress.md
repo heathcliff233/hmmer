@@ -18,6 +18,9 @@ Last updated: 2026-05-05
 - Broader 12-query profmark run in `benchmark-data/profmark-current/gpu-audit/broader12-nocompare/` with the same later-stage flags: CPU wall 7.78 sec, GPU wall 7.05 sec, aggregate speedup 1.104x, `cpu_only=0`, `gpu_only=0`.
 - The broader 12-query MSV/bias baseline in `benchmark-data/profmark-current/gpu-audit/broader12-msvbias-baseline/` recorded GPU wall 7.88 sec; the later-stage path saved 0.83 sec but regressed a few short profiles slightly, so later stages remain default-off pending auto-gating policy.
 - Compare-mode runs are validation evidence, not speed claims. The current compare runs produced zero `CUDAVIT` and zero `CUDAFWD` diagnostics; `CUDAFB` raw scale-row diagnostics remain, but domain-decoding input maxima stayed below 0.00002 in the all-13 compare run.
+- Viterbi same-algorithm optimization (2026-05-05) in `benchmark-data/profmark-current/gpu-audit/vit-samealgo-all13-nocompare/`: CPU wall 28.66 sec, GPU wall 26.61 sec, aggregate speedup 1.077x, `cpu_only=0`, `gpu_only=0`; CUDA Viterbi total (H2D+kernel+D2H) 0.945 sec vs CPU stage Viterbi 3.861 sec from CPU logs (about 4.09x stage speedup; kernel 0.941 sec).
+- Same iteration, broader 12 non-compare in `benchmark-data/profmark-current/gpu-audit/vit-samealgo-broader12-nocompare/`: CPU wall 9.82 sec, GPU wall 7.85 sec, aggregate speedup 1.251x, `cpu_only=0`, `gpu_only=0`; CUDA Viterbi total 0.792 sec, while many profiles had no surviving CPU Viterbi work in the GPU run (`stage_vit` near 0 in GPU logs), so CPU-stage comparison should be taken from CPU outputs when evaluating stage-only speedup.
+- Compare validation for the same iteration: `benchmark-data/profmark-current/gpu-audit/vit-samealgo-all13-compare/` and `.../vit-samealgo-broader12-compare/` both had `cpu_only=0`, `gpu_only=0`, and zero `CUDAPREVIT`, `CUDAVIT`, `CUDAFWD`, `CUDAFB` diagnostics.
 
 ## Open Risks
 

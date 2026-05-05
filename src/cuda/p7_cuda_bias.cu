@@ -208,9 +208,6 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
     total += h_lengths[i] + 2;
   }
   reuse_batch = (engine->batch_owner == chu && engine->batch_nseq == nseq && engine->batch_total == total);
-  engine->batch_owner = NULL;
-  engine->batch_nseq  = 0;
-  engine->batch_total = 0;
 
   if (engine->dsq_alloc < total) {
     if (engine->d_dsq) cudaFree(engine->d_dsq);
@@ -310,6 +307,9 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   engine->stats.bias_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.bias_kernel_seconds += elapsed_seconds(k0, k1);
   engine->stats.bias_d2h_seconds    += elapsed_seconds(d2h0, d2h1);
+  engine->batch_owner = chu;
+  engine->batch_nseq  = nseq;
+  engine->batch_total = total;
 
 CUDA_ERROR:
   cudaEventDestroy(h2d0);

@@ -536,6 +536,9 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
   double   t0;
   int      gpu_vit_active = info->gpu_vit_prefilter && info->om->M <= 512;
   int      gpu_fwd_active = info->gpu_fwd_prefilter && info->om->M <= 256;
+  int      vit_cmp_status_mismatch = 0;
+  int      vit_cmp_pass_mismatch = 0;
+  int      vit_cmp_score_drift = 0;
 
   gpu_search_batch_Init(&batch);
   if (dd == NULL) return eslEINVAL;
@@ -741,6 +744,9 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
             }
           }
           if (info->gpu_vit_compare) {
+            int status_mismatch = 0;
+            int pass_mismatch = 0;
+            int score_drift = 0;
             p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
             cpu_status = p7_ViterbiFilter(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &cpu_vitsc);
             cpu_pass = (cpu_status == eslERANGE);
@@ -748,7 +754,13 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
               seq_score = (cpu_vitsc - filtersc) / eslCONST_LOG2;
               cpu_pass = (esl_gumbel_surv(seq_score, info->om->evparam[p7_VMU], info->om->evparam[p7_VLAMBDA]) <= info->pli->F2);
             }
-            if (cpu_status != gpu_vit_statuses[j] || cpu_pass != gpu_pass || (cpu_status == eslOK && fabsf(cpu_vitsc - gpu_vit_scores[j]) > 0.01f)) {
+            status_mismatch = (cpu_status != gpu_vit_statuses[j]);
+            pass_mismatch = (cpu_pass != gpu_pass);
+            score_drift = (cpu_status == eslOK && fabsf(cpu_vitsc - gpu_vit_scores[j]) > 0.01f);
+            if (status_mismatch) vit_cmp_status_mismatch++;
+            if (pass_mismatch) vit_cmp_pass_mismatch++;
+            if (score_drift) vit_cmp_score_drift++;
+            if (status_mismatch || pass_mismatch || score_drift) {
               fprintf(stderr, "CUDAVIT\t%s\tL=%ld\tcpu_status=%d\tgpu_status=%d\tcpu=%.6f\tgpu=%.6f\tdiff=%.6f\tcpu_pass=%d\tgpu_pass=%d\n",
                       dbsq->name ? dbsq->name : "-", (long) dbsq->n, cpu_status, gpu_vit_statuses[j],
                       cpu_vitsc, gpu_vit_scores[j], gpu_vit_scores[j] - cpu_vitsc, cpu_pass, gpu_pass);
@@ -961,6 +973,10 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
     free(gpu_fb_nullsc);
     free(gpu_fb_filtersc);
     free(gpu_fb_fwdsc);
+    if (info->gpu_vit_compare) {
+      fprintf(stderr, "CUDAVIT_SUMMARY\tstatus_mismatch=%d\tpass_mismatch=%d\tscore_drift=%d\n",
+              vit_cmp_status_mismatch, vit_cmp_pass_mismatch, vit_cmp_score_drift);
+    }
   return sstatus;
 
 ERROR:
