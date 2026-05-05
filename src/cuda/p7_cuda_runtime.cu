@@ -57,6 +57,7 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
   if (engine->d_raw)      cudaFree(engine->d_raw);
   if (engine->d_overflow) cudaFree(engine->d_overflow);
+  if (engine->d_null_scores)    cudaFree(engine->d_null_scores);
   if (engine->d_bias_filtersc) cudaFree(engine->d_bias_filtersc);
   if (engine->d_bias_pi)       cudaFree(engine->d_bias_pi);
   if (engine->d_bias_t)        cudaFree(engine->d_bias_t);

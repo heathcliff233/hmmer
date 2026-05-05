@@ -34,6 +34,8 @@ struct p7_cuda_msv_engine_s {
   int                *d_raw;
   int                *d_overflow;
   int                 result_alloc;
+  float              *d_null_scores;
+  int                 null_result_alloc;
   float              *d_bias_filtersc;
   int                 bias_result_alloc;
   float              *d_bias_pi;

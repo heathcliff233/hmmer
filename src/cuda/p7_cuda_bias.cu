@@ -1,6 +1,24 @@
 #include "p7_cuda_internal.h"
 
 __global__ static void
+cuda_null_score_kernel(const int *lengths, int nseq, float *nullsc)
+{
+  int seq = blockIdx.x * blockDim.x + threadIdx.x;
+  if (seq >= nseq) return;
+
+  int L = lengths[seq];
+  if (L <= 0) {
+    nullsc[seq] = 0.0f;
+    return;
+  }
+
+  {
+    float p1 = (float) L / (float) (L + 1);
+    nullsc[seq] = (float) L * logf(p1) + logf(1.0f - p1);
+  }
+}
+
+__global__ static void
 cuda_bias_filter_kernel(const uint8_t *dsq, const int *offsets, const int *lengths, int nseq,
                         const float *pi, const float *t, const float *eo,
                         float *filtersc)
@@ -39,6 +57,122 @@ cuda_bias_filter_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
   sc += logf(p0 * t[2] + p1s * t[5]);
   filtersc[seq] = sc + (float) L * logf(len_p1) + logf(1.0f - len_p1);
 }
+extern "C" int
+p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
+                               ESL_DSQDATA_CHUNK *chu, float *nullsc,
+                               char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int nseq;
+  int total = 0;
+  int *h_offsets = NULL;
+  int *h_lengths = NULL;
+  int reuse_batch = FALSE;
+  cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
+
+  (void) bg;
+  if (!engine || !chu || !nullsc) return eslEINVAL;
+  nseq = chu->N;
+  if (nseq <= 0) return eslOK;
+
+  h_offsets = (int *) malloc(sizeof(int) * nseq);
+  h_lengths = (int *) malloc(sizeof(int) * nseq);
+  if (!h_offsets || !h_lengths) { status = eslEMEM; goto ERROR; }
+
+  for (int i = 0; i < nseq; i++) {
+    h_offsets[i] = total;
+    if (chu->L[i] > INT32_MAX) {
+      if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "dsqdata sequence length exceeds CUDA null v1 limit");
+      status = eslERANGE;
+      goto ERROR;
+    }
+    h_lengths[i] = (int) chu->L[i];
+    total += h_lengths[i] + 2;
+  }
+  reuse_batch = (engine->batch_owner == chu && engine->batch_nseq == nseq && engine->batch_total == total);
+
+  if (engine->dsq_alloc < total) {
+    if (engine->d_dsq) cudaFree(engine->d_dsq);
+    if (engine->h_dsq) cudaFreeHost(engine->h_dsq);
+    engine->d_dsq = NULL;
+    engine->h_dsq = NULL;
+    engine->dsq_alloc = 0;
+    engine->h_dsq_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_dsq, total), errbuf, errbuf_size, "cudaMalloc(batch dsq)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMallocHost((void **) &engine->h_dsq, total), errbuf, errbuf_size, "cudaMallocHost(batch dsq)")) != eslOK) goto ERROR;
+    engine->dsq_alloc = total;
+    engine->h_dsq_alloc = total;
+    reuse_batch = FALSE;
+  }
+  if (engine->meta_alloc < nseq) {
+    if (engine->d_offsets) cudaFree(engine->d_offsets);
+    if (engine->d_lengths) cudaFree(engine->d_lengths);
+    if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
+    engine->d_offsets = NULL;
+    engine->d_lengths = NULL;
+    engine->d_tjb_by_seq = NULL;
+    engine->meta_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(offsets)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(lengths)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
+    engine->meta_alloc = nseq;
+    reuse_batch = FALSE;
+  }
+  if (engine->null_result_alloc < nseq) {
+    if (engine->d_null_scores) cudaFree(engine->d_null_scores);
+    engine->d_null_scores = NULL;
+    engine->null_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_null_scores, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(null scores)")) != eslOK) goto ERROR;
+    engine->null_result_alloc = nseq;
+  }
+
+  cudaEventCreate(&h2d0);
+  cudaEventCreate(&h2d1);
+  cudaEventCreate(&k0);
+  cudaEventCreate(&k1);
+  cudaEventCreate(&d2h0);
+  cudaEventCreate(&d2h1);
+
+  cudaEventRecord(h2d0);
+  if (!reuse_batch) {
+    for (int i = 0; i < nseq; i++) {
+      memcpy(engine->h_dsq + h_offsets[i], chu->dsq[i], h_lengths[i] + 2);
+    }
+    if ((status = cuda_status(cudaMemcpy(engine->d_dsq, engine->h_dsq, total, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(batch dsq)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(engine->d_offsets, h_offsets, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(offsets)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(engine->d_lengths, h_lengths, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lengths)")) != eslOK) goto CUDA_ERROR;
+  }
+  cudaEventRecord(h2d1);
+  cudaEventSynchronize(h2d1);
+
+  cudaEventRecord(k0);
+  cuda_null_score_kernel<<<(nseq + 127) / 128, 128>>>(engine->d_lengths, nseq, engine->d_null_scores);
+  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_null_score_kernel launch")) != eslOK) goto CUDA_ERROR;
+  cudaEventRecord(k1);
+  cudaEventSynchronize(k1);
+
+  cudaEventRecord(d2h0);
+  if ((status = cuda_status(cudaMemcpy(nullsc, engine->d_null_scores, sizeof(float) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(null scores)")) != eslOK) goto CUDA_ERROR;
+  cudaEventRecord(d2h1);
+  cudaEventSynchronize(d2h1);
+
+  engine->stats.null_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
+  engine->stats.null_kernel_seconds += elapsed_seconds(k0, k1);
+  engine->stats.null_d2h_seconds    += elapsed_seconds(d2h0, d2h1);
+
+CUDA_ERROR:
+  cudaEventDestroy(h2d0);
+  cudaEventDestroy(h2d1);
+  cudaEventDestroy(k0);
+  cudaEventDestroy(k1);
+  cudaEventDestroy(d2h0);
+  cudaEventDestroy(d2h1);
+ERROR:
+  free(h_offsets);
+  free(h_lengths);
+  return status;
+}
+
 extern "C" int
 p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
                                ESL_DSQDATA_CHUNK *chu, float *filtersc,
@@ -104,6 +238,13 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
     engine->meta_alloc = nseq;
     reuse_batch = FALSE;
+  }
+  if (engine->null_result_alloc < nseq) {
+    if (engine->d_null_scores) cudaFree(engine->d_null_scores);
+    engine->d_null_scores = NULL;
+    engine->null_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_null_scores, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(null scores)")) != eslOK) goto ERROR;
+    engine->null_result_alloc = nseq;
   }
   if (engine->bias_result_alloc < nseq) {
     if (engine->d_bias_filtersc) cudaFree(engine->d_bias_filtersc);

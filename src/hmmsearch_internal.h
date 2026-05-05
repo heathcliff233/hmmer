@@ -35,6 +35,7 @@ typedef struct {
   int               gpu_fwd_compare;   /* debug CUDA-vs-CPU Forward score check */
   int               gpu_vit_compare;   /* debug CUDA-vs-CPU Viterbi score check */
   int               gpu_fb_compare;    /* debug CUDA-vs-CPU parser state check  */
+  int               gpu_previt_compare;/* debug CUDA-vs-CPU null/bias/F1 checks */
 } WORKER_INFO;
 
 double hmmsearch_WallTime(void);
