@@ -50,7 +50,11 @@ struct p7_cuda_msv_engine_s {
   float              *d_parser_xb;
   float              *d_parser_scores;
   int                *d_parser_statuses;
+  int                *d_parser_seqidx;
+  size_t             *d_parser_x_offsets;
   int                 parser_allocL;
+  int                 parser_result_alloc;
+  size_t              parser_cell_alloc;
   P7_CUDA_MSV_STATS   stats;
 };
 
@@ -813,6 +817,131 @@ cuda_forward_parser_xmx_kernel(const uint8_t *dsq, int L,
 }
 
 __global__ static void
+cuda_forward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
+                                     const int *seqidx, int nidx, const size_t *x_offsets,
+                                     const float *rfv, const float *tfv, int M, int Q, int Kp,
+                                     float xf_e_loop, float xf_e_move, float xf_n_loop_base, float xf_n_move_base,
+                                     float xf_c_loop_base, float xf_c_move_base, float xf_j_loop_base, float xf_j_move_base,
+                                     float nj, float *xmx, float *scores, int *statuses)
+{
+  extern __shared__ float fwd_parser_mem[];
+  int b = blockIdx.x;
+  int N = Q * 4;
+  float *prev = fwd_parser_mem;
+  float *curr = prev + (size_t) N * 3;
+  int si, L;
+  const uint8_t *sdsq;
+  float *sxmx;
+  float pmove, ploop;
+  float xf_n_loop, xf_n_move, xf_c_loop, xf_c_move, xf_j_loop, xf_j_move;
+  float xN = 1.0f;
+  float xJ = 0.0f;
+  float xB;
+  float xC = 0.0f;
+  float xE = 0.0f;
+  float totscale = 0.0f;
+
+  if (b >= nidx) return;
+  if (threadIdx.x != 0) return;
+  si = seqidx ? seqidx[b] : b;
+  L = lengths[si];
+  sdsq = dsq + offsets[si];
+  sxmx = xmx + x_offsets[b];
+
+  pmove = (2.0f + nj) / ((float) L + 2.0f + nj);
+  ploop = 1.0f - pmove;
+  xf_n_loop = xf_n_loop_base >= 0.0f ? xf_n_loop_base : ploop;
+  xf_n_move = xf_n_move_base >= 0.0f ? xf_n_move_base : pmove;
+  xf_c_loop = xf_c_loop_base >= 0.0f ? xf_c_loop_base : ploop;
+  xf_c_move = xf_c_move_base >= 0.0f ? xf_c_move_base : pmove;
+  xf_j_loop = xf_j_loop_base >= 0.0f ? xf_j_loop_base : ploop;
+  xf_j_move = xf_j_move_base >= 0.0f ? xf_j_move_base : pmove;
+  xB = xf_n_move;
+
+  for (int c = 0; c < N * 3; c++) prev[c] = 0.0f;
+  sxmx[p7X_E]     = xE;
+  sxmx[p7X_N]     = xN;
+  sxmx[p7X_J]     = xJ;
+  sxmx[p7X_B]     = xB;
+  sxmx[p7X_C]     = xC;
+  sxmx[p7X_SCALE] = 1.0f;
+
+  for (int i = 1; i <= L; i++) {
+    uint8_t x = sdsq[i];
+    if (x >= Kp) {
+      scores[b * 2 + 0] = 0.0f;
+      statuses[b * 2 + 0] = eslEINVAL;
+      return;
+    }
+
+    xE = 0.0f;
+    for (int c = 0; c < N; c++) {
+      int q = cell_q(c, Q);
+      int lane = cell_lane(c, Q);
+      int cell = c * 3;
+      float mpv = (c == 0) ? 0.0f : prev[(c - 1) * 3 + 0];
+      float dpv = (c == 0) ? 0.0f : prev[(c - 1) * 3 + 1];
+      float ipv = (c == 0) ? 0.0f : prev[(c - 1) * 3 + 2];
+      float m = xB * tfv[fwd_tfv_idx(p7O_BM, q, lane, Q)];
+      m += mpv * tfv[fwd_tfv_idx(p7O_MM, q, lane, Q)];
+      m += ipv * tfv[fwd_tfv_idx(p7O_IM, q, lane, Q)];
+      m += dpv * tfv[fwd_tfv_idx(p7O_DM, q, lane, Q)];
+      m *= rfv[((int) x * Q + q) * 4 + lane];
+      curr[cell + 0] = m;
+      curr[cell + 2] = prev[cell + 0] * tfv[fwd_tfv_idx(p7O_MI, q, lane, Q)]
+                     + prev[cell + 2] * tfv[fwd_tfv_idx(p7O_II, q, lane, Q)];
+    }
+
+    curr[p7X_D] = 0.0f;
+    for (int c = 1; c < N; c++) {
+      int pq = cell_q(c - 1, Q);
+      int plane = cell_lane(c - 1, Q);
+      curr[c * 3 + 1] = curr[(c - 1) * 3 + 0] * tfv[fwd_tfv_idx(p7O_MD, pq, plane, Q)]
+                      + curr[(c - 1) * 3 + 1] * tfv[fwd_tfv_idx(p7O_DD, pq, plane, Q)];
+    }
+
+    for (int c = 0; c < N; c++) xE += curr[c * 3 + 0] + curr[c * 3 + 1];
+
+    xN = xN * xf_n_loop;
+    xC = (xC * xf_c_loop) + (xE * xf_e_move);
+    xJ = (xJ * xf_j_loop) + (xE * xf_e_loop);
+    xB = (xJ * xf_j_move) + (xN * xf_n_move);
+
+    float scale = 1.0f;
+    if (xE > 1.0e4f) {
+      scale = xE;
+      float inv = 1.0f / xE;
+      xN *= inv;
+      xC *= inv;
+      xJ *= inv;
+      xB *= inv;
+      for (int c = 0; c < N * 3; c++) curr[c] *= inv;
+      totscale += logf(xE);
+      xE = 1.0f;
+    }
+
+    sxmx[i * p7X_NXCELLS + p7X_E]     = xE;
+    sxmx[i * p7X_NXCELLS + p7X_N]     = xN;
+    sxmx[i * p7X_NXCELLS + p7X_J]     = xJ;
+    sxmx[i * p7X_NXCELLS + p7X_B]     = xB;
+    sxmx[i * p7X_NXCELLS + p7X_C]     = xC;
+    sxmx[i * p7X_NXCELLS + p7X_SCALE] = scale;
+
+    float *tmp = prev;
+    prev = curr;
+    curr = tmp;
+  }
+
+  if (isnan(xC) || (L > 0 && xC == 0.0f) || isinf(xC)) {
+    scores[b * 2 + 0] = 0.0f;
+    statuses[b * 2 + 0] = eslERANGE;
+  } else {
+    scores[b * 2 + 0] = totscale + logf(xC * xf_c_move);
+    statuses[b * 2 + 0] = eslOK;
+  }
+}
+
+__global__ static void
 cuda_backward_parser_xmx_kernel(const uint8_t *dsq, int L,
                                 const float *rfv, const float *tfv, int M, int Q, int Kp,
                                 float xf_e_loop, float xf_e_move, float xf_n_loop_base, float xf_n_move_base,
@@ -987,6 +1116,201 @@ cuda_backward_parser_xmx_kernel(const uint8_t *dsq, int L,
   } else {
     scores[1] = totscale + logf(xN);
     statuses[1] = eslOK;
+  }
+}
+
+__global__ static void
+cuda_backward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
+                                      const int *seqidx, int nidx, const size_t *x_offsets,
+                                      const float *rfv, const float *tfv, int M, int Q, int Kp,
+                                      float xf_e_loop, float xf_e_move, float xf_n_loop_base, float xf_n_move_base,
+                                      float xf_c_loop_base, float xf_c_move_base, float xf_j_loop_base, float xf_j_move_base,
+                                      float nj, const float *xfwd, float *xbck, float *scores, int *statuses)
+{
+  extern __shared__ float bck_parser_mem[];
+  int b = blockIdx.x;
+  int N = Q * 4;
+  float *next = bck_parser_mem;
+  float *curr = next + (size_t) N * 3;
+  int si, L;
+  const uint8_t *sdsq;
+  const float *sxfwd;
+  float *sxbck;
+  float pmove, ploop;
+  float xf_n_loop, xf_n_move, xf_c_loop, xf_c_move, xf_j_loop, xf_j_move;
+  float xJ = 0.0f;
+  float xB = 0.0f;
+  float xN = 0.0f;
+  float xC;
+  float xE;
+  float totscale = 0.0f;
+  float scale;
+
+  if (b >= nidx) return;
+  if (threadIdx.x != 0) return;
+  si = seqidx ? seqidx[b] : b;
+  L = lengths[si];
+  sdsq = dsq + offsets[si];
+  sxfwd = xfwd + x_offsets[b];
+  sxbck = xbck + x_offsets[b];
+
+  pmove = (2.0f + nj) / ((float) L + 2.0f + nj);
+  ploop = 1.0f - pmove;
+  xf_n_loop = xf_n_loop_base >= 0.0f ? xf_n_loop_base : ploop;
+  xf_n_move = xf_n_move_base >= 0.0f ? xf_n_move_base : pmove;
+  xf_c_loop = xf_c_loop_base >= 0.0f ? xf_c_loop_base : ploop;
+  xf_c_move = xf_c_move_base >= 0.0f ? xf_c_move_base : pmove;
+  xf_j_loop = xf_j_loop_base >= 0.0f ? xf_j_loop_base : ploop;
+  xf_j_move = xf_j_move_base >= 0.0f ? xf_j_move_base : pmove;
+  xC = xf_c_move;
+  xE = xC * xf_e_move;
+
+  for (int c = 0; c < N; c++) {
+    next[c * 3 + 0] = xE;
+    next[c * 3 + 1] = xE;
+    next[c * 3 + 2] = 0.0f;
+  }
+  for (int c = N - 2; c >= 0; c--) {
+    int q = cell_q(c, Q);
+    int lane = cell_lane(c, Q);
+    next[c * 3 + 1] += next[(c + 1) * 3 + 1] * tfv[fwd_tfv_idx(p7O_DD, q, lane, Q)];
+  }
+  for (int c = N - 2; c >= 0; c--) {
+    int q = cell_q(c, Q);
+    int lane = cell_lane(c, Q);
+    next[c * 3 + 0] += next[(c + 1) * 3 + 1] * tfv[fwd_tfv_idx(p7O_MD, q, lane, Q)];
+  }
+
+  scale = sxfwd[L * p7X_NXCELLS + p7X_SCALE];
+  if (scale > 1.0f) {
+    float inv = 1.0f / scale;
+    xE *= inv;
+    xN *= inv;
+    xC *= inv;
+    xJ *= inv;
+    xB *= inv;
+    for (int c = 0; c < N * 3; c++) next[c] *= inv;
+    totscale += logf(scale);
+  }
+  sxbck[L * p7X_NXCELLS + p7X_E]     = xE;
+  sxbck[L * p7X_NXCELLS + p7X_N]     = xN;
+  sxbck[L * p7X_NXCELLS + p7X_J]     = xJ;
+  sxbck[L * p7X_NXCELLS + p7X_B]     = xB;
+  sxbck[L * p7X_NXCELLS + p7X_C]     = xC;
+  sxbck[L * p7X_NXCELLS + p7X_SCALE] = scale;
+
+  for (int i = L - 1; i >= 1; i--) {
+    uint8_t x = sdsq[i + 1];
+    if (x >= Kp) {
+      scores[b * 2 + 1] = 0.0f;
+      statuses[b * 2 + 1] = eslEINVAL;
+      return;
+    }
+
+    xB = 0.0f;
+    for (int c = 0; c < N; c++) {
+      int q = cell_q(c, Q);
+      int lane = cell_lane(c, Q);
+      float mpv = next[c * 3 + 0] * rfv[((int) x * Q + q) * 4 + lane];
+      xB += mpv * tfv[fwd_tfv_idx(p7O_BM, q, lane, Q)];
+    }
+    for (int c = N - 1; c >= 0; c--) {
+      int cell = c * 3;
+      float mpv = 0.0f;
+      if (c + 1 < N) {
+        int nq = cell_q(c + 1, Q);
+        int nlane = cell_lane(c + 1, Q);
+        mpv = next[(c + 1) * 3 + 0] * rfv[((int) x * Q + nq) * 4 + nlane];
+      }
+      int q = cell_q(c, Q);
+      int lane = cell_lane(c, Q);
+      curr[cell + 2] = next[cell + 2] * tfv[fwd_tfv_idx(p7O_II, q, lane, Q)];
+      curr[cell + 0] = next[cell + 2] * tfv[fwd_tfv_idx(p7O_MI, q, lane, Q)];
+      if (c + 1 < N) {
+        int nq = cell_q(c + 1, Q);
+        int nlane = cell_lane(c + 1, Q);
+        curr[cell + 2] += mpv * tfv[fwd_tfv_idx(p7O_IM, nq, nlane, Q)];
+        curr[cell + 1]  = mpv * tfv[fwd_tfv_idx(p7O_DM, nq, nlane, Q)];
+        curr[cell + 0] += mpv * tfv[fwd_tfv_idx(p7O_MM, nq, nlane, Q)];
+      } else {
+        curr[cell + 1] = 0.0f;
+      }
+    }
+
+    xC = xC * xf_c_loop;
+    xJ = (xB * xf_j_move) + (xJ * xf_j_loop);
+    xN = (xB * xf_n_move) + (xN * xf_n_loop);
+    xE = (xC * xf_e_move) + (xJ * xf_e_loop);
+
+    for (int c = N - 1; c >= 0; c--) {
+      curr[c * 3 + 0] += xE;
+      curr[c * 3 + 1] += xE;
+      if (c + 1 < N) {
+        int q = cell_q(c, Q);
+        int lane = cell_lane(c, Q);
+        curr[c * 3 + 1] += curr[(c + 1) * 3 + 1] * tfv[fwd_tfv_idx(p7O_DD, q, lane, Q)];
+      }
+    }
+    for (int c = N - 2; c >= 0; c--) {
+      int q = cell_q(c, Q);
+      int lane = cell_lane(c, Q);
+      curr[c * 3 + 0] += curr[(c + 1) * 3 + 1] * tfv[fwd_tfv_idx(p7O_MD, q, lane, Q)];
+    }
+
+    scale = sxfwd[i * p7X_NXCELLS + p7X_SCALE];
+    if (scale > 1.0f) {
+      float inv = 1.0f / scale;
+      xE *= inv;
+      xN *= inv;
+      xJ *= inv;
+      xB *= inv;
+      xC *= inv;
+      for (int c = 0; c < N * 3; c++) curr[c] *= inv;
+      totscale += logf(scale);
+    }
+
+    sxbck[i * p7X_NXCELLS + p7X_E]     = xE;
+    sxbck[i * p7X_NXCELLS + p7X_N]     = xN;
+    sxbck[i * p7X_NXCELLS + p7X_J]     = xJ;
+    sxbck[i * p7X_NXCELLS + p7X_B]     = xB;
+    sxbck[i * p7X_NXCELLS + p7X_C]     = xC;
+    sxbck[i * p7X_NXCELLS + p7X_SCALE] = scale;
+
+    float *tmp = next;
+    next = curr;
+    curr = tmp;
+  }
+
+  if (L >= 1) {
+    uint8_t x = sdsq[1];
+    if (x >= Kp) {
+      scores[b * 2 + 1] = 0.0f;
+      statuses[b * 2 + 1] = eslEINVAL;
+      return;
+    }
+    xB = 0.0f;
+    for (int c = 0; c < N; c++) {
+      int q = cell_q(c, Q);
+      int lane = cell_lane(c, Q);
+      float mpv = next[c * 3 + 0] * rfv[((int) x * Q + q) * 4 + lane];
+      xB += mpv * tfv[fwd_tfv_idx(p7O_BM, q, lane, Q)];
+    }
+    xN = (xB * xf_n_move) + (xN * xf_n_loop);
+  }
+
+  sxbck[p7X_E]     = 0.0f;
+  sxbck[p7X_N]     = xN;
+  sxbck[p7X_J]     = 0.0f;
+  sxbck[p7X_B]     = xB;
+  sxbck[p7X_C]     = 0.0f;
+  sxbck[p7X_SCALE] = 1.0f;
+
+  if (isnan(xN) || (L > 0 && xN == 0.0f) || isinf(xN)) {
+    scores[b * 2 + 1] = 0.0f;
+    statuses[b * 2 + 1] = eslERANGE;
+  } else {
+    scores[b * 2 + 1] = totscale + logf(xN);
+    statuses[b * 2 + 1] = eslOK;
   }
 }
 
@@ -1295,6 +1619,8 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_parser_xb)     cudaFree(engine->d_parser_xb);
   if (engine->d_parser_scores) cudaFree(engine->d_parser_scores);
   if (engine->d_parser_statuses) cudaFree(engine->d_parser_statuses);
+  if (engine->d_parser_seqidx) cudaFree(engine->d_parser_seqidx);
+  if (engine->d_parser_x_offsets) cudaFree(engine->d_parser_x_offsets);
   free(engine);
 }
 
@@ -2035,13 +2361,16 @@ p7_cuda_ForwardBackwardParser(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
     engine->d_parser_xf = NULL;
     engine->d_parser_xb = NULL;
     engine->parser_allocL = 0;
+    engine->parser_cell_alloc = 0;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_xf, xbytes), errbuf, errbuf_size, "cudaMalloc(parser forward xmx)")) != eslOK) return status;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_xb, xbytes), errbuf, errbuf_size, "cudaMalloc(parser backward xmx)")) != eslOK) return status;
     engine->parser_allocL = L + 1;
+    engine->parser_cell_alloc = (size_t) (L + 1) * p7X_NXCELLS;
   }
   if (engine->d_parser_scores == NULL) {
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_scores, sizeof(float) * 2), errbuf, errbuf_size, "cudaMalloc(parser scores)")) != eslOK) return status;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_statuses, sizeof(int) * 2), errbuf, errbuf_size, "cudaMalloc(parser statuses)")) != eslOK) return status;
+    engine->parser_result_alloc = 1;
   }
 
   cudaEventCreate(&h2d0);
@@ -2127,6 +2456,199 @@ ERROR:
   cudaEventDestroy(bk1);
   cudaEventDestroy(d2h0);
   cudaEventDestroy(d2h1);
+  return status;
+}
+
+extern "C" int
+p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                           ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                           const size_t *x_offsets, size_t total_xcells,
+                                           float *xf, float *xb, float *scores, int *statuses,
+                                           char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int nseq;
+  int total = 0;
+  int *h_offsets = NULL;
+  int *h_lengths = NULL;
+  int reuse_batch = FALSE;
+  size_t xbytes;
+  size_t shmem;
+  cudaEvent_t h2d0, h2d1, fk0, fk1, bk0, bk1, d2h0, d2h1;
+
+  if (!engine || !cuom || !chu || !seqidx || nidx < 0 || !x_offsets || !xf || !xb || !scores || !statuses) return eslEINVAL;
+  nseq = chu->N;
+  if (nidx <= 0) return eslOK;
+  if (nseq <= 0) return eslOK;
+  if (cuom->Qf * 4 < cuom->M) return eslEINVAL;
+
+  shmem = sizeof(float) * (size_t) cuom->Qf * 4 * 3 * 2;
+  if (shmem > 96 * 1024) {
+    if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA Forward/Backward parser profile M=%d exceeds v1 shared-memory limit", cuom->M);
+    return eslERANGE;
+  }
+  if (total_xcells == 0 || total_xcells > SIZE_MAX / sizeof(float)) return eslERANGE;
+  xbytes = sizeof(float) * total_xcells;
+
+  h_offsets = (int *) malloc(sizeof(int) * nseq);
+  h_lengths = (int *) malloc(sizeof(int) * nseq);
+  if (!h_offsets || !h_lengths) { status = eslEMEM; goto ERROR; }
+
+  for (int i = 0; i < nseq; i++) {
+    h_offsets[i] = total;
+    if (chu->L[i] > INT32_MAX) {
+      if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "dsqdata sequence length exceeds CUDA parser v1 limit");
+      status = eslERANGE;
+      goto ERROR;
+    }
+    h_lengths[i] = (int) chu->L[i];
+    total += h_lengths[i] + 2;
+  }
+  reuse_batch = (engine->batch_owner == chu && engine->batch_nseq == nseq && engine->batch_total == total);
+
+  if (engine->dsq_alloc < total) {
+    if (engine->d_dsq) cudaFree(engine->d_dsq);
+    if (engine->h_dsq) cudaFreeHost(engine->h_dsq);
+    engine->d_dsq = NULL;
+    engine->h_dsq = NULL;
+    engine->dsq_alloc = 0;
+    engine->h_dsq_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_dsq, total), errbuf, errbuf_size, "cudaMalloc(batch dsq)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMallocHost((void **) &engine->h_dsq, total), errbuf, errbuf_size, "cudaMallocHost(batch dsq)")) != eslOK) goto ERROR;
+    engine->dsq_alloc = total;
+    engine->h_dsq_alloc = total;
+    reuse_batch = FALSE;
+  }
+  if (engine->meta_alloc < nseq) {
+    if (engine->d_offsets) cudaFree(engine->d_offsets);
+    if (engine->d_lengths) cudaFree(engine->d_lengths);
+    if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
+    engine->d_offsets = NULL;
+    engine->d_lengths = NULL;
+    engine->d_tjb_by_seq = NULL;
+    engine->meta_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(offsets)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(lengths)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
+    engine->meta_alloc = nseq;
+    reuse_batch = FALSE;
+  }
+  if (engine->parser_result_alloc < nidx || engine->d_parser_seqidx == NULL || engine->d_parser_x_offsets == NULL) {
+    if (engine->d_parser_scores) cudaFree(engine->d_parser_scores);
+    if (engine->d_parser_statuses) cudaFree(engine->d_parser_statuses);
+    if (engine->d_parser_seqidx) cudaFree(engine->d_parser_seqidx);
+    if (engine->d_parser_x_offsets) cudaFree(engine->d_parser_x_offsets);
+    engine->d_parser_scores = NULL;
+    engine->d_parser_statuses = NULL;
+    engine->d_parser_seqidx = NULL;
+    engine->d_parser_x_offsets = NULL;
+    engine->parser_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_scores, sizeof(float) * 2 * nidx), errbuf, errbuf_size, "cudaMalloc(parser scores batch)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_statuses, sizeof(int) * 2 * nidx), errbuf, errbuf_size, "cudaMalloc(parser statuses batch)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_seqidx, sizeof(int) * nidx), errbuf, errbuf_size, "cudaMalloc(parser seqidx)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_x_offsets, sizeof(size_t) * nidx), errbuf, errbuf_size, "cudaMalloc(parser x offsets)")) != eslOK) goto ERROR;
+    engine->parser_result_alloc = nidx;
+  }
+  if (engine->parser_cell_alloc < total_xcells) {
+    if (engine->d_parser_xf) cudaFree(engine->d_parser_xf);
+    if (engine->d_parser_xb) cudaFree(engine->d_parser_xb);
+    engine->d_parser_xf = NULL;
+    engine->d_parser_xb = NULL;
+    engine->parser_allocL = 0;
+    engine->parser_cell_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_xf, xbytes), errbuf, errbuf_size, "cudaMalloc(parser forward xmx batch)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_xb, xbytes), errbuf, errbuf_size, "cudaMalloc(parser backward xmx batch)")) != eslOK) goto ERROR;
+    engine->parser_cell_alloc = total_xcells;
+  }
+
+  cudaEventCreate(&h2d0);
+  cudaEventCreate(&h2d1);
+  cudaEventCreate(&fk0);
+  cudaEventCreate(&fk1);
+  cudaEventCreate(&bk0);
+  cudaEventCreate(&bk1);
+  cudaEventCreate(&d2h0);
+  cudaEventCreate(&d2h1);
+
+  cudaEventRecord(h2d0);
+  if (!reuse_batch) {
+    for (int i = 0; i < nseq; i++) memcpy(engine->h_dsq + h_offsets[i], chu->dsq[i], h_lengths[i] + 2);
+    if ((status = cuda_status(cudaMemcpy(engine->d_dsq, engine->h_dsq, total, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser batch dsq)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(engine->d_offsets, h_offsets, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser offsets)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(engine->d_lengths, h_lengths, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser lengths)")) != eslOK) goto CUDA_ERROR;
+  }
+  if ((status = cuda_status(cudaMemcpy(engine->d_parser_seqidx, seqidx, sizeof(int) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser seqidx)")) != eslOK) goto CUDA_ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_parser_x_offsets, x_offsets, sizeof(size_t) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser x offsets)")) != eslOK) goto CUDA_ERROR;
+  if ((status = cuda_status(cudaMemset(engine->d_parser_statuses, 0, sizeof(int) * 2 * nidx), errbuf, errbuf_size, "cudaMemset(parser statuses batch)")) != eslOK) goto CUDA_ERROR;
+  cudaEventRecord(h2d1);
+  cudaEventSynchronize(h2d1);
+
+  cudaEventRecord(fk0);
+  cuda_forward_parser_xmx_batch_kernel<<<nidx, 1, shmem>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths,
+                                                           engine->d_parser_seqidx, nidx, engine->d_parser_x_offsets,
+                                                           cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                           cuom->xf_e_loop, cuom->xf_e_move,
+                                                           cuom->xf_n_loop, cuom->xf_n_move,
+                                                           cuom->xf_c_loop, cuom->xf_c_move,
+                                                           cuom->xf_j_loop, cuom->xf_j_move,
+                                                           cuom->nj, engine->d_parser_xf,
+                                                           engine->d_parser_scores, engine->d_parser_statuses);
+  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_forward_parser_xmx_batch_kernel launch")) != eslOK) goto CUDA_ERROR;
+  cudaEventRecord(fk1);
+  cudaEventSynchronize(fk1);
+
+  cudaEventRecord(bk0);
+  cuda_backward_parser_xmx_batch_kernel<<<nidx, 1, shmem>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths,
+                                                            engine->d_parser_seqidx, nidx, engine->d_parser_x_offsets,
+                                                            cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                            cuom->xf_e_loop, cuom->xf_e_move,
+                                                            cuom->xf_n_loop, cuom->xf_n_move,
+                                                            cuom->xf_c_loop, cuom->xf_c_move,
+                                                            cuom->xf_j_loop, cuom->xf_j_move,
+                                                            cuom->nj, engine->d_parser_xf, engine->d_parser_xb,
+                                                            engine->d_parser_scores, engine->d_parser_statuses);
+  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_backward_parser_xmx_batch_kernel launch")) != eslOK) goto CUDA_ERROR;
+  cudaEventRecord(bk1);
+  cudaEventSynchronize(bk1);
+
+  cudaEventRecord(d2h0);
+  if ((status = cuda_status(cudaMemcpy(xf, engine->d_parser_xf, xbytes, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser forward xmx batch)")) != eslOK) goto CUDA_ERROR;
+  if ((status = cuda_status(cudaMemcpy(xb, engine->d_parser_xb, xbytes, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser backward xmx batch)")) != eslOK) goto CUDA_ERROR;
+  if ((status = cuda_status(cudaMemcpy(scores, engine->d_parser_scores, sizeof(float) * 2 * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser scores batch)")) != eslOK) goto CUDA_ERROR;
+  if ((status = cuda_status(cudaMemcpy(statuses, engine->d_parser_statuses, sizeof(int) * 2 * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser statuses batch)")) != eslOK) goto CUDA_ERROR;
+  cudaEventRecord(d2h1);
+  cudaEventSynchronize(d2h1);
+
+  engine->stats.fwd_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
+  engine->stats.fwd_kernel_seconds += elapsed_seconds(fk0, fk1);
+  engine->stats.fwd_d2h_seconds    += elapsed_seconds(d2h0, d2h1) * 0.5;
+  engine->stats.fwd_nseqs          += nidx;
+  engine->stats.fwd_nbatches       += 1;
+  engine->stats.bck_h2d_seconds    += 0.0;
+  engine->stats.bck_kernel_seconds += elapsed_seconds(bk0, bk1);
+  engine->stats.bck_d2h_seconds    += elapsed_seconds(d2h0, d2h1) * 0.5;
+  engine->stats.bck_nseqs          += nidx;
+  engine->stats.bck_nbatches       += 1;
+  for (int i = 0; i < nidx; i++) {
+    int si = seqidx[i];
+    if (si >= 0 && si < nseq) {
+      engine->stats.fwd_nres += h_lengths[si];
+      engine->stats.bck_nres += h_lengths[si];
+    }
+  }
+
+CUDA_ERROR:
+  cudaEventDestroy(h2d0);
+  cudaEventDestroy(h2d1);
+  cudaEventDestroy(fk0);
+  cudaEventDestroy(fk1);
+  cudaEventDestroy(bk0);
+  cudaEventDestroy(bk1);
+  cudaEventDestroy(d2h0);
+  cudaEventDestroy(d2h1);
+ERROR:
+  free(h_offsets);
+  free(h_lengths);
   return status;
 }
 

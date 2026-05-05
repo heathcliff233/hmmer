@@ -156,3 +156,15 @@ p7_cuda_ForwardBackwardParser(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
     snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
   return eslENOTFOUND;
 }
+
+int
+p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                           ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                           const size_t *x_offsets, size_t total_xcells,
+                                           float *xf, float *xb, float *scores, int *statuses,
+                                           char *errbuf, int errbuf_size)
+{
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
