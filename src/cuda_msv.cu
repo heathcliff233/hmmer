@@ -2074,8 +2074,8 @@ cuda_bias_filter_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
 
   for (int i = 2; i <= L; i++) {
     uint8_t x = sdsq[i];
-    n0 = (p0 * len_p1 + p1s * t[3]) * eo[(int) x * 2 + 0];
-    n1 = (p0 * (1.0f - len_p1) + p1s * t[4]) * eo[(int) x * 2 + 1];
+    n0 = (p0 * t[0] + p1s * t[3]) * eo[(int) x * 2 + 0];
+    n1 = (p0 * t[1] + p1s * t[4]) * eo[(int) x * 2 + 1];
     maxv = fmaxf(fmaxf(n0, n1), 0.0f);
     p0 = n0 / maxv;
     p1s = n1 / maxv;

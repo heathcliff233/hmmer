@@ -1902,8 +1902,26 @@ serial_loop(WORKER_INFO *info, ESL_SQFILE *dbfp, ESL_DSQDATA *dd, int n_targetse
           info->pli->n_past_msv++;
           t0 = hmmsearch_WallTime();
           if (info->pli->do_biasfilter) {
+            double tbias0 = hmmsearch_WallTime();
+            p7_bg_FilterScore(info->bg, dbsq->dsq, dbsq->n, &gpu_filtersc[i]);
+            info->pli->time_bias += hmmsearch_WallTime() - tbias0;
             seq_score = (usc + info->gpu_msv_slack - gpu_filtersc[i]) / eslCONST_LOG2;
             P = esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
+            if (P > info->pli->F1 && gpu_statuses[i] == eslOK) {
+              float cpu_usc = -eslINFINITY;
+              int cpu_msv_status;
+              double tmsv0 = hmmsearch_WallTime();
+              cpu_msv_status = p7_MSVFilter(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &cpu_usc);
+              info->pli->time_msv += hmmsearch_WallTime() - tmsv0;
+              if (cpu_msv_status == eslERANGE) {
+                usc = cpu_usc;
+                P = 0.0;
+              } else if (cpu_msv_status == eslOK) {
+                seq_score = (cpu_usc - gpu_filtersc[i]) / eslCONST_LOG2;
+                P = esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
+                if (P <= info->pli->F1) usc = cpu_usc;
+              }
+            }
             if (P <= info->pli->F1) {
               info->pli->n_past_bias++;
               if (gpu_vit_active) {
