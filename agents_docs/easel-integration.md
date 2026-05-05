@@ -59,7 +59,7 @@ Easel owns biological input parsing and generic sequence/alignment representatio
 
 This boundary is especially visible in `hmmbuild`, `hmmsearch`, `hmmscan`, `phmmer`, `jackhmmer`, `nhmmer`, and `nhmmscan`.
 
-For planned protein GPU search, Easel `dsqdata` is the intended base for GPU-capable sequence databases. Per-sequence length metadata should be written during sequence database construction, then consumed by future `hmmsearch --gpu` batch planning. See `agents_docs/gpu-support-todo.md`.
+For protein GPU search, Easel `dsqdata` is the base for GPU-capable sequence databases. `hmmseqdb` writes the protein target database, and `hmmsearch --gpu` consumes `dsqdata` chunks for CUDA batch planning. See `agents_docs/gpu-support-progress.md` and `agents_docs/gpu-support-todo.md`.
 
 ## Miniapps And Tests
 

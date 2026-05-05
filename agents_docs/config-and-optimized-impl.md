@@ -60,7 +60,7 @@ These directories provide the active implementations of optimized objects and al
 
 The generic algorithms in `src/generic_*.c` are not drop-in replacements for optimized filters. Changes to score scaling, profile layout, matrix allocation, or disk serialization must be checked against the selected implementation and pressed database files.
 
-Planned GPU support should remain separate from this SIMD implementation selection. See `agents_docs/gpu-support-todo.md`: the intended first CUDA path is additive `src/cuda/` code for `hmmsearch --gpu`, not a replacement `impl_cuda`, and it should leave the selected SSE/NEON/VMX implementation available for CPU stages.
+CUDA support remains separate from this SIMD implementation selection. The opt-in protein `hmmsearch --gpu` path lives in `src/cuda/`; it is not an `impl_cuda` replacement, and the selected SSE/NEON/VMX implementation remains available for CPU stages. See `agents_docs/gpu-support-progress.md` for the current state and `agents_docs/gpu-support-todo.md` for open work.
 
 ## Implementation Makefiles
 

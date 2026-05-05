@@ -18,7 +18,7 @@ The ordinary pipeline is used by protein profile search, protein sequence search
 
 The exact thresholds are controlled by `--F1`, `--F2`, `--F3`, `-E`, `-T`, domain thresholds, inclusion thresholds, bit cutoffs, and `--max`/bias options. A threshold change often affects printed counters, daemon stats, and tests that inspect outputs.
 
-For planned GPU support, preserve the CPU behavior of this pipeline while factoring a post-MSV helper that can accept a known MSV score and null score from a batch GPU prefilter. See `agents_docs/gpu-support-todo.md` before changing the early MSV/null/bias boundary.
+For GPU support, preserve the CPU behavior of this pipeline while letting `hmmsearch --gpu` provide known MSV, null, and bias-filter scores from batched CUDA work. See `agents_docs/gpu-support-progress.md` and `agents_docs/gpu-support-todo.md` before changing the early MSV/null/bias boundary.
 
 ## Domain Definition
 
