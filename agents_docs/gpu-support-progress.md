@@ -1,6 +1,6 @@
 # GPU Support Progress
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 ## Current State
 
@@ -10,6 +10,7 @@ Last updated: 2026-05-05
 - The default accepted GPU path accelerates MSV and computes the biased-composition filter score in CUDA batches while reusing the MSV-uploaded sequence batch.
 - Exact hit parity currently depends on CPU-compatible checks at the bias-corrected F1 boundary: CPU `p7_bg_FilterScore()` supplies the final bias score for GPU MSV survivors, and CPU `p7_MSVFilter()` can rescue bias-boundary rejects through the optimized CPU SSV shortcut.
 - Resident survivor-core work now keeps Viterbi/F3 pass decisions GPU-side in normal mode, copies only status/pass buffers when full scores are not needed, and materializes `ESL_SQ` metadata only for sequences entering CPU post-Fwd/domain work or compare diagnostics.
+- GPU-side F1 gating kernel (`cuda_f1_gating_kernel` in `p7_cuda_bias.cu`) computes MSV P-values and bias-adjusted P-values on device, producing a compact survivor index list via atomicAdd. The batch loop in `hmmsearch_gpu.c` now iterates only over F1 survivors rather than all sequences in the batch. `p7_pipeline_Reuse` and `gpu_RestoreSeqStorage` are called only for survivors.
 - For post-Viterbi Forward prefilter in normal mode, F3 gating is now pure GPU decision; CPU Forward rerun at the F3 gray zone is retained only in compare/debug paths, not production gating.
 - The stats report now includes exact exclusive timing buckets (`Exact io_read_unpack`, `Exact gpu_h2d`, `Exact gpu_kernel`, `Exact gpu_d2h`, `Exact host_survivor_orchestration`, `Exact cpu_postfwd_domain_null2_output`, `Exact other`) plus `Exact delta_vs_wall`. Legacy `Stage *` and `CUDA *` lines are retained for continuity but can overlap by construction.
 - Experimental/default-off flags remain available for later-stage work: `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`, and their compare/min-batch controls.
@@ -65,6 +66,7 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
     - Largest aggregate bucket is host survivor continuation (`gpu_survivor = 4.481900 sec`).
     - Next largest CPU-side stage totals are `stage_msv_host = 3.123544 sec`, `stage_vit = 2.578773 sec`, and `stage_fwd = 2.191749 sec`.
     - This confirms end-to-end speed is still mostly constrained by CPU continuation after GPU filtering, even though FWD/BCK kernel compute passes the 3x stage-speed gate.
+  - Bottleneck refinement (2026-05-06): the `exact_other` bucket (~0.24s/query, ~3.1s aggregate) is NOT the per-sequence CPU loop (which was only ~5-10ms). It is CUDA host-side API overhead: driver synchronization, cudaMemcpy setup, and the memcpy packing loop that copies 32K sequences into contiguous pinned memory per batch. Reducing `exact_other` requires stream-based overlap (pipelining H2D of next batch with kernel of current batch) or larger batches to amortize per-batch API costs.
 - Resident survivor-core timing/decision migration run (2026-05-05) added exact-sum timing, GPU-side Viterbi/F3 decision buffers, delayed sequence metadata materialization, and zero-copy `P7_OMX` special-state views over batched parser output.
   - Compare mode all-13 run: `benchmark-data/profmark-current/gpu-audit/survivor-core-all13-compare-20260505/`
     - Command:
@@ -83,6 +85,13 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
     - Widening both Viterbi and Forward/parser activation was parity-clean on `ATG2_CAD`, `Nup192`, and `Tra1_ring`, but GPU wall rose to 135.69 sec in compare mode because large-profile Forward/parser kernels dominated.
     - Widening only Viterbi reduced hot3 `gpu_survivor` from the previous 4.330335 sec to 1.771558 sec, but worsened hot3 non-compare GPU wall from 9.34 sec to 11.88 sec because the current large-profile CUDA Viterbi kernel was slower than the CPU SSE continuation.
     - The accepted code therefore retains the existing conservative Viterbi/Forward activation caps while preserving the new GPU-side decision APIs for the profile sizes where they are beneficial.
+- GPU-side F1 gating run (2026-05-06) added `p7_cuda_F1GatingDsqdataChunk()` to move MSV/bias P-value gating to GPU and restructured the batch loop to iterate only over compact survivor indices.
+  - Non-compare all-13 run: `benchmark-data/profmark-current/gpu-audit/f1-gating-run/`
+    - Command: `hmmsearch --gpu --cpu 0 --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser` on each of 13 queries individually.
+    - Hit parity: `cpu_only=0`, `gpu_only=0` for all 13 queries.
+    - Timing: `exact_other` ranged 0.21-0.27s per query (baseline was 0.22-0.25s); improvement was ~3-7ms per query, not the ~200ms initially hypothesized.
+    - Root cause analysis: `exact_other` is dominated by CUDA host-side API overhead (driver calls, synchronization gaps, memcpy packing of 32K sequences into contiguous pinned buffers) rather than the per-sequence CPU loop. The per-sequence P-value computation + `p7_pipeline_Reuse` was only ~5-10ms of the ~240ms `exact_other` bucket.
+    - Architectural benefit: the batch loop is now cleaner (survivor-only iteration), and the F1 gating kernel adds negligible GPU time (<1ms).
 
 ## Open Risks
 

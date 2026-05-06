@@ -373,6 +373,7 @@ p7_cuda_MSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   engine->batch_owner = chu;
   engine->batch_nseq  = nseq;
   engine->batch_total = total;
+  engine->last_cuom   = cuom;
   engine->stats.h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.kernel_seconds += elapsed_seconds(k0, k1);
   engine->stats.d2h_seconds    += elapsed_seconds(d2h0, d2h1);

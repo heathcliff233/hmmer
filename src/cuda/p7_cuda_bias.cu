@@ -323,3 +323,101 @@ ERROR:
   free(h_lengths);
   return status;
 }
+
+__global__ static void
+cuda_f1_gating_kernel(const int *raw, const int *overflow, const uint8_t *tjb_by_seq,
+                      float scale_b, float base_b,
+                      const float *null_scores, const float *bias_filtersc,
+                      int nseq, int do_biasfilter,
+                      float ev_mu, float ev_lambda, float F1, float log2_inv,
+                      int *survivor_idx, int *counter)
+{
+  int seq = blockIdx.x * blockDim.x + threadIdx.x;
+  if (seq >= nseq) return;
+
+  float usc;
+  if (overflow[seq]) {
+    usc = 1e38f;
+  } else {
+    usc = ((float)(raw[seq] - (int)tjb_by_seq[seq]) - base_b) / scale_b - 3.0f;
+  }
+
+  float nullsc = null_scores[seq];
+  float seq_score = (usc - nullsc) * log2_inv;
+  float y = ev_lambda * (seq_score - ev_mu);
+  float ey = -expf(-y);
+  float P = (fabsf(ey) < 1e-7f) ? -ey : 1.0f - expf(ey);
+
+  if (overflow[seq]) P = 0.0f;
+  if (P > F1) return;
+
+  if (do_biasfilter) {
+    float filtersc = bias_filtersc[seq];
+    float bias_score = (usc - filtersc) * log2_inv;
+    float by = ev_lambda * (bias_score - ev_mu);
+    float bey = -expf(-by);
+    float bP = (fabsf(bey) < 1e-7f) ? -bey : 1.0f - expf(bey);
+    if (bP > F1) return;
+  }
+
+  int idx = atomicAdd(counter, 1);
+  survivor_idx[idx] = seq;
+}
+
+extern "C" int
+p7_cuda_F1GatingDsqdataChunk(P7_CUDA_ENGINE *engine,
+                              const float *msv_scores, const int *msv_statuses,
+                              int nseq, int do_biasfilter,
+                              double ev_mu, double ev_lambda, double F1,
+                              int *survivor_idx, int *ret_nsurv,
+                              char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int h_counter = 0;
+
+  (void) msv_scores;
+  (void) msv_statuses;
+
+  if (!engine || !survivor_idx || !ret_nsurv) return eslEINVAL;
+  if (nseq <= 0) { *ret_nsurv = 0; return eslOK; }
+
+  if (engine->f1_result_alloc < nseq) {
+    if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
+    if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
+    engine->d_f1_survivor_idx = NULL;
+    engine->d_f1_counter = NULL;
+    engine->f1_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_idx, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(f1 survivor idx)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_counter, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(f1 counter)")) != eslOK) goto ERROR;
+    engine->f1_result_alloc = nseq;
+  }
+
+  if ((status = cuda_status(cudaMemcpy(engine->d_f1_counter, &h_counter, sizeof(int), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(f1 counter reset)")) != eslOK) goto ERROR;
+
+  {
+    const P7_CUDA_MSVPROFILE *cuom = engine->last_cuom;
+    float scale_b = cuom->scale_b;
+    float base_b = (float) cuom->base_b;
+    float log2_inv = 1.0f / 0.693147180559945f;
+
+    cuda_f1_gating_kernel<<<(nseq + 127) / 128, 128>>>(
+        engine->d_raw, engine->d_overflow, engine->d_tjb_by_seq,
+        scale_b, base_b,
+        engine->d_null_scores, engine->d_bias_filtersc,
+        nseq, do_biasfilter,
+        (float) ev_mu, (float) ev_lambda, (float) F1, log2_inv,
+        engine->d_f1_survivor_idx, engine->d_f1_counter);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_f1_gating_kernel launch")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_f1_gating_kernel sync")) != eslOK) goto ERROR;
+  }
+
+  if ((status = cuda_status(cudaMemcpy(&h_counter, engine->d_f1_counter, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(f1 counter read)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(survivor_idx, engine->d_f1_survivor_idx, sizeof(int) * h_counter, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(f1 survivor idx)")) != eslOK) goto ERROR;
+
+  *ret_nsurv = h_counter;
+  return eslOK;
+
+ERROR:
+  *ret_nsurv = 0;
+  return status;
+}

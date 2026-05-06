@@ -25,6 +25,8 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 - Broaden parser-state validation. Treat final hit parity and bounded posterior/domain inputs (`max_mocc`, `max_btot`, `max_etot`) as more meaningful than raw `p7X_SCALE` row differences alone.
 - Continue reducing CPU post-Fwd/domain/null2 costs after survivor-core migration; these remain the dominant accepted-scope CPU modules.
 - Investigate profile/candidate-shape auto-gating for short/fast CPU queries where later-stage CUDA launches can regress wall time.
+- Reduce `exact_other` (~0.24s/query) via CUDA stream-based overlap: pipeline H2D transfer of the next batch with kernel execution of the current batch, reducing synchronization gaps and amortizing CUDA API overhead. The per-sequence CPU loop is already eliminated by F1 gating; the remaining cost is host-side driver/memcpy overhead.
+- Consider larger batch sizes (>32K seqs) to reduce per-batch CUDA API call count (currently 7 batches per query × multiple API calls per batch).
 
 ## Validation Checklist
 

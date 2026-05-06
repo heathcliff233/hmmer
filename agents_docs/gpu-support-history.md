@@ -1,6 +1,6 @@
 # GPU Support History (Condensed)
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 Purpose: keep a compact record of major GPU attempts, outcomes, and rejected directions. Detailed “daybook” logs are intentionally removed.
 
@@ -54,6 +54,12 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 ### 3) CUDA Forward/Backward parser handoff (opt-in)
 - Outcome: final hit parity on checked prepared runs; meaningful speedups on selected non-compare runs.
 - Limitation: raw scale-row diagnostics remain; requires broader acceptance criteria before default use.
+
+### 6) GPU-side F1 gating to eliminate per-sequence CPU loop
+- Attempt: moved MSV/bias P-value computation to a CUDA kernel (`cuda_f1_gating_kernel`) to produce a compact survivor index list, then restructured the batch loop to iterate only over survivors.
+- Outcome: adopted (architecturally cleaner), but performance gain was minimal (~5-10ms per query, not the ~200ms hypothesized).
+- Failure reason for performance hypothesis: the `exact_other` bucket was misattributed to the per-sequence CPU loop. Actual dominant cost is CUDA host-side API overhead (driver synchronization, cudaMemcpy setup, memcpy packing of 32K sequences into contiguous pinned memory).
+- Decision: keep the F1 gating kernel (correct, cleaner code, negligible GPU cost), but recognize that reducing `exact_other` requires stream-based overlap or larger batches, not loop elimination.
 
 ## Current Correctness Boundary
 
