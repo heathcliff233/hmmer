@@ -65,14 +65,14 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
   - CPU `p7_MSVFilter()` rescue remains available at the bias/F1 boundary.
 - Rationale: this boundary currently preserves exact parity on prepared all-13 evidence while keeping GPU acceleration useful.
 
-### 4) Standalone GPU SSV two-pass kernel (2026-05-06)
-- Attempt: extract the inline SSV fast-path from the monolithic MSV kernel into a standalone two-pass architecture: SSV kernel first (no J-state), then MSV fallback kernel only for uncertain sequences.
-- Outcome: adopted as opt-in (`--gpu-ssv`).
-- Key design: uses `rbv` (unsigned byte) profile — same as the monolithic MSV kernel — avoiding the `sbv` pitfall of attempt #3. SSV kernel classifies each sequence as OK/OVERFLOW/NEED_MSV/SKIP; fallback kernel runs full MSV indexed by a compacted fallback list.
-- Parity: bitwise-identical scores to monolithic MSV on all-13 profmark (229,290 sequences × 13 queries, zero mismatches via `--gpu-ssv-compare`).
-- Fallback rate: 0.2–0.3% of sequences need full MSV fallback (507–722 out of 229,290).
-- Performance: SSV kernel alone is ~3–10% faster than monolithic MSV, but total two-pass time is ~15–20% slower due to second kernel launch + intermediate status copy-back. Optimization of the SSV-only path is the next step.
-- Files: `src/cuda/p7_cuda_ssv.cu` (new), engine struct extensions in `p7_cuda_internal.h`.
+### 4) Standalone GPU SSV kernel (2026-05-06 → 2026-05-07)
+- Attempt: extract the inline SSV fast-path from the monolithic MSV kernel into a standalone architecture.
+- **Phase 1** (two-pass): SSV kernel first (no J-state), then MSV fallback kernel only for uncertain sequences (~0.3%). Used `rbv` (unsigned byte) profile — same as the monolithic MSV kernel — avoiding the `sbv` pitfall of attempt #3. Parity-verified but ~15–20% slower due to host round-trip between passes.
+- **Phase 2** (fused): eliminated the two-pass overhead by fusing the MSV fallback directly into the SSV kernel. The fused kernel runs SSV as the primary fast-path with in-kernel MSV fallback for sequences that need J-state. No intermediate copies, no second kernel launch. Performance-equivalent to monolithic MSV (<0.2% delta).
+- **Phase 3** (register-optimized): exploited SSV's constant-xB property for register-based DP. Key changes: (1) precomputed q/z lookup tables in shared memory eliminate integer division from inner loop, (2) each thread owns a contiguous stripe of model nodes in registers instead of shared memory, (3) `__shfl_up_sync` replaces `__syncthreads()` for the single cross-thread boundary value. Result: 1.36x kernel speedup over monolithic MSV (376ms vs 511ms on all-13 profmark), with 1.57-1.79x for larger profiles.
+- Outcome: adopted as opt-in (`--gpu-ssv`), 1.36x faster than monolithic MSV on all-13 profmark.
+- Parity: bitwise-identical scores to monolithic MSV on all-13 profmark (229,290 sequences × 13 queries, zero mismatches via `--gpu-ssv-compare`). Zero hit-level parity differences.
+- Files: `src/cuda/p7_cuda_ssv.cu`, CLI flags in `hmmsearch.c`.
 
 ## Current Status Summary
 

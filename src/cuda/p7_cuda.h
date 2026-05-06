@@ -65,8 +65,6 @@ typedef struct p7_cuda_msv_stats_s {
   uint64_t bck_nres;
   uint64_t bck_nbatches;
   double   ssv_kernel_seconds;
-  double   ssv_fallback_kernel_seconds;
-  uint64_t ssv_fallback_nseqs;
 } P7_CUDA_MSV_STATS;
 
 extern int  p7_cuda_Available(char *errbuf, int errbuf_size);

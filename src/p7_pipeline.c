@@ -2030,8 +2030,6 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# CUDA MSV H2D time: %.6f sec\n", stats.h2d_seconds);
     fprintf(ofp, "# CUDA MSV kernel time: %.6f sec\n", stats.kernel_seconds);
     fprintf(ofp, "# CUDA SSV kernel time: %.6f sec\n", stats.ssv_kernel_seconds);
-    fprintf(ofp, "# CUDA SSV fallback kernel time: %.6f sec\n", stats.ssv_fallback_kernel_seconds);
-    fprintf(ofp, "# CUDA SSV fallback sequences: %" PRIu64 "\n", stats.ssv_fallback_nseqs);
     fprintf(ofp, "# CUDA MSV D2H time: %.6f sec\n", stats.d2h_seconds);
     fprintf(ofp, "# CUDA null H2D time: %.6f sec\n", stats.null_h2d_seconds);
     fprintf(ofp, "# CUDA null kernel time: %.6f sec\n", stats.null_kernel_seconds);

@@ -104,7 +104,7 @@ agents_docs/       Detailed architecture documentation (see index below)
 The GPU path accelerates MSV + biased-composition filter in CUDA batches. Current state:
 
 - Default path: CUDA MSV + bias with CPU-compatible F1 boundary checks
-- Opt-in standalone SSV: `--gpu-ssv` (two-pass: SSV kernel + MSV fallback for ~0.3% of sequences)
+- Opt-in standalone SSV: `--gpu-ssv` (register-optimized kernel: SSV fast-path with in-kernel MSV fallback, 1.36x faster than monolithic MSV)
 - Opt-in later stages: `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`
 - Latest all-13 profmark (with later stages): 1.53x speedup (CPU 10.44s → GPU 6.83s), zero parity errors
 - GPU vs CPU-4 (4-thread): currently 0.72x cold (slower due to 260ms/query CUDA init), 1.29x warm
@@ -112,7 +112,7 @@ The GPU path accelerates MSV + biased-composition filter in CUDA batches. Curren
 - Remaining bottleneck: host sync/blocking (32.8%), CPU survivor continuation (8.0%)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
 - Sequence packing uses bulk `smem` copy (single memcpy of dsqdata's contiguous buffer) with L+1 offset spacing
-- SSV kernel status: parity-verified, ~15–20% slower than monolithic MSV due to two-pass overhead; optimization in progress
+- SSV kernel status: parity-verified, 1.36x faster than monolithic MSV (register-based DP, precomputed q/z lookups, warp shuffle); strong candidate for default GPU MSV path
 
 ## Verification Checklist
 

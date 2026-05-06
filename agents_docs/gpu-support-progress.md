@@ -50,29 +50,29 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 - Large-profile Viterbi/Forward activation: tested and reverted — current CUDA kernels are slower than CPU SSE for large profiles.
 - GPU-side F1 gating: adopted for architectural cleanliness, but performance gain was only ~5-10ms/query (not the ~200ms hypothesized).
 
-## Standalone GPU SSV Kernel (2026-05-06)
+## Standalone GPU SSV Kernel (2026-05-07)
 
-A standalone two-pass SSV kernel is now available via `--gpu-ssv`:
-- **Architecture**: Pass 1 runs SSV (no J-state) on all sequences; Pass 2 runs full MSV only on sequences classified as NEED_MSV or SKIP.
+A standalone SSV kernel is available via `--gpu-ssv`:
+- **Architecture**: Register-based SSV fast-path (no J-state, constant xB) with in-kernel MSV fallback for ~0.3% of sequences that need J-state. Each thread owns a contiguous stripe of model nodes in registers; cross-thread boundary values communicated via `__shfl_up_sync` (no `__syncthreads()` in the SSV inner loop). Precomputed q/z lookup tables in shared memory eliminate integer division from the inner loop.
 - **Profile format**: uses `rbv` (unsigned byte) — same as monolithic MSV kernel. Does NOT use the CPU `sbv` (signed byte) profile that caused the earlier failed attempt.
-- **Parity**: bitwise-identical to monolithic MSV on all tested profmark queries (zero mismatches via `--gpu-ssv-compare`).
-- **Fallback rate**: 0.2–0.3% of sequences need MSV fallback (typical: 500–720 out of 229,290).
-- **Kernel timing** (profmark, 229K sequences):
-
-| Query | Monolithic MSV | SSV kernel | Fallback kernel | SSV total | Delta |
-|-------|---------------|------------|-----------------|-----------|-------|
-| 14-3-3 (M=246) | 48.5ms | 47.5ms | 10.9ms | 58.5ms | +20% |
-| 2OG-FeII_Oxy_3 (M=148) | 30.1ms | 28.9ms | 5.4ms | 34.3ms | +14% |
-| 23S_rRNA_IVP (M=152) | 32.7ms | 29.0ms | 9.9ms | 38.9ms | +19% |
-
-- **Status**: opt-in, parity-verified, not yet faster than monolithic MSV end-to-end. Optimization of the SSV-only path is the next step.
-- **Files**: `src/cuda/p7_cuda_ssv.cu`, engine struct extensions in `p7_cuda_internal.h`, CLI flags in `hmmsearch.c`.
+- **Parity**: bitwise-identical to monolithic MSV on all 13 profmark queries (229,290 sequences × 13 = ~3M comparisons, zero mismatches via `--gpu-ssv-compare`). Zero hit-level parity differences (msv_only=0, ssv_only=0).
+- **Kernel timing** (profmark, 229K sequences, all-13 aggregate):
+  - Optimized SSV: 376.0ms total (28.9ms avg/query)
+  - Monolithic MSV: 511.0ms total (39.3ms avg/query)
+  - Speedup: **1.36x** kernel-level improvement
+  - Best per-query gains: 1.57-1.79x for larger profiles (M > 200)
+- **Key optimizations** (2026-05-07):
+  1. Precomputed q/z lookup tables — eliminates `% Q` and `/ Q` integer divisions (~50 cycles/iteration saved)
+  2. Register-based DP — each thread keeps its stripe of prev values in registers instead of shared memory
+  3. Warp shuffle for boundary — `__shfl_up_sync` replaces `__syncthreads()` + shared memory for the single cross-thread dependency
+- **History**: Phase 1 was two-pass (15-20% slower). Phase 2 fused the fallback (matched MSV). Phase 3 (current) exploits SSV's constant-xB property for register-based DP with 1.36x kernel speedup.
+- **Status**: opt-in, parity-verified, 1.36x faster than monolithic MSV. Strong candidate for default GPU MSV path.
+- **Files**: `src/cuda/p7_cuda_ssv.cu`, CLI flags in `hmmsearch.c`.
 
 ## Open Risks
 
 - Later-stage prefilters (Viterbi, Forward, FB parser) are parity-clean on checked samples but need broader validation before becoming default.
 - FB parser raw `p7X_SCALE` row diagnostics remain open (bounded posterior inputs are acceptable).
-- SSV two-pass overhead (~15–20%) needs to be recovered through SSV-specific kernel optimizations before the flag can become default.
 
 ## Verification Guidance
 

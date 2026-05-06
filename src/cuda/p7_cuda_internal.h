@@ -19,11 +19,6 @@ extern "C" {
 
 #define P7_CUDA_MSV_BLOCK_THREADS 32
 
-#define P7_CUDA_SSV_OK        0
-#define P7_CUDA_SSV_OVERFLOW  1
-#define P7_CUDA_SSV_NEED_MSV  2
-#define P7_CUDA_SSV_SKIP      3
-
 struct p7_cuda_msv_engine_s {
   int                 device_id;
   cudaEvent_t         evt_h2d0;
@@ -80,9 +75,6 @@ struct p7_cuda_msv_engine_s {
   int                *d_f1_survivor_idx;
   int                *d_f1_counter;
   int                 f1_result_alloc;
-  int                *d_ssv_status;
-  int                *d_fallback_idx;
-  int                 ssv_alloc;
   const struct p7_cuda_msv_profile_s *last_cuom;
   P7_CUDA_MSV_STATS   stats;
 };
