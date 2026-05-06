@@ -18,7 +18,20 @@ The ordinary pipeline is used by protein profile search, protein sequence search
 
 The exact thresholds are controlled by `--F1`, `--F2`, `--F3`, `-E`, `-T`, domain thresholds, inclusion thresholds, bit cutoffs, and `--max`/bias options. A threshold change often affects printed counters, daemon stats, and tests that inspect outputs.
 
-For GPU support, preserve the CPU behavior of this pipeline while letting `hmmsearch --gpu` provide known MSV, null, and bias-filter scores from batched CUDA work. See `agents_docs/gpu-support-progress.md` and `agents_docs/gpu-support-todo.md` before changing the early MSV/null/bias boundary.
+For GPU support, preserve the CPU behavior of this pipeline while letting `hmmsearch --gpu` provide known MSV, null, and bias-filter scores from batched CUDA work. The GPU path separates load sizing (`--gpu-load-seqs`, `--gpu-load-res`) from search-batch sizing (`--gpu-batch-seqs`, `--gpu-batch-res`); default 32,768 seqs / 8M residues for both. See `gpu-support-progress.md` and `gpu-support-todo.md` before changing the early MSV/null/bias boundary.
+
+## GPU Pipeline Extension
+
+When `--gpu` is active, `src/hmmsearch_gpu.c` replaces the inner target loop:
+
+1. `dsqdata` chunks are loaded and packed into CUDA search batches.
+2. CUDA MSV kernel scores all sequences in the batch; survivors pass to CUDA bias scoring (reusing uploaded sequence data — no second transfer).
+3. CPU `p7_bg_FilterScore()` supplies the final bias score; CPU `p7_MSVFilter()` can rescue bias-boundary rejects.
+4. Opt-in stages: CUDA Viterbi prefilter (`--gpu-vit-prefilter`), CUDA Forward prefilter (`--gpu-fwd-prefilter`), CUDA Forward/Backward parser (`--gpu-fb-parser`).
+5. Survivors continue through CPU Viterbi → Forward/Backward → domain definition → null2 → hit reporting.
+6. In normal mode with `--gpu-fwd-prefilter`, F3 gating is pure GPU decision (no CPU Forward rerun at gray zone).
+
+The GPU path reports exact exclusive timing buckets: `io_read_unpack`, `gpu_h2d`, `gpu_kernel`, `gpu_d2h`, `host_survivor_orchestration`, `cpu_postfwd_domain_null2_output`, and `other`.
 
 ## Domain Definition
 

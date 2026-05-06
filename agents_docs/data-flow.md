@@ -64,3 +64,18 @@ Nucleotide long-target search uses windows instead of treating a whole chromosom
 - HMM read/write bugs usually start in `p7_hmmfile.c`, then `hmmpress.c`, `hmmfetch.c`, or `hmmconvert.c`.
 - Search behavior usually starts in the CLI file plus `p7_pipeline.c`, `p7_domaindef.c`, `p7_tophits.c`, and the relevant DP/filter implementation.
 - Long-target behavior usually starts in `nhmmer.c`, `nhmmscan.c`, `p7_pipeline.c`, `generic_msv.c`, `generic_viterbi.c`, `fm_ssv.c`, and `p7_scoredata.c`.
+- GPU search behavior starts in `hmmsearch_gpu.c`, then `src/cuda/p7_cuda_runtime.cu` (lifecycle), individual kernel files in `src/cuda/p7_cuda_*.cu`, and `src/cuda/p7_cuda_internal.h` (shared GPU types).
+
+## GPU Data Flow
+
+When `hmmsearch --gpu` is active, data flow diverges at the target loop:
+
+1. `hmmseqdb` pre-builds Easel protein `dsqdata` with per-sequence length metadata.
+2. `hmmsearch_gpu.c` reads `dsqdata` chunks via Easel, packs sequences into GPU search batches.
+3. Profile is uploaded to GPU device memory via `p7_cuda_runtime.cu`.
+4. Sequence batch is uploaded once; CUDA MSV kernel scores all sequences.
+5. MSV survivors get CUDA bias scoring (reuses uploaded sequence data — no second H2D transfer).
+6. CPU `p7_bg_FilterScore()` + optional CPU `p7_MSVFilter()` rescue at F1 boundary.
+7. Opt-in: CUDA Viterbi kernel → CUDA Forward kernel → CUDA FB parser (GPU-side decisions, delayed metadata materialization).
+8. Survivors with materialized `ESL_SQ` metadata enter CPU continuation: `P7_PIPELINE` → domain definition → null2 → `P7_TOPHITS`.
+9. Results merge and output identical to CPU path.

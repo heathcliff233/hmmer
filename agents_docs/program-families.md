@@ -8,7 +8,7 @@ The installed program list is defined in `src/Makefile.in`. Treat each CLI file 
 
 Start with `src/hmmsearch.c`, then inspect `p7_pipeline.c`, `p7_tophits.c`, `p7_domaindef.c`, HMM file/profile code, and the relevant DP/filter implementation.
 
-The opt-in `hmmsearch --gpu` path is protein-only and requires a target database built by `hmmseqdb` as Easel protein `dsqdata`. It batches `dsqdata` targets through CUDA MSV plus biased-composition filtering, then continues accepted survivors through the existing CPU pipeline. See `agents_docs/gpu-support-progress.md` and `src/cuda/README.md`.
+The opt-in `hmmsearch --gpu` path is protein-only and requires a target database built by `hmmseqdb` as Easel protein `dsqdata`. It batches `dsqdata` targets through CUDA MSV plus biased-composition filtering, then continues accepted survivors through the existing CPU pipeline. See `gpu-support-progress.md`.
 
 ## Protein Model Scan: `hmmscan`
 
@@ -58,6 +58,14 @@ Start with `src/hmmpress.c` and `src/p7_hmmfile.c`.
 Start with `src/makehmmerdb.c`, `src/fm_general.c`, `src/fm_alphabet.c`, and `libdivsufsort/`.
 
 Do not reuse `makehmmerdb` for the protein GPU sequence database builder. The HMMER-facing command is `hmmseqdb`, which writes GPU-capable Easel protein `dsqdata`; nucleotide/FM-index GPU metadata belongs to later `nhmmer` work.
+
+## GPU Sequence Database Preparation: `hmmseqdb`
+
+`hmmseqdb` builds GPU-capable Easel protein `dsqdata` target databases from FASTA input. This is the required input format for `hmmsearch --gpu`.
+
+Start with `src/hmmseqdb.c`. The output format uses Easel's `dsqdata` chunked binary layout with the chunk-sizing patch from `patches/easel-dsqdata-open-sized.patch`.
+
+Usage: `src/hmmseqdb target.fa target.gpudb`
 
 ## Daemon Search
 

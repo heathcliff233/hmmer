@@ -308,6 +308,7 @@ typedef struct p7_bg_s {
   float    p1;		/* null1's transition prob: p7_bg_SetLength() sets this from target seq L  */
 
   ESL_HMM *fhmm;	/* bias filter: p7_bg_SetFilter() sets this, from model's mean composition */
+  ESL_HMX *fsc_hmx;	/* reusable DP matrix for p7_bg_FilterScore(); grown as needed            */
 
   float    omega;	/* the "prior" on null2/null3: set at initialization (one omega for both null types)  */
 

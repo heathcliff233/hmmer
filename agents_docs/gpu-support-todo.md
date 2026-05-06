@@ -1,6 +1,6 @@
 # GPU Support TODO
 
-This is the live TODO for future GPU work. For detailed dated implementation history, see `agents_docs/gpu-support-history.md`; for external CUDA-HMM reference notes, see `agents_docs/cuda-hmm-reference.md`.
+This is the live TODO for future GPU work. For detailed dated implementation history, see `gpu-support-history.md`; for external CUDA-HMM reference notes, see `cuda-hmm-reference.md`.
 
 ## Locked Constraints
 

@@ -60,7 +60,18 @@ These directories provide the active implementations of optimized objects and al
 
 The generic algorithms in `src/generic_*.c` are not drop-in replacements for optimized filters. Changes to score scaling, profile layout, matrix allocation, or disk serialization must be checked against the selected implementation and pressed database files.
 
-CUDA support remains separate from this SIMD implementation selection. The opt-in protein `hmmsearch --gpu` path lives in `src/cuda/`; it is not an `impl_cuda` replacement, and the selected SSE/NEON/VMX implementation remains available for CPU stages. See `agents_docs/gpu-support-progress.md` for the current state and `agents_docs/gpu-support-todo.md` for open work.
+CUDA support remains separate from this SIMD implementation selection. The opt-in protein `hmmsearch --gpu` path lives in `src/cuda/`; it is not an `impl_cuda` replacement, and the selected SSE/NEON/VMX implementation remains available for CPU stages. See `gpu-support-progress.md` for the current state and `gpu-support-todo.md` for open work.
+
+## CUDA Build Configuration
+
+CUDA is controlled by `--enable-cuda` and `--with-cuda-arch=sm_XX` (default `sm_89`). The `configure.ac` CUDA block (lines ~453-479):
+
+- Searches `/usr/local/cuda/bin` and `/usr/local/cuda-12.6/bin` for `nvcc`
+- Links `-lcudart`
+- Compiles CUDA objects: `p7_cuda_runtime.o`, `p7_cuda_msv.o`, `p7_cuda_bias.o`, `p7_cuda_viterbi.o`, `p7_cuda_forward.o`, `p7_cuda_fb_parser.o`
+- Uses `easel/m4/esl_cuda.m4` for CUDA macro support
+
+Non-CUDA builds use `src/cuda/p7_cuda_stub.c` to provide stub symbols. When CUDA is disabled, `hmmsearch --gpu` must fail with "HMMER was built without CUDA support".
 
 ## Implementation Makefiles
 

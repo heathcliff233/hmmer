@@ -868,13 +868,31 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       gpu_fb_n = 0;
       gpu_processed_n = 0;
       for (i = 0; i < search_chu->N && (n_targetseqs == -1 || seq_cnt + i < n_targetseqs); i++, gpu_processed_n++) {
+        int64_t seq_n = search_chu->L[i];
+        info->pli->nseqs++;
+        if (info->pli->Z_setby == p7_ZSETBY_NTARGETS && info->pli->mode == p7_SEARCH_SEQS) info->pli->Z = info->pli->nseqs;
+        info->pli->nres += seq_n;
+        if (seq_n == 0) { p7_pipeline_Reuse(info->pli); continue; }
+        if (seq_n > 100000) ESL_EXCEPTION(eslETYPE, "Target sequence length > 100K, over comparison pipeline limit.\n(Did you mean to use nhmmer/nhmmscan?)");
+
+        {
+          float gpu_usc_i = gpu_scores[i];
+          int gpu_msv_status_i = gpu_statuses[i];
+          float gpu_nullsc_i = gpu_nullsc[i];
+          double seq_score_i;
+          double P_i;
+          int fast_pass_msv;
+
+          seq_score_i = (gpu_usc_i - gpu_nullsc_i) / eslCONST_LOG2;
+          P_i = (gpu_msv_status_i == eslERANGE) ? 0.0 : esl_gumbel_surv(seq_score_i, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
+          fast_pass_msv = (P_i <= info->pli->F1);
+          if (!fast_pass_msv) { p7_pipeline_Reuse(info->pli); continue; }
+        }
+
         t0 = hmmsearch_WallTime();
         status = gpu_BindSeqView(info, dbsq, dbsq_dsqmem, dbsq_salloc, search_chu, i);
         info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
         if (status != eslOK) goto ERROR;
-        p7_pli_NewSeq(info->pli, dbsq);
-        if (dbsq->n == 0) { gpu_RestoreSeqStorage(dbsq, dbsq_dsqmem, dbsq_salloc); p7_pipeline_Reuse(info->pli); continue; }
-        if (dbsq->n > 100000) ESL_EXCEPTION(eslETYPE, "Target sequence length > 100K, over comparison pipeline limit.\n(Did you mean to use nhmmer/nhmmscan?)");
         t0 = hmmsearch_WallTime();
         p7_bg_SetLength(info->bg, dbsq->n);
         p7_oprofile_ReconfigLength(info->om, dbsq->n);
@@ -934,6 +952,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                   gpu_vit_filtersc_subset[gpu_vit_n-1] = previt.filtersc;
                   gpu_vit_res += (int) dbsq->n;
                 }
+                p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
                 status = p7_Pipeline_PostMSVWithFilterPreFwd(info->pli, info->om, info->bg, dbsq, usc + info->gpu_msv_slack, previt.filtersc, &passed);
                 if (status != eslOK) goto ERROR;
                 if (passed) {
@@ -949,12 +968,12 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                 }
                 if (info->gpu_fb_parser) {
                   float fwdsc;
+                  p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
                   status = p7_Pipeline_PostMSVWithFilterPreFwd(info->pli, info->om, info->bg, dbsq, usc + info->gpu_msv_slack, previt.filtersc, &passed);
                   if (status != eslOK) goto ERROR;
                   if (passed) {
                     status = gpu_MaterializeSeq(info, dbsq, dbsq_dsqmem, dbsq_salloc, search_chu, i);
                     if (status != eslOK) goto ERROR;
-                    p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
                     t0 = hmmsearch_WallTime();
                     p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
                     {
@@ -974,6 +993,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                 } else {
                   status = gpu_MaterializeSeq(info, dbsq, dbsq_dsqmem, dbsq_salloc, search_chu, i);
                   if (status != eslOK) goto ERROR;
+                  p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
                   p7_Pipeline_PostMSVWithFilter(info->pli, info->om, info->bg, dbsq, NULL, info->th, nullsc, usc + info->gpu_msv_slack, previt.filtersc);
                 }
               }

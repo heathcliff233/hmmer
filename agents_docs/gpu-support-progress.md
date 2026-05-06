@@ -100,4 +100,4 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 
 ## History
 
-Detailed dated implementation notes were moved to `agents_docs/gpu-support-history.md`.
+Detailed dated implementation notes were moved to `gpu-support-history.md`.

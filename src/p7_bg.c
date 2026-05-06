@@ -56,8 +56,9 @@ p7_bg_Create(const ESL_ALPHABET *abc)
   int    status;
 
   ESL_ALLOC(bg, sizeof(P7_BG));
-  bg->f     = NULL;
-  bg->fhmm  = NULL;
+  bg->f       = NULL;
+  bg->fhmm    = NULL;
+  bg->fsc_hmx = NULL;
 
   ESL_ALLOC(bg->f,     sizeof(float) * abc->K);
   if ((bg->fhmm = esl_hmm_Create(abc, 2)) == NULL) goto ERROR;
@@ -93,8 +94,9 @@ p7_bg_CreateUniform(const ESL_ALPHABET *abc)
   int    status;
 
   ESL_ALLOC(bg, sizeof(P7_BG));
-  bg->f     = NULL;
-  bg->fhmm  = NULL;
+  bg->f       = NULL;
+  bg->fhmm    = NULL;
+  bg->fsc_hmx = NULL;
 
   ESL_ALLOC(bg->f,     sizeof(float) * abc->K);
   if ((bg->fhmm = esl_hmm_Create(abc, 2)) == NULL) goto ERROR;
@@ -127,9 +129,10 @@ p7_bg_Clone(const P7_BG *bg)
   int    status;
 
   ESL_ALLOC(dup, sizeof(P7_BG));
-  dup->f    = NULL;
-  dup->fhmm = NULL;
-  dup->abc  = bg->abc;		/* by reference only */
+  dup->f       = NULL;
+  dup->fhmm    = NULL;
+  dup->fsc_hmx = NULL;
+  dup->abc     = bg->abc;		/* by reference only */
 
   ESL_ALLOC(dup->f, sizeof(float) * bg->abc->K);
   memcpy(dup->f, bg->f, sizeof(float) * bg->abc->K);
@@ -171,8 +174,9 @@ void
 p7_bg_Destroy(P7_BG *bg)
 {
   if (bg != NULL) {
-    if (bg->f     != NULL) free(bg->f);
-    if (bg->fhmm  != NULL) esl_hmm_Destroy(bg->fhmm);
+    if (bg->f       != NULL) free(bg->f);
+    if (bg->fhmm    != NULL) esl_hmm_Destroy(bg->fhmm);
+    if (bg->fsc_hmx != NULL) esl_hmx_Destroy(bg->fsc_hmx);
     free(bg);
   }
   return;
@@ -470,14 +474,15 @@ p7_bg_SetFilter(P7_BG *bg, int M, const float *compo)
 int
 p7_bg_FilterScore(P7_BG *bg, const ESL_DSQ *dsq, int L, float *ret_sc)
 {
-  ESL_HMX *hmx = esl_hmx_Create(L, bg->fhmm->M); /* optimization target: this can be a 2-row matrix, and it can be stored in <bg>. */
-  float nullsc;		                  	 /* (or it could be passed in as an arg, but for sure it shouldn't be alloc'ed here */
-  
-  esl_hmm_Forward(dsq, L, bg->fhmm, hmx, &nullsc);
+  float nullsc;
+
+  if (bg->fsc_hmx == NULL) bg->fsc_hmx = esl_hmx_Create(L, bg->fhmm->M);
+  else                     esl_hmx_GrowTo(bg->fsc_hmx, L, bg->fhmm->M);
+
+  esl_hmm_Forward(dsq, L, bg->fhmm, bg->fsc_hmx, &nullsc);
 
   /* impose the length distribution */
   *ret_sc = nullsc + (float) L * logf(bg->p1) + logf(1.-bg->p1);
-  esl_hmx_Destroy(hmx);
   return eslOK;
 }
 

@@ -70,3 +70,7 @@ Cache changes can affect memory lifetime, daemon startup, shard routing, and sea
 ## Verification Targets
 
 Relevant integration tests include `testsuite/i19-hmmpgmd-ga.pl` and `testsuite/i22-hmmpgmd-shard-ga.pl`. For non-daemon parallel behavior, search-specific integration scripts plus `make check` are the normal verification path.
+
+## GPU And Threading
+
+The current `hmmsearch --gpu` path uses `--cpu 0` semantics (single-threaded host with GPU offload). It does not use Easel work queues for GPU batch dispatch. The serial dsqdata loop in `src/hmmsearch_gpu.c` reads chunks, packs GPU batches, launches CUDA kernels, and processes survivors sequentially. Multi-GPU or host-thread-parallel GPU dispatch is deferred.
