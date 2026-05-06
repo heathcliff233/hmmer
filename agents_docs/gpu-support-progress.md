@@ -50,11 +50,29 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 - Large-profile Viterbi/Forward activation: tested and reverted — current CUDA kernels are slower than CPU SSE for large profiles.
 - GPU-side F1 gating: adopted for architectural cleanliness, but performance gain was only ~5-10ms/query (not the ~200ms hypothesized).
 
+## Standalone GPU SSV Kernel (2026-05-06)
+
+A standalone two-pass SSV kernel is now available via `--gpu-ssv`:
+- **Architecture**: Pass 1 runs SSV (no J-state) on all sequences; Pass 2 runs full MSV only on sequences classified as NEED_MSV or SKIP.
+- **Profile format**: uses `rbv` (unsigned byte) — same as monolithic MSV kernel. Does NOT use the CPU `sbv` (signed byte) profile that caused the earlier failed attempt.
+- **Parity**: bitwise-identical to monolithic MSV on all tested profmark queries (zero mismatches via `--gpu-ssv-compare`).
+- **Fallback rate**: 0.2–0.3% of sequences need MSV fallback (typical: 500–720 out of 229,290).
+- **Kernel timing** (profmark, 229K sequences):
+
+| Query | Monolithic MSV | SSV kernel | Fallback kernel | SSV total | Delta |
+|-------|---------------|------------|-----------------|-----------|-------|
+| 14-3-3 (M=246) | 48.5ms | 47.5ms | 10.9ms | 58.5ms | +20% |
+| 2OG-FeII_Oxy_3 (M=148) | 30.1ms | 28.9ms | 5.4ms | 34.3ms | +14% |
+| 23S_rRNA_IVP (M=152) | 32.7ms | 29.0ms | 9.9ms | 38.9ms | +19% |
+
+- **Status**: opt-in, parity-verified, not yet faster than monolithic MSV end-to-end. Optimization of the SSV-only path is the next step.
+- **Files**: `src/cuda/p7_cuda_ssv.cu`, engine struct extensions in `p7_cuda_internal.h`, CLI flags in `hmmsearch.c`.
+
 ## Open Risks
 
-- CUDA-native SSV-equivalent boundary deferred (direct diagonal port did not reproduce CPU `p7_SSVFilter()` behavior).
 - Later-stage prefilters (Viterbi, Forward, FB parser) are parity-clean on checked samples but need broader validation before becoming default.
 - FB parser raw `p7X_SCALE` row diagnostics remain open (bounded posterior inputs are acceptable).
+- SSV two-pass overhead (~15–20%) needs to be recovered through SSV-specific kernel optimizations before the flag can become default.
 
 ## Verification Guidance
 

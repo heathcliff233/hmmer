@@ -43,6 +43,12 @@ src/hmmsearch --gpu query.hmm target.gpudb
 
 # With later-stage GPU acceleration (experimental, default-off)
 src/hmmsearch --gpu --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser query.hmm target.gpudb
+
+# With standalone SSV kernel (experimental, parity-verified)
+src/hmmsearch --gpu --gpu-ssv query.hmm target.gpudb
+
+# Debug: compare SSV+fallback scores to monolithic MSV (prints mismatches to stderr)
+src/hmmsearch --gpu --gpu-ssv-compare query.hmm target.gpudb
 ```
 
 ### Running profmark Benchmarks
@@ -98,6 +104,7 @@ agents_docs/       Detailed architecture documentation (see index below)
 The GPU path accelerates MSV + biased-composition filter in CUDA batches. Current state:
 
 - Default path: CUDA MSV + bias with CPU-compatible F1 boundary checks
+- Opt-in standalone SSV: `--gpu-ssv` (two-pass: SSV kernel + MSV fallback for ~0.3% of sequences)
 - Opt-in later stages: `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`
 - Latest all-13 profmark (with later stages): 1.53x speedup (CPU 10.44s → GPU 6.83s), zero parity errors
 - GPU vs CPU-4 (4-thread): currently 0.72x cold (slower due to 260ms/query CUDA init), 1.29x warm
@@ -105,6 +112,7 @@ The GPU path accelerates MSV + biased-composition filter in CUDA batches. Curren
 - Remaining bottleneck: host sync/blocking (32.8%), CPU survivor continuation (8.0%)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
 - Sequence packing uses bulk `smem` copy (single memcpy of dsqdata's contiguous buffer) with L+1 offset spacing
+- SSV kernel status: parity-verified, ~15–20% slower than monolithic MSV due to two-pass overhead; optimization in progress
 
 ## Verification Checklist
 

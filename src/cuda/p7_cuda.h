@@ -64,6 +64,9 @@ typedef struct p7_cuda_msv_stats_s {
   uint64_t bck_nseqs;
   uint64_t bck_nres;
   uint64_t bck_nbatches;
+  double   ssv_kernel_seconds;
+  double   ssv_fallback_kernel_seconds;
+  uint64_t ssv_fallback_nseqs;
 } P7_CUDA_MSV_STATS;
 
 extern int  p7_cuda_Available(char *errbuf, int errbuf_size);
@@ -122,6 +125,9 @@ extern int  p7_cuda_F1GatingDsqdataChunk(P7_CUDA_ENGINE *engine,
                                           int nseq, int do_biasfilter,
                                           double ev_mu, double ev_lambda, double F1,
                                           int *survivor_idx, int *ret_nsurv,
+                                          char *errbuf, int errbuf_size);
+extern int  p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                          ESL_DSQDATA_CHUNK *chu, float *scores, int *statuses,
                                           char *errbuf, int errbuf_size);
 
 #endif /*P7_CUDA_INCLUDED*/

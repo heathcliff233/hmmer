@@ -26,8 +26,8 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 ### 3) Naive CUDA SSV-style shortcut from CPU `sbv` profile
 - Attempt: direct diagonal signed-byte CUDA shortcut to mimic CPU SSV behavior.
 - Outcome: reverted.
-- Failure reason: did not match CPU `p7_SSVFilter()` behavior; caused sensitivity regressions.
-- Decision: do not pursue this shortcut; any future SSV work must match CPU banded behavior or keep CPU-compatible rescue.
+- Failure reason: did not match CPU `p7_SSVFilter()` behavior; caused sensitivity regressions. The `sbv` (signed byte) profile uses a different score representation than the `rbv` (unsigned byte) profile used by the GPU MSV kernel.
+- Decision: do not pursue this shortcut; any future SSV work must use the `rbv` profile and match the existing GPU MSV scoring logic, not the CPU SSV diagonal traversal.
 
 ### 4) Early CUDA Viterbi prototype without strong parity/perf envelope
 - Attempt: post-bias CUDA Viterbi candidate scoring prototype.
@@ -64,6 +64,15 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
   - CPU `p7_bg_FilterScore()` supplies final bias score for GPU MSV survivors.
   - CPU `p7_MSVFilter()` rescue remains available at the bias/F1 boundary.
 - Rationale: this boundary currently preserves exact parity on prepared all-13 evidence while keeping GPU acceleration useful.
+
+### 4) Standalone GPU SSV two-pass kernel (2026-05-06)
+- Attempt: extract the inline SSV fast-path from the monolithic MSV kernel into a standalone two-pass architecture: SSV kernel first (no J-state), then MSV fallback kernel only for uncertain sequences.
+- Outcome: adopted as opt-in (`--gpu-ssv`).
+- Key design: uses `rbv` (unsigned byte) profile — same as the monolithic MSV kernel — avoiding the `sbv` pitfall of attempt #3. SSV kernel classifies each sequence as OK/OVERFLOW/NEED_MSV/SKIP; fallback kernel runs full MSV indexed by a compacted fallback list.
+- Parity: bitwise-identical scores to monolithic MSV on all-13 profmark (229,290 sequences × 13 queries, zero mismatches via `--gpu-ssv-compare`).
+- Fallback rate: 0.2–0.3% of sequences need full MSV fallback (507–722 out of 229,290).
+- Performance: SSV kernel alone is ~3–10% faster than monolithic MSV, but total two-pass time is ~15–20% slower due to second kernel launch + intermediate status copy-back. Optimization of the SSV-only path is the next step.
+- Files: `src/cuda/p7_cuda_ssv.cu` (new), engine struct extensions in `p7_cuda_internal.h`.
 
 ## Current Status Summary
 

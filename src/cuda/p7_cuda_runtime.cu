@@ -94,6 +94,8 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_parser_x_offsets) cudaFree(engine->d_parser_x_offsets);
   if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
   if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
+  if (engine->d_ssv_status)  cudaFree(engine->d_ssv_status);
+  if (engine->d_fallback_idx) cudaFree(engine->d_fallback_idx);
   free(engine);
 }
 

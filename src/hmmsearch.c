@@ -122,6 +122,8 @@ static ESL_OPTIONS options[] = {
   { "--gpu-vit-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "debug compare CUDA Viterbi scores to CPU Viterbi scores",      99 },
   { "--gpu-fb-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,             "debug compare CUDA parser state to CPU Forward/Backward",      99 },
   { "--gpu-previt-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,         "debug compare CUDA null/bias/F1 boundary to CPU boundary",     99 },
+  { "--gpu-ssv",         eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "use standalone CUDA SSV+fallback instead of monolithic MSV",    99 },
+  { "--gpu-ssv-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "debug compare CUDA SSV+fallback scores to monolithic MSV",      99 },
 
 /* Other options */
   { "--nonull2",    eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL,  NULL,            "turn off biased composition score corrections",               12 },
@@ -527,6 +529,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     info[i].gpu_vit_compare   = esl_opt_GetBoolean(go, "--gpu-vit-compare");
     info[i].gpu_fb_compare    = esl_opt_GetBoolean(go, "--gpu-fb-compare");
     info[i].gpu_previt_compare = esl_opt_GetBoolean(go, "--gpu-previt-compare");
+    info[i].gpu_ssv            = esl_opt_GetBoolean(go, "--gpu-ssv");
+    info[i].gpu_ssv_compare    = esl_opt_GetBoolean(go, "--gpu-ssv-compare");
 #ifdef HMMER_THREADS
 	  info[i].queue = queue;
 #endif

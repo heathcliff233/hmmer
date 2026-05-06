@@ -773,7 +773,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
   double   t0;
   int      gpu_vit_active = info->gpu_vit_prefilter && (info->gpu_vit_largem || info->om->M <= 512);
   int      gpu_fwd_active = info->gpu_fwd_prefilter && (info->gpu_fwd_largem || info->om->M <= 256);
-  int      gpu_strict_mode = !(info->gpu_vit_compare || info->gpu_fwd_compare || info->gpu_fb_compare || info->gpu_previt_compare);
+  int      gpu_strict_mode = !(info->gpu_vit_compare || info->gpu_fwd_compare || info->gpu_fb_compare || info->gpu_previt_compare || info->gpu_ssv_compare);
   int      vit_cmp_status_mismatch = 0;
   int      vit_cmp_pass_mismatch = 0;
   int      vit_cmp_score_drift = 0;
@@ -850,9 +850,26 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       search_chu = (batch.nchunks == 1) ? batch.chunks[0] : &batch.view;
 
       t0 = hmmsearch_WallTime();
-      status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+      if (info->gpu_ssv || info->gpu_ssv_compare)
+        status = p7_cuda_SSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+      else
+        status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
       info->pli->time_msv += hmmsearch_WallTime() - t0;
-      if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch MSV failed: %s\n", errbuf);
+      if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch MSV/SSV failed: %s\n", errbuf);
+
+      if (info->gpu_ssv_compare) {
+        float *msv_scores = (float *) malloc(sizeof(float) * search_chu->N);
+        int   *msv_statuses = (int *) malloc(sizeof(int) * search_chu->N);
+        status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, msv_scores, msv_statuses, errbuf, sizeof(errbuf));
+        if (status != eslOK) p7_Fail("--gpu-ssv-compare: monolithic MSV failed: %s\n", errbuf);
+        for (int ci = 0; ci < search_chu->N; ci++) {
+          if (gpu_statuses[ci] != msv_statuses[ci] || (gpu_statuses[ci] == eslOK && gpu_scores[ci] != msv_scores[ci]))
+            fprintf(stderr, "SSV_COMPARE_MISMATCH seq=%d ssv_score=%.6f msv_score=%.6f ssv_status=%d msv_status=%d\n",
+                    ci, gpu_scores[ci], msv_scores[ci], gpu_statuses[ci], msv_statuses[ci]);
+        }
+        free(msv_scores);
+        free(msv_statuses);
+      }
       t0 = hmmsearch_WallTime();
       status = p7_cuda_NullScoreDsqdataChunk(info->cuda_engine, info->bg, search_chu, gpu_nullsc, errbuf, sizeof(errbuf));
       info->pli->time_null += hmmsearch_WallTime() - t0;

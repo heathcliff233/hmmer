@@ -23,6 +23,15 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 - **CUDA engine reuse across queries** (highest priority): move `p7_cuda_engine_Create` outside the per-query loop so the ~260ms CUDA context init is paid once per process. Saves ~3.1s across 13 queries. The engine struct already supports reuse; barrier is the per-query create/destroy lifecycle in `hmmsearch.c`.
 - **CUDA stream-based overlap**: pipeline H2D of next batch with kernel of current batch, reducing the 2.24s host sync/blocking time.
 
+### SSV kernel optimizations (new, `--gpu-ssv` path)
+The standalone SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is parity-verified but ~15–20% slower than monolithic MSV due to two-pass overhead. Optimizations to recover and exceed monolithic performance:
+- **Eliminate intermediate host round-trip**: instead of copying `d_ssv_status` back to host and building fallback index on CPU, use a device-side compaction kernel (thrust `copy_if` or a custom atomic-based compaction) to build `d_fallback_idx` entirely on GPU. Saves one `cudaMemcpy` + `cudaEventSynchronize` between passes.
+- **Fuse SSV classification into the kernel**: the SSV kernel currently writes `raw_sc` and `ssv_status` separately; fuse the score conversion for OK sequences directly into the SSV kernel to avoid a second pass over OK results.
+- **Warp-level SSV specialization**: the SSV inner loop has no cross-iteration J-state dependency (constant `xB`), making it amenable to warp-shuffle reductions without shared-memory barriers. Explore replacing `__syncthreads()` with warp-cooperative patterns for M ≤ 512.
+- **Adaptive thread count**: current kernel uses 32 threads/block regardless of M. For small M (< 64), a single warp is sufficient; for large M (> 512), multiple warps with shared-memory partitioning could improve occupancy.
+- **Skip fallback kernel launch when nfallback=0**: currently the fallback path is gated by `if (nfallback > 0)` but the event create/destroy overhead is always paid. Move event lifecycle inside the conditional.
+- **Profile the fallback kernel**: the fallback kernel processes only 0.2–0.3% of sequences but takes 5–11ms. This is disproportionate — investigate whether kernel launch overhead dominates or whether fallback sequences are genuinely harder (longer, more complex).
+
 ### Medium-priority work
 - Decide default policy for later-stage flags (`--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`). Needs broader validation and auto-gating for short profiles.
 - Eliminate multi-chunk view fallback path (~50% of batches still use per-sequence copy because `gpu_pending_max_chunks=2` creates multi-chunk views).
@@ -30,9 +39,9 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.
-- CUDA-native SSV-equivalent (only if it preserves profmark parity and improves wall time).
 - Profile/candidate-shape auto-gating for short queries where CUDA launches regress wall time.
 - Broaden parser-state validation beyond raw `p7X_SCALE` row differences.
+- Once SSV kernel is optimized to match or beat monolithic MSV, make `--gpu-ssv` the default GPU MSV path and remove the monolithic kernel.
 
 ## Validation Checklist
 
