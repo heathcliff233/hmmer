@@ -20,6 +20,12 @@ extern "C" {
 
 struct p7_cuda_msv_engine_s {
   int                 device_id;
+  cudaEvent_t         evt_h2d0;
+  cudaEvent_t         evt_h2d1;
+  cudaEvent_t         evt_k0;
+  cudaEvent_t         evt_k1;
+  cudaEvent_t         evt_d2h0;
+  cudaEvent_t         evt_d2h1;
   uint8_t            *d_dsq;
   int                 dsq_alloc;
   uint8_t            *h_dsq;

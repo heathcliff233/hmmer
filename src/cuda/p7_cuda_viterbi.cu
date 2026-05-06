@@ -9,6 +9,16 @@ seconds_now_vit(void)
   return (double) tv.tv_sec + (double) tv.tv_usec * 1e-6;
 }
 
+static inline int
+cuda_wait_and_account_vit(cudaEvent_t evt, char *errbuf, int errbuf_size, const char *where, double *wait_accum)
+{
+  int status;
+  double t0 = seconds_now_vit();
+  status = cuda_status(cudaEventSynchronize(evt), errbuf, errbuf_size, where);
+  if (wait_accum) *wait_accum += (seconds_now_vit() - t0);
+  return status;
+}
+
 __device__ static inline int16_t
 i16_add_sat(int16_t a, int16_t b)
 {
@@ -236,6 +246,8 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   size_t group_shmem;
   size_t shmem;
   cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
+  double submit_overhead = 0.0;
+  double wait_barrier = 0.0;
 
   if (!engine || !cuom || !chu || !statuses) return eslEINVAL;
   if (!scores && !passed) return eslEINVAL;
@@ -325,16 +337,18 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   threads = groups_per_block * 32;
   shmem = group_shmem * (size_t) groups_per_block;
 
-  cudaEventCreate(&h2d0);
-  cudaEventCreate(&h2d1);
-  cudaEventCreate(&k0);
-  cudaEventCreate(&k1);
-  cudaEventCreate(&d2h0);
-  cudaEventCreate(&d2h1);
+  h2d0 = engine->evt_h2d0;
+  h2d1 = engine->evt_h2d1;
+  k0   = engine->evt_k0;
+  k1   = engine->evt_k1;
+  d2h0 = engine->evt_d2h0;
+  d2h1 = engine->evt_d2h1;
 
   cudaEventRecord(h2d0);
   if (!reuse_batch) {
+    double tsp0 = seconds_now_vit();
     for (int i = 0; i < nseq; i++) memcpy(engine->h_dsq + h_offsets[i], chu->dsq[i], h_lengths[i] + 2);
+    submit_overhead += (seconds_now_vit() - tsp0);
     if ((status = cuda_status(cudaMemcpy(engine->d_dsq, engine->h_dsq, total, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(batch dsq)")) != eslOK) goto CUDA_ERROR;
     if ((status = cuda_status(cudaMemcpy(engine->d_offsets, h_offsets, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(offsets)")) != eslOK) goto CUDA_ERROR;
     if ((status = cuda_status(cudaMemcpy(engine->d_lengths, h_lengths, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lengths)")) != eslOK) goto CUDA_ERROR;
@@ -346,11 +360,6 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(engine->d_vit_filtersc, filtersc, sizeof(float) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vit filtersc)")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(h2d1);
-  {
-    double tw0 = seconds_now_vit();
-    cudaEventSynchronize(h2d1);
-    engine->stats.dispatch_wait_seconds += (seconds_now_vit() - tw0);
-  }
 
   cudaEventRecord(k0);
   {
@@ -374,11 +383,6 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_pass_kernel launch")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(k1);
-  {
-    double tw0 = seconds_now_vit();
-    cudaEventSynchronize(k1);
-    engine->stats.dispatch_wait_seconds += (seconds_now_vit() - tw0);
-  }
 
   cudaEventRecord(d2h0);
   if (scores) {
@@ -389,11 +393,10 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(passed, engine->d_vit_passed, sizeof(int) * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vit passed)")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(d2h1);
-  {
-    double tw0 = seconds_now_vit();
-    cudaEventSynchronize(d2h1);
-    engine->stats.dispatch_wait_seconds += (seconds_now_vit() - tw0);
-  }
+  engine->stats.submit_overhead_seconds += submit_overhead;
+  if ((status = cuda_wait_and_account_vit(d2h1, errbuf, errbuf_size, "cudaEventSynchronize(vit d2h1)", &wait_barrier)) != eslOK) goto CUDA_ERROR;
+  engine->stats.wait_barrier_seconds += wait_barrier;
+  engine->stats.dispatch_wait_seconds += wait_barrier;
 
   engine->stats.vit_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.vit_kernel_seconds += elapsed_seconds(k0, k1);
@@ -406,12 +409,6 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   engine->stats.vit_nbatches       += 1;
 
 CUDA_ERROR:
-  cudaEventDestroy(h2d0);
-  cudaEventDestroy(h2d1);
-  cudaEventDestroy(k0);
-  cudaEventDestroy(k1);
-  cudaEventDestroy(d2h0);
-  cudaEventDestroy(d2h1);
 ERROR:
   free(h_offsets);
   free(h_lengths);

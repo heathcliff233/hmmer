@@ -9,6 +9,16 @@ seconds_now_fwd(void)
   return (double) tv.tv_sec + (double) tv.tv_usec * 1e-6;
 }
 
+static inline int
+cuda_wait_and_account_fwd(cudaEvent_t evt, char *errbuf, int errbuf_size, const char *where, double *wait_accum)
+{
+  int status;
+  double t0 = seconds_now_fwd();
+  status = cuda_status(cudaEventSynchronize(evt), errbuf, errbuf_size, where);
+  if (wait_accum) *wait_accum += (seconds_now_fwd() - t0);
+  return status;
+}
+
 __device__ static inline uint8_t
 u8_sub_sat(uint8_t a, uint8_t b)
 {
@@ -448,6 +458,8 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   int prefix_threads = 0;
   size_t shmem;
   cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
+  double submit_overhead = 0.0;
+  double wait_barrier = 0.0;
 
   if (!engine || !cuom || !chu || !statuses) return eslEINVAL;
   if (!scores && !passed) return eslEINVAL;
@@ -531,16 +543,18 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   shmem = use_prefix ? (sizeof(float) * ((size_t) cuom->Qf * 4 * 3 * 2 + (size_t) cuom->Qf * 4 + (size_t) prefix_threads * 2))
                      : (sizeof(float) * (size_t) cuom->Qf * 4 * 3 * 2);
 
-  cudaEventCreate(&h2d0);
-  cudaEventCreate(&h2d1);
-  cudaEventCreate(&k0);
-  cudaEventCreate(&k1);
-  cudaEventCreate(&d2h0);
-  cudaEventCreate(&d2h1);
+  h2d0 = engine->evt_h2d0;
+  h2d1 = engine->evt_h2d1;
+  k0   = engine->evt_k0;
+  k1   = engine->evt_k1;
+  d2h0 = engine->evt_d2h0;
+  d2h1 = engine->evt_d2h1;
 
   cudaEventRecord(h2d0);
   if (!reuse_batch) {
+    double tsp0 = seconds_now_fwd();
     for (int i = 0; i < nseq; i++) memcpy(engine->h_dsq + h_offsets[i], chu->dsq[i], h_lengths[i] + 2);
+    submit_overhead += (seconds_now_fwd() - tsp0);
     if ((status = cuda_status(cudaMemcpy(engine->d_dsq, engine->h_dsq, total, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(batch dsq)")) != eslOK) goto CUDA_ERROR;
     if ((status = cuda_status(cudaMemcpy(engine->d_offsets, h_offsets, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(offsets)")) != eslOK) goto CUDA_ERROR;
     if ((status = cuda_status(cudaMemcpy(engine->d_lengths, h_lengths, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lengths)")) != eslOK) goto CUDA_ERROR;
@@ -552,11 +566,6 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(engine->d_fwd_filtersc, filtersc, sizeof(float) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(fwd filtersc)")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(h2d1);
-  {
-    double tw0 = seconds_now_fwd();
-    cudaEventSynchronize(h2d1);
-    engine->stats.dispatch_wait_seconds += (seconds_now_fwd() - tw0);
-  }
 
   cudaEventRecord(k0);
   if (use_prefix) {
@@ -588,11 +597,6 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_forward_pass_kernel launch")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(k1);
-  {
-    double tw0 = seconds_now_fwd();
-    cudaEventSynchronize(k1);
-    engine->stats.dispatch_wait_seconds += (seconds_now_fwd() - tw0);
-  }
 
   cudaEventRecord(d2h0);
   if (scores) {
@@ -603,11 +607,10 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(passed, engine->d_fwd_passed, sizeof(int) * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(fwd passed)")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(d2h1);
-  {
-    double tw0 = seconds_now_fwd();
-    cudaEventSynchronize(d2h1);
-    engine->stats.dispatch_wait_seconds += (seconds_now_fwd() - tw0);
-  }
+  engine->stats.submit_overhead_seconds += submit_overhead;
+  if ((status = cuda_wait_and_account_fwd(d2h1, errbuf, errbuf_size, "cudaEventSynchronize(fwd d2h1)", &wait_barrier)) != eslOK) goto CUDA_ERROR;
+  engine->stats.wait_barrier_seconds += wait_barrier;
+  engine->stats.dispatch_wait_seconds += wait_barrier;
 
   engine->stats.fwd_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.fwd_kernel_seconds += elapsed_seconds(k0, k1);
@@ -625,12 +628,6 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   engine->stats.fwd_prefilter_nbatches += 1;
 
 CUDA_ERROR:
-  cudaEventDestroy(h2d0);
-  cudaEventDestroy(h2d1);
-  cudaEventDestroy(k0);
-  cudaEventDestroy(k1);
-  cudaEventDestroy(d2h0);
-  cudaEventDestroy(d2h1);
 ERROR:
   free(h_offsets);
   free(h_lengths);

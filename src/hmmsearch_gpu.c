@@ -98,6 +98,30 @@ gpu_CandidateResidues(const ESL_DSQDATA_CHUNK *chu, const int *idx, int n)
   return (int) total;
 }
 
+static int
+gpu_ChooseTileCandidates(const WORKER_INFO *info, int is_fwd, int total_n, int total_res)
+{
+  int M = info->om ? info->om->M : 0;
+  int tile_n;
+  int tile_res;
+
+  if (is_fwd) {
+    tile_n = (M > 1200) ? 192 : (M > 700 ? 320 : 640);
+    tile_res = (M > 1200) ? 200000 : (M > 700 ? 350000 : 700000);
+  } else {
+    tile_n = (M > 1200) ? 256 : (M > 700 ? 512 : 1024);
+    tile_res = (M > 1200) ? 280000 : (M > 700 ? 500000 : 1000000);
+  }
+  if (total_n < tile_n) tile_n = total_n;
+  if (tile_n < 1) tile_n = 1;
+  if (total_res > 0) {
+    int by_res = ESL_MAX(1, (tile_n * tile_res) / total_res);
+    tile_n = ESL_MIN(tile_n, by_res);
+    if (tile_n < 1) tile_n = 1;
+  }
+  return tile_n;
+}
+
 static void
 gpu_ResolveSurvivorThresholds(const WORKER_INFO *info, int M,
                               int *vit_min_cands, int *fwd_min_cands,
@@ -450,7 +474,11 @@ gpu_PreViterbiBoundary(WORKER_INFO *info, const ESL_SQ *dbsq, float gpu_usc, int
     if (info->pli->do_biasfilter) {
       double tbias0 = hmmsearch_WallTime();
       p7_bg_FilterScore(info->bg, dbsq->dsq, dbsq->n, &filtersc);
-      info->pli->time_bias += hmmsearch_WallTime() - tbias0;
+      {
+        double dt = hmmsearch_WallTime() - tbias0;
+        info->pli->time_bias += dt;
+        info->pli->exact_cpu_survivor_total += dt;
+      }
       seq_score = (usc + info->gpu_msv_slack - filtersc) / eslCONST_LOG2;
       P = esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
       if (P > info->pli->F1 && gpu_msv_status == eslOK) {
@@ -460,7 +488,11 @@ gpu_PreViterbiBoundary(WORKER_INFO *info, const ESL_SQ *dbsq, float gpu_usc, int
         int status = p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
         if (status != eslOK) return status;
         cpu_msv_status = p7_MSVFilter(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &cpu_usc);
-        info->pli->time_msv += hmmsearch_WallTime() - tmsv0;
+        {
+          double dt = hmmsearch_WallTime() - tmsv0;
+          info->pli->time_msv += dt;
+          info->pli->exact_cpu_survivor_total += dt;
+        }
         if (cpu_msv_status == eslERANGE) {
           usc = cpu_usc;
           P = 0.0;
@@ -729,14 +761,19 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
   int gpu_fb_n = 0;
   int gpu_fb_alloc = 0;
   int gpu_processed_n = 0;
+  int gpu_pending_max_chunks = 2;
+  int gpu_end_of_input = FALSE;
   ESL_DSQ *dbsq_dsqmem = NULL;
   int64_t  dbsq_salloc = 0;
-  int      gpu_capacity = info->gpu_batch_seqs > 0 ? info->gpu_batch_seqs : eslDSQDATA_CHUNK_MAXSEQ;
+  int      gpu_capacity = ESL_MAX(info->gpu_batch_seqs > 0 ? info->gpu_batch_seqs : eslDSQDATA_CHUNK_MAXSEQ,
+                                  ESL_MAX(1, info->gpu_load_seqs) * gpu_pending_max_chunks);
   int64_t  batch_res = 0;
   int64_t  effective_load_res = 0;
+  int64_t  batch_res_cap = 0;
   double   t0;
   int      gpu_vit_active = info->gpu_vit_prefilter && (info->gpu_vit_largem || info->om->M <= 512);
   int      gpu_fwd_active = info->gpu_fwd_prefilter && (info->gpu_fwd_largem || info->om->M <= 256);
+  int      gpu_strict_mode = !(info->gpu_vit_compare || info->gpu_fwd_compare || info->gpu_fb_compare || info->gpu_previt_compare);
   int      vit_cmp_status_mismatch = 0;
   int      vit_cmp_pass_mismatch = 0;
   int      vit_cmp_score_drift = 0;
@@ -752,6 +789,8 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
   int      gpu_fwd_collect_res;
 
   gpu_search_batch_Init(&batch);
+  if (gpu_strict_mode && info->gpu_vit_prefilter) gpu_vit_active = TRUE;
+  if (gpu_strict_mode && info->gpu_fwd_prefilter) gpu_fwd_active = TRUE;
   if (dd == NULL) return eslEINVAL;
     dbsq = esl_sq_CreateDigital(info->om->abc);
     if (dbsq == NULL) { status = eslEMEM; goto ERROR; }
@@ -777,11 +816,15 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                                   &gpu_vit_min_res, &gpu_fwd_min_res,
                                   &gpu_vit_collect_res, &gpu_fwd_collect_res);
     effective_load_res = (int64_t) 6 * ESL_MAX(eslDSQDATA_CHUNK_MAXPACKET, (info->gpu_load_res + 5) / 6);
+    batch_res_cap = ESL_MAX((int64_t) info->gpu_batch_res, effective_load_res * (int64_t) gpu_pending_max_chunks);
     while (n_targetseqs == -1 || seq_cnt < n_targetseqs) {
+      gpu_end_of_input = (n_targetseqs != -1 && seq_cnt >= n_targetseqs);
       gpu_search_batch_Reset(&batch);
       batch_res = 0;
 
-      do {
+      while (!gpu_end_of_input &&
+             batch.nchunks < gpu_pending_max_chunks &&
+             batch_res + effective_load_res <= batch_res_cap) {
         t0 = hmmsearch_WallTime();
         sstatus = esl_dsqdata_Read(dd, &chu);
         {
@@ -789,7 +832,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           info->pli->time_gpu_read += dt;
           info->pli->exact_io_read_unpack += dt;
         }
-        if (sstatus != eslOK) break;
+        if (sstatus != eslOK) { gpu_end_of_input = TRUE; break; }
         if (chu->N > gpu_capacity)
           p7_Fail("--gpu-batch-seqs %d is smaller than dsqdata load chunk size %d; use --gpu-batch-seqs >= %d or reduce --gpu-load-seqs\n",
                   gpu_capacity, chu->N, chu->N);
@@ -797,9 +840,8 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
         if (status != eslOK) goto ERROR;
         batch_res += effective_load_res;
         chu = NULL;
-      } while ((n_targetseqs == -1 || seq_cnt + batch.view.N < n_targetseqs) &&
-               batch.view.N + info->gpu_load_seqs <= info->gpu_batch_seqs &&
-               batch_res + effective_load_res <= info->gpu_batch_res);
+        if (batch.view.N >= gpu_capacity) break;
+      }
 
       if (batch.view.N == 0) break;
       search_chu = (batch.nchunks == 1) ? batch.chunks[0] : &batch.view;
@@ -867,7 +909,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                     p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
                     t0 = hmmsearch_WallTime();
                     p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
-                    info->pli->time_fwd += hmmsearch_WallTime() - t0;
+                    {
+                      double dt = hmmsearch_WallTime() - t0;
+                      info->pli->time_fwd += dt;
+                      info->pli->exact_cpu_survivor_total += dt;
+                    }
                     if (info->gpu_fb_parser) {
                       status = gpu_fb_batch_Add(info, &gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
                                                 &gpu_fb_n, &gpu_fb_alloc, i, nullsc, previt.filtersc, fwdsc);
@@ -911,7 +957,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                     p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
                     t0 = hmmsearch_WallTime();
                     p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
-                    info->pli->time_fwd += hmmsearch_WallTime() - t0;
+                    {
+                      double dt = hmmsearch_WallTime() - t0;
+                      info->pli->time_fwd += dt;
+                      info->pli->exact_cpu_survivor_total += dt;
+                    }
                     if (info->gpu_fb_parser) {
                       status = gpu_fb_batch_Add(info, &gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
                                                 &gpu_fb_n, &gpu_fb_alloc, i, nullsc, previt.filtersc, fwdsc);
@@ -939,22 +989,37 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
         int run_cuda_vit;
         int enough_min;
         int enough_collect;
+        int vit_launch_n;
+        int vit_launch_res;
+        int vit_res_left = gpu_vit_res;
+        int vit_off = 0;
         gpu_vit_res = gpu_CandidateResidues(search_chu, gpu_vit_idx, gpu_vit_n);
         info->pli->gpu_vit_candidates_total += (uint64_t) gpu_vit_n;
+        info->pli->gpu_vit_residues_total += (uint64_t) gpu_vit_res;
         enough_min = (gpu_vit_n >= gpu_vit_min_cands || gpu_vit_res >= gpu_vit_min_res);
         enough_collect = (gpu_vit_n >= gpu_vit_collect_cands || gpu_vit_res >= gpu_vit_collect_res);
         run_cuda_vit = info->gpu_vit_compare || (enough_min && enough_collect);
+        if (gpu_strict_mode && gpu_vit_active) run_cuda_vit = TRUE;
         if (run_cuda_vit) {
-          info->pli->gpu_vit_launches++;
-          t0 = hmmsearch_WallTime();
-          status = p7_cuda_ViterbiFilterDsqdataSubset(info->cuda_engine, info->cuda_msv, search_chu,
-                                                      gpu_vit_idx, gpu_vit_n, gpu_vit_filtersc_subset,
-                                                      info->om->evparam[p7_VMU], info->om->evparam[p7_VLAMBDA], info->pli->F2,
-                                                      info->gpu_vit_compare ? gpu_vit_scores : NULL,
-                                                      gpu_vit_statuses, gpu_vit_passed,
-                                                      errbuf, sizeof(errbuf));
-          info->pli->time_vit += hmmsearch_WallTime() - t0;
-          if (status != eslOK) p7_Fail("--gpu requested, but CUDA Viterbi failed: %s\n", errbuf);
+          while (vit_off < gpu_vit_n) {
+            int t;
+            vit_launch_n = gpu_ChooseTileCandidates(info, FALSE, gpu_vit_n - vit_off, vit_res_left);
+            if (vit_launch_n < 1) vit_launch_n = gpu_vit_n - vit_off;
+            vit_launch_res = 0;
+            for (t = 0; t < vit_launch_n; t++) vit_launch_res += (int) search_chu->L[gpu_vit_idx[vit_off + t]];
+            info->pli->gpu_vit_launches++;
+            t0 = hmmsearch_WallTime();
+            status = p7_cuda_ViterbiFilterDsqdataSubset(info->cuda_engine, info->cuda_msv, search_chu,
+                                                        gpu_vit_idx + vit_off, vit_launch_n, gpu_vit_filtersc_subset + vit_off,
+                                                        info->om->evparam[p7_VMU], info->om->evparam[p7_VLAMBDA], info->pli->F2,
+                                                        info->gpu_vit_compare ? (gpu_vit_scores + vit_off) : NULL,
+                                                        gpu_vit_statuses + vit_off, gpu_vit_passed + vit_off,
+                                                        errbuf, sizeof(errbuf));
+            info->pli->time_vit += hmmsearch_WallTime() - t0;
+            if (status != eslOK) p7_Fail("--gpu requested, but CUDA Viterbi failed: %s\n", errbuf);
+            vit_off += vit_launch_n;
+            vit_res_left -= vit_launch_res;
+          }
         }
 
         for (int j = 0; j < gpu_vit_n; j++) {
@@ -983,10 +1048,18 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
               }
             }
           } else {
+            if (gpu_strict_mode && gpu_vit_active) {
+              p7_Fail("--gpu requested strict CUDA Viterbi, but launch gating skipped CUDA path for %d candidates/%d residues; adjust --gpu-vit-min-* or --gpu-vit-collect-* thresholds\n",
+                      gpu_vit_n, gpu_vit_res);
+            }
             p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
             t0 = hmmsearch_WallTime();
             cpu_status = p7_ViterbiFilter(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &cpu_vitsc);
-            info->pli->time_vit += hmmsearch_WallTime() - t0;
+            {
+              double dt = hmmsearch_WallTime() - t0;
+              info->pli->time_vit += dt;
+              info->pli->exact_cpu_survivor_total += dt;
+            }
             gpu_pass = (cpu_status == eslERANGE);
             if (cpu_status == eslOK) {
               seq_score = (cpu_vitsc - filtersc) / eslCONST_LOG2;
@@ -1031,7 +1104,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
               p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
               t0 = hmmsearch_WallTime();
               p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
-              info->pli->time_fwd += hmmsearch_WallTime() - t0;
+              {
+                double dt = hmmsearch_WallTime() - t0;
+                info->pli->time_fwd += dt;
+                info->pli->exact_cpu_survivor_total += dt;
+              }
               if (info->gpu_fb_parser) {
                 status = gpu_fb_batch_Add(info, &gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
                                           &gpu_fb_n, &gpu_fb_alloc, i, gpu_nullsc[i], filtersc, fwdsc);
@@ -1051,22 +1128,38 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
         int run_cuda_fwd;
         int enough_min;
         int enough_collect;
+        int fwd_launch_n;
+        int fwd_launch_res;
+        int fwd_res_left = gpu_fwd_res;
+        int fwd_off = 0;
         float *fwd_score_ret = (info->gpu_fwd_compare || !info->gpu_fb_parser) ? gpu_fwd_scores : NULL;
         gpu_fwd_res = gpu_CandidateResidues(search_chu, gpu_fwd_idx, gpu_fwd_n);
         info->pli->gpu_fwd_candidates_total += (uint64_t) gpu_fwd_n;
+        info->pli->gpu_fwd_residues_total += (uint64_t) gpu_fwd_res;
         enough_min = (gpu_fwd_n >= gpu_fwd_min_cands || gpu_fwd_res >= gpu_fwd_min_res);
         enough_collect = (gpu_fwd_n >= gpu_fwd_collect_cands || gpu_fwd_res >= gpu_fwd_collect_res);
         run_cuda_fwd = info->gpu_fwd_compare || (enough_min && enough_collect);
+        if (gpu_strict_mode && gpu_fwd_active) run_cuda_fwd = TRUE;
         if (run_cuda_fwd) {
-          info->pli->gpu_fwd_launches++;
-          t0 = hmmsearch_WallTime();
-          status = p7_cuda_ForwardFilterDsqdataSubset(info->cuda_engine, info->cuda_msv, search_chu,
-                                                      gpu_fwd_idx, gpu_fwd_n, gpu_fwd_filtersc_subset,
-                                                      info->om->evparam[p7_FTAU], info->om->evparam[p7_FLAMBDA], info->pli->F3,
-                                                      fwd_score_ret, gpu_fwd_statuses, gpu_fwd_passed,
-                                                      errbuf, sizeof(errbuf));
-          info->pli->time_fwd += hmmsearch_WallTime() - t0;
-          if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward prefilter failed: %s\n", errbuf);
+          while (fwd_off < gpu_fwd_n) {
+            int t;
+            fwd_launch_n = gpu_ChooseTileCandidates(info, TRUE, gpu_fwd_n - fwd_off, fwd_res_left);
+            if (fwd_launch_n < 1) fwd_launch_n = gpu_fwd_n - fwd_off;
+            fwd_launch_res = 0;
+            for (t = 0; t < fwd_launch_n; t++) fwd_launch_res += (int) search_chu->L[gpu_fwd_idx[fwd_off + t]];
+            info->pli->gpu_fwd_launches++;
+            t0 = hmmsearch_WallTime();
+            status = p7_cuda_ForwardFilterDsqdataSubset(info->cuda_engine, info->cuda_msv, search_chu,
+                                                        gpu_fwd_idx + fwd_off, fwd_launch_n, gpu_fwd_filtersc_subset + fwd_off,
+                                                        info->om->evparam[p7_FTAU], info->om->evparam[p7_FLAMBDA], info->pli->F3,
+                                                        fwd_score_ret ? (fwd_score_ret + fwd_off) : NULL,
+                                                        gpu_fwd_statuses + fwd_off, gpu_fwd_passed + fwd_off,
+                                                        errbuf, sizeof(errbuf));
+            info->pli->time_fwd += hmmsearch_WallTime() - t0;
+            if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward prefilter failed: %s\n", errbuf);
+            fwd_off += fwd_launch_n;
+            fwd_res_left -= fwd_launch_res;
+          }
         }
 
         for (int j = 0; j < gpu_fwd_n; j++) {
@@ -1082,6 +1175,10 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           nullsc = gpu_nullsc[i];
 
           if (!run_cuda_fwd) {
+            if (gpu_strict_mode && gpu_fwd_active) {
+              p7_Fail("--gpu requested strict CUDA Forward, but launch gating skipped CUDA path for %d candidates/%d residues; adjust --gpu-fwd-min-* or --gpu-fwd-collect-* thresholds\n",
+                      gpu_fwd_n, gpu_fwd_res);
+            }
             float fwdsc;
             float filtersc = gpu_fwd_filtersc_subset[j];
             status = gpu_MaterializeSeq(info, dbsq, dbsq_dsqmem, dbsq_salloc, search_chu, i);
@@ -1089,7 +1186,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
             p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
             t0 = hmmsearch_WallTime();
             p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
-            info->pli->time_fwd += hmmsearch_WallTime() - t0;
+            {
+              double dt = hmmsearch_WallTime() - t0;
+              info->pli->time_fwd += dt;
+              info->pli->exact_cpu_survivor_total += dt;
+            }
             if (info->gpu_fb_parser) {
                 status = gpu_fb_batch_Add(info, &gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
                                           &gpu_fb_n, &gpu_fb_alloc, i, nullsc, filtersc, fwdsc);
@@ -1115,7 +1216,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
             p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
             t0 = hmmsearch_WallTime();
             status = p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &cpu_fwdsc);
-            info->pli->time_fwd += hmmsearch_WallTime() - t0;
+            {
+              double dt = hmmsearch_WallTime() - t0;
+              info->pli->time_fwd += dt;
+              info->pli->exact_cpu_survivor_total += dt;
+            }
             if (status == eslOK) {
               seq_score = (cpu_fwdsc - filtersc) / eslCONST_LOG2;
               cpuP = esl_exp_surv(seq_score, info->om->evparam[p7_FTAU], info->om->evparam[p7_FLAMBDA]);
@@ -1170,7 +1275,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
             p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
             t0 = hmmsearch_WallTime();
             p7_ForwardParser(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &fwdsc);
-            info->pli->time_fwd += hmmsearch_WallTime() - t0;
+            {
+              double dt = hmmsearch_WallTime() - t0;
+              info->pli->time_fwd += dt;
+              info->pli->exact_cpu_survivor_total += dt;
+            }
             if (info->gpu_fb_parser) {
               status = gpu_fb_batch_Append(&gpu_fb_idx, &gpu_fb_nullsc, &gpu_fb_filtersc, &gpu_fb_fwdsc,
                                            &gpu_fb_n, &gpu_fb_alloc, i, nullsc, filtersc, fwdsc);

@@ -272,19 +272,28 @@ p7_pipeline_Create(const ESL_GETOPTS *go, int M_hint, int L_hint, int long_targe
   pli->exact_gpu_h2d        = 0.0;
   pli->exact_gpu_kernel     = 0.0;
   pli->exact_gpu_d2h        = 0.0;
+  pli->exact_gpu_submit_overhead = 0.0;
+  pli->exact_gpu_wait_barrier = 0.0;
+  pli->exact_gpu_event_overhead = 0.0;
   pli->exact_gpu_dispatch_wait = 0.0;
   pli->exact_overlap_hidden_h2d = 0.0;
   pli->exact_overlap_hidden_d2h = 0.0;
   pli->exact_host_survivor_orchestration = 0.0;
+  pli->exact_cpu_survivor_total = 0.0;
   pli->exact_cpu_postfwd_domain_null2_output = 0.0;
+  pli->exact_other_legacy   = 0.0;
   pli->exact_other          = 0.0;
   pli->exact_wall           = 0.0;
   pli->gpu_vit_candidates_total = 0;
   pli->gpu_fwd_candidates_total = 0;
+  pli->gpu_vit_residues_total = 0;
+  pli->gpu_fwd_residues_total = 0;
   pli->gpu_vit_launches = 0;
   pli->gpu_fwd_launches = 0;
   pli->gpu_vit_avg_candidates_per_launch = 0.0;
   pli->gpu_fwd_avg_candidates_per_launch = 0.0;
+  pli->gpu_vit_avg_residues_per_launch = 0.0;
+  pli->gpu_fwd_avg_residues_per_launch = 0.0;
   pli->mode            = mode;
   pli->show_accessions = (go && esl_opt_GetBoolean(go, "--acc")   ? TRUE  : FALSE);
   pli->show_alignments = (go && esl_opt_GetBoolean(go, "--noali") ? FALSE : TRUE);
@@ -702,21 +711,32 @@ p7_pipeline_Merge(P7_PIPELINE *p1, P7_PIPELINE *p2)
   p1->exact_gpu_h2d        += p2->exact_gpu_h2d;
   p1->exact_gpu_kernel     += p2->exact_gpu_kernel;
   p1->exact_gpu_d2h        += p2->exact_gpu_d2h;
+  p1->exact_gpu_submit_overhead += p2->exact_gpu_submit_overhead;
+  p1->exact_gpu_wait_barrier += p2->exact_gpu_wait_barrier;
+  p1->exact_gpu_event_overhead += p2->exact_gpu_event_overhead;
   p1->exact_gpu_dispatch_wait += p2->exact_gpu_dispatch_wait;
   p1->exact_overlap_hidden_h2d += p2->exact_overlap_hidden_h2d;
   p1->exact_overlap_hidden_d2h += p2->exact_overlap_hidden_d2h;
   p1->exact_host_survivor_orchestration += p2->exact_host_survivor_orchestration;
+  p1->exact_cpu_survivor_total += p2->exact_cpu_survivor_total;
   p1->exact_cpu_postfwd_domain_null2_output += p2->exact_cpu_postfwd_domain_null2_output;
+  p1->exact_other_legacy   += p2->exact_other_legacy;
   p1->exact_other          += p2->exact_other;
   p1->exact_wall           += p2->exact_wall;
   p1->gpu_vit_candidates_total += p2->gpu_vit_candidates_total;
   p1->gpu_fwd_candidates_total += p2->gpu_fwd_candidates_total;
+  p1->gpu_vit_residues_total += p2->gpu_vit_residues_total;
+  p1->gpu_fwd_residues_total += p2->gpu_fwd_residues_total;
   p1->gpu_vit_launches += p2->gpu_vit_launches;
   p1->gpu_fwd_launches += p2->gpu_fwd_launches;
   p1->gpu_vit_avg_candidates_per_launch = (p1->gpu_vit_launches > 0)
     ? ((double) p1->gpu_vit_candidates_total / (double) p1->gpu_vit_launches) : 0.0;
   p1->gpu_fwd_avg_candidates_per_launch = (p1->gpu_fwd_launches > 0)
     ? ((double) p1->gpu_fwd_candidates_total / (double) p1->gpu_fwd_launches) : 0.0;
+  p1->gpu_vit_avg_residues_per_launch = (p1->gpu_vit_launches > 0)
+    ? ((double) p1->gpu_vit_residues_total / (double) p1->gpu_vit_launches) : 0.0;
+  p1->gpu_fwd_avg_residues_per_launch = (p1->gpu_fwd_launches > 0)
+    ? ((double) p1->gpu_fwd_residues_total / (double) p1->gpu_fwd_launches) : 0.0;
 
   if (p1->Z_setby == p7_ZSETBY_NTARGETS)
     {
@@ -1960,6 +1980,7 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
   if (pli->cuda_engine != NULL) {
     P7_CUDA_MSV_STATS stats;
     double exact_known;
+    double exact_known_legacy;
     double exact_total;
     double exact_wall;
     double exact_delta;
@@ -1970,6 +1991,9 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
                             stats.fwd_kernel_seconds + stats.vit_kernel_seconds + stats.bck_kernel_seconds;
     pli->exact_gpu_d2h = stats.d2h_seconds + stats.null_d2h_seconds + stats.bias_d2h_seconds +
                          stats.fwd_d2h_seconds + stats.vit_d2h_seconds + stats.bck_d2h_seconds;
+    pli->exact_gpu_submit_overhead = stats.submit_overhead_seconds;
+    pli->exact_gpu_wait_barrier = stats.wait_barrier_seconds;
+    pli->exact_gpu_event_overhead = stats.event_overhead_seconds;
     pli->exact_gpu_dispatch_wait = stats.dispatch_wait_seconds;
     pli->exact_overlap_hidden_h2d = stats.overlap_hidden_h2d_seconds;
     pli->exact_overlap_hidden_d2h = stats.overlap_hidden_d2h_seconds;
@@ -1977,9 +2001,20 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
       ? ((double) pli->gpu_vit_candidates_total / (double) pli->gpu_vit_launches) : 0.0;
     pli->gpu_fwd_avg_candidates_per_launch = (pli->gpu_fwd_launches > 0)
       ? ((double) pli->gpu_fwd_candidates_total / (double) pli->gpu_fwd_launches) : 0.0;
+    pli->gpu_vit_avg_residues_per_launch = (pli->gpu_vit_launches > 0)
+      ? ((double) pli->gpu_vit_residues_total / (double) pli->gpu_vit_launches) : 0.0;
+    pli->gpu_fwd_avg_residues_per_launch = (pli->gpu_fwd_launches > 0)
+      ? ((double) pli->gpu_fwd_residues_total / (double) pli->gpu_fwd_launches) : 0.0;
     exact_wall = (w != NULL) ? w->elapsed : pli->exact_wall;
+    exact_known_legacy = pli->exact_io_read_unpack + pli->exact_gpu_h2d + pli->exact_gpu_kernel + pli->exact_gpu_d2h +
+                         pli->exact_host_survivor_orchestration +
+                         pli->exact_cpu_postfwd_domain_null2_output;
+    pli->exact_other_legacy = exact_wall - exact_known_legacy;
+    if (fabs(pli->exact_other_legacy) < 1e-12) pli->exact_other_legacy = 0.0;
     exact_known = pli->exact_io_read_unpack + pli->exact_gpu_h2d + pli->exact_gpu_kernel + pli->exact_gpu_d2h +
+                  pli->exact_gpu_submit_overhead + pli->exact_gpu_wait_barrier + pli->exact_gpu_event_overhead +
                   pli->exact_host_survivor_orchestration +
+                  pli->exact_cpu_survivor_total +
                   pli->exact_cpu_postfwd_domain_null2_output;
     pli->exact_other = exact_wall - exact_known;
     if (fabs(pli->exact_other) < 1e-12) pli->exact_other = 0.0;
@@ -2029,20 +2064,29 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# CUDA overlap hidden D2H time: %.6f sec\n", stats.overlap_hidden_d2h_seconds);
     fprintf(ofp, "# CUDA Viterbi candidates total: %" PRIu64 "\n", pli->gpu_vit_candidates_total);
     fprintf(ofp, "# CUDA Forward candidates total: %" PRIu64 "\n", pli->gpu_fwd_candidates_total);
+    fprintf(ofp, "# CUDA Viterbi residues total: %" PRIu64 "\n", pli->gpu_vit_residues_total);
+    fprintf(ofp, "# CUDA Forward residues total: %" PRIu64 "\n", pli->gpu_fwd_residues_total);
     fprintf(ofp, "# CUDA Viterbi launches: %" PRIu64 "\n", pli->gpu_vit_launches);
     fprintf(ofp, "# CUDA Forward launches: %" PRIu64 "\n", pli->gpu_fwd_launches);
     fprintf(ofp, "# CUDA Viterbi avg candidates/launch: %.3f\n", pli->gpu_vit_avg_candidates_per_launch);
     fprintf(ofp, "# CUDA Forward avg candidates/launch: %.3f\n", pli->gpu_fwd_avg_candidates_per_launch);
+    fprintf(ofp, "# CUDA Viterbi avg residues/launch: %.3f\n", pli->gpu_vit_avg_residues_per_launch);
+    fprintf(ofp, "# CUDA Forward avg residues/launch: %.3f\n", pli->gpu_fwd_avg_residues_per_launch);
     fprintf(ofp, "# Exact timing note: legacy Stage/CUDA timings can overlap; Exact buckets are exclusive.\n");
     fprintf(ofp, "# Exact io_read_unpack: %.6f sec\n", pli->exact_io_read_unpack);
     fprintf(ofp, "# Exact gpu_h2d: %.6f sec\n", pli->exact_gpu_h2d);
     fprintf(ofp, "# Exact gpu_kernel: %.6f sec\n", pli->exact_gpu_kernel);
     fprintf(ofp, "# Exact gpu_d2h: %.6f sec\n", pli->exact_gpu_d2h);
+    fprintf(ofp, "# Exact gpu_submit_overhead: %.6f sec\n", pli->exact_gpu_submit_overhead);
+    fprintf(ofp, "# Exact gpu_wait_barrier: %.6f sec\n", pli->exact_gpu_wait_barrier);
+    fprintf(ofp, "# Exact gpu_event_overhead: %.6f sec\n", pli->exact_gpu_event_overhead);
     fprintf(ofp, "# Exact gpu_dispatch_wait: %.6f sec\n", pli->exact_gpu_dispatch_wait);
     fprintf(ofp, "# Exact overlap_hidden_h2d: %.6f sec\n", pli->exact_overlap_hidden_h2d);
     fprintf(ofp, "# Exact overlap_hidden_d2h: %.6f sec\n", pli->exact_overlap_hidden_d2h);
     fprintf(ofp, "# Exact host_survivor_orchestration: %.6f sec\n", pli->exact_host_survivor_orchestration);
+    fprintf(ofp, "# Exact cpu_survivor_total: %.6f sec\n", pli->exact_cpu_survivor_total);
     fprintf(ofp, "# Exact cpu_postfwd_domain_null2_output: %.6f sec\n", pli->exact_cpu_postfwd_domain_null2_output);
+    fprintf(ofp, "# Exact other_legacy: %.6f sec\n", pli->exact_other_legacy);
     fprintf(ofp, "# Exact other: %.6f sec\n", pli->exact_other);
     fprintf(ofp, "# Exact total: %.6f sec\n", exact_total);
     fprintf(ofp, "# Exact delta_vs_wall: %.9f sec %s\n", exact_delta, (fabs(exact_delta) <= 1e-6 ? "[OK]" : "[WARN]"));

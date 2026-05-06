@@ -90,6 +90,7 @@ parser.add_argument("--gpu-vit-collect-res", default="0")
 parser.add_argument("--gpu-fwd-collect-res", default="0")
 parser.add_argument("--gpu-vit-largem", action="store_true")
 parser.add_argument("--gpu-fwd-largem", action="store_true")
+parser.add_argument("--tag", default="")
 args = parser.parse_args()
 
 top = pathlib.Path(args.top_builddir)
@@ -112,7 +113,7 @@ if not (gpu_targetdb.with_suffix(gpu_targetdb.suffix + ".dsqi")).exists():
 
 summary = logs / "profmark-gpu-summary.tsv"
 with summary.open("w") as s:
-    s.write("query\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tpast_msv\tpast_bias\tpast_vit\tpast_fwd\tgpu_batches\tgpu_fwd_batches\tgpu_fwd_prefilter_batches\tgpu_fwd_parser_batches\tgpu_vit_batches\tgpu_bck_batches\tgpu_batch_seqs\tgpu_batch_res\tgpu_load_seqs\tgpu_load_res\tgpu_vit_min_seqs\tgpu_fwd_min_seqs\tgpu_vit_min_res\tgpu_fwd_min_res\tgpu_vit_collect_seqs\tgpu_fwd_collect_seqs\tgpu_vit_collect_res\tgpu_fwd_collect_res\tgpu_read\tgpu_meta\tgpu_survivor\tgpu_h2d\tgpu_kernel\tgpu_d2h\tgpu_null_h2d\tgpu_null_kernel\tgpu_null_d2h\tgpu_bias_h2d\tgpu_bias_kernel\tgpu_bias_d2h\tgpu_fwd_h2d\tgpu_fwd_kernel\tgpu_fwd_d2h\tgpu_fwd_sequences\tgpu_fwd_residues\tgpu_vit_h2d\tgpu_vit_kernel\tgpu_vit_d2h\tgpu_vit_sequences\tgpu_vit_residues\tgpu_bck_h2d\tgpu_bck_kernel\tgpu_bck_d2h\tgpu_bck_sequences\tgpu_bck_residues\tstage_null\tstage_msv_host\tstage_bias\tstage_vit\tstage_fwd\tstage_bck\tstage_domain\tstage_null2_output\n")
+    s.write("query\ttag\tcpu_wall\tgpu_wall\tspeedup\tcpu_only\tgpu_only\tpast_msv\tpast_bias\tpast_vit\tpast_fwd\tgpu_batches\tgpu_fwd_batches\tgpu_fwd_prefilter_batches\tgpu_fwd_parser_batches\tgpu_vit_batches\tgpu_bck_batches\tgpu_batch_seqs\tgpu_batch_res\tgpu_load_seqs\tgpu_load_res\tgpu_vit_min_seqs\tgpu_fwd_min_seqs\tgpu_vit_min_res\tgpu_fwd_min_res\tgpu_vit_collect_seqs\tgpu_fwd_collect_seqs\tgpu_vit_collect_res\tgpu_fwd_collect_res\tgpu_read\tgpu_meta\tgpu_survivor\tgpu_h2d\tgpu_kernel\tgpu_d2h\tgpu_dispatch_wait\tgpu_overlap_hidden_h2d\tgpu_overlap_hidden_d2h\texact_gpu_submit_overhead\texact_gpu_wait_barrier\texact_gpu_event_overhead\texact_cpu_survivor_total\texact_cpu_postfwd\texact_other_legacy\texact_other\tgpu_null_h2d\tgpu_null_kernel\tgpu_null_d2h\tgpu_bias_h2d\tgpu_bias_kernel\tgpu_bias_d2h\tgpu_fwd_h2d\tgpu_fwd_kernel\tgpu_fwd_d2h\tgpu_fwd_sequences\tgpu_fwd_residues\tgpu_vit_h2d\tgpu_vit_kernel\tgpu_vit_d2h\tgpu_vit_sequences\tgpu_vit_residues\tgpu_bck_h2d\tgpu_bck_kernel\tgpu_bck_d2h\tgpu_bck_sequences\tgpu_bck_residues\tgpu_vit_candidates_total\tgpu_fwd_candidates_total\tgpu_vit_residues_total\tgpu_fwd_residues_total\tgpu_vit_launches\tgpu_fwd_launches\tgpu_vit_avg_cands_per_launch\tgpu_fwd_avg_cands_per_launch\tgpu_vit_avg_res_per_launch\tgpu_fwd_avg_res_per_launch\tstage_null\tstage_msv_host\tstage_bias\tstage_vit\tstage_fwd\tstage_bck\tstage_domain\tstage_null2_output\n")
     for q in args.queries:
         sto = queries / (q + ".sto")
         hmm = queries / (q + ".hmm")
@@ -168,6 +169,16 @@ with summary.open("w") as s:
         h2d = parse_stat(gpu_out, "CUDA MSV H2D time:")
         kernel = parse_stat(gpu_out, "CUDA MSV kernel time:")
         d2h = parse_stat(gpu_out, "CUDA MSV D2H time:")
+        dispatch_wait = parse_stat(gpu_out, "CUDA dispatch wait time:")
+        overlap_hidden_h2d = parse_stat(gpu_out, "CUDA overlap hidden H2D time:")
+        overlap_hidden_d2h = parse_stat(gpu_out, "CUDA overlap hidden D2H time:")
+        exact_gpu_submit_overhead = parse_stat(gpu_out, "Exact gpu_submit_overhead:")
+        exact_gpu_wait_barrier = parse_stat(gpu_out, "Exact gpu_wait_barrier:")
+        exact_gpu_event_overhead = parse_stat(gpu_out, "Exact gpu_event_overhead:")
+        exact_cpu_survivor_total = parse_stat(gpu_out, "Exact cpu_survivor_total:")
+        exact_cpu_postfwd = parse_stat(gpu_out, "Exact cpu_postfwd_domain_null2_output:")
+        exact_other_legacy = parse_stat(gpu_out, "Exact other_legacy:")
+        exact_other = parse_stat(gpu_out, "Exact other:")
         null_h2d = parse_stat(gpu_out, "CUDA null H2D time:")
         null_kernel = parse_stat(gpu_out, "CUDA null kernel time:")
         null_d2h = parse_stat(gpu_out, "CUDA null D2H time:")
@@ -202,6 +213,16 @@ with summary.open("w") as s:
         gpu_fwd_parser_batches = parse_stat(gpu_out, "CUDA Forward parser batches:")
         gpu_vit_batches = parse_stat(gpu_out, "CUDA Viterbi batches:")
         gpu_bck_batches = parse_stat(gpu_out, "CUDA Backward batches:")
+        gpu_vit_candidates_total = parse_stat(gpu_out, "CUDA Viterbi candidates total:")
+        gpu_fwd_candidates_total = parse_stat(gpu_out, "CUDA Forward candidates total:")
+        gpu_vit_residues_total = parse_stat(gpu_out, "CUDA Viterbi residues total:")
+        gpu_fwd_residues_total = parse_stat(gpu_out, "CUDA Forward residues total:")
+        gpu_vit_launches = parse_stat(gpu_out, "CUDA Viterbi launches:")
+        gpu_fwd_launches = parse_stat(gpu_out, "CUDA Forward launches:")
+        gpu_vit_avg_cands_per_launch = parse_stat(gpu_out, "CUDA Viterbi avg candidates/launch:")
+        gpu_fwd_avg_cands_per_launch = parse_stat(gpu_out, "CUDA Forward avg candidates/launch:")
+        gpu_vit_avg_res_per_launch = parse_stat(gpu_out, "CUDA Viterbi avg residues/launch:")
+        gpu_fwd_avg_res_per_launch = parse_stat(gpu_out, "CUDA Forward avg residues/launch:")
         stage_null = parse_stat(gpu_out, "Stage null time:")
         stage_msv_host = parse_stat(gpu_out, "Stage MSV host time:")
         stage_bias = parse_stat(gpu_out, "Stage bias time:")
@@ -211,7 +232,7 @@ with summary.open("w") as s:
         stage_domain = parse_stat(gpu_out, "Stage domain time:")
         stage_null2_output = parse_stat(gpu_out, "Stage null2/output time:")
         row = [
-            q, "{:.3f}".format(cpu_wall), "{:.3f}".format(gpu_wall),
+            q, args.tag, "{:.3f}".format(cpu_wall), "{:.3f}".format(gpu_wall),
             "{:.3f}".format(cpu_wall / gpu_wall if gpu_wall > 0 else 0.0),
             str(len(cpu_names - gpu_names)), str(len(gpu_names - cpu_names)),
             past_msv, past_bias, past_vit, past_fwd,
@@ -222,11 +243,19 @@ with summary.open("w") as s:
             args.gpu_vit_collect_seqs, args.gpu_fwd_collect_seqs,
             args.gpu_vit_collect_res, args.gpu_fwd_collect_res,
             gpu_read, gpu_meta, gpu_survivor, h2d, kernel, d2h,
+            dispatch_wait, overlap_hidden_h2d, overlap_hidden_d2h,
+            exact_gpu_submit_overhead, exact_gpu_wait_barrier, exact_gpu_event_overhead,
+            exact_cpu_survivor_total, exact_cpu_postfwd, exact_other_legacy, exact_other,
             null_h2d, null_kernel, null_d2h,
             bias_h2d, bias_kernel, bias_d2h,
             fwd_h2d, fwd_kernel, fwd_d2h, fwd_sequences, fwd_residues,
             vit_h2d, vit_kernel, vit_d2h, vit_sequences, vit_residues,
             bck_h2d, bck_kernel, bck_d2h, bck_sequences, bck_residues,
+            gpu_vit_candidates_total, gpu_fwd_candidates_total,
+            gpu_vit_residues_total, gpu_fwd_residues_total,
+            gpu_vit_launches, gpu_fwd_launches,
+            gpu_vit_avg_cands_per_launch, gpu_fwd_avg_cands_per_launch,
+            gpu_vit_avg_res_per_launch, gpu_fwd_avg_res_per_launch,
             stage_null, stage_msv_host, stage_bias, stage_vit, stage_fwd,
             stage_bck, stage_domain, stage_null2_output,
         ]

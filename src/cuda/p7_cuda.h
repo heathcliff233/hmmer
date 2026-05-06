@@ -34,6 +34,9 @@ typedef struct p7_cuda_msv_stats_s {
   double   bck_kernel_seconds;
   double   bck_d2h_seconds;
   double   dispatch_wait_seconds;
+  double   submit_overhead_seconds;
+  double   wait_barrier_seconds;
+  double   event_overhead_seconds;
   double   overlap_hidden_h2d_seconds;
   double   overlap_hidden_d2h_seconds;
   uint64_t nseqs;

@@ -34,6 +34,12 @@ p7_cuda_engine_Create(int device_id, P7_CUDA_ENGINE **ret_engine, char *errbuf, 
   if (!engine) return eslEMEM;
   engine->device_id = device_id;
 
+  if ((status = cuda_status(cudaEventCreate(&engine->evt_h2d0), errbuf, errbuf_size, "cudaEventCreate(evt_h2d0)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaEventCreate(&engine->evt_h2d1), errbuf, errbuf_size, "cudaEventCreate(evt_h2d1)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaEventCreate(&engine->evt_k0),   errbuf, errbuf_size, "cudaEventCreate(evt_k0)"))   != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaEventCreate(&engine->evt_k1),   errbuf, errbuf_size, "cudaEventCreate(evt_k1)"))   != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaEventCreate(&engine->evt_d2h0), errbuf, errbuf_size, "cudaEventCreate(evt_d2h0)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaEventCreate(&engine->evt_d2h1), errbuf, errbuf_size, "cudaEventCreate(evt_d2h1)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMalloc((void **) &engine->d_raw, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(raw)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMalloc((void **) &engine->d_overflow, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(overflow)")) != eslOK) goto ERROR;
 
@@ -50,6 +56,12 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
 {
   if (!engine) return;
   cudaSetDevice(engine->device_id);
+  if (engine->evt_h2d0) cudaEventDestroy(engine->evt_h2d0);
+  if (engine->evt_h2d1) cudaEventDestroy(engine->evt_h2d1);
+  if (engine->evt_k0)   cudaEventDestroy(engine->evt_k0);
+  if (engine->evt_k1)   cudaEventDestroy(engine->evt_k1);
+  if (engine->evt_d2h0) cudaEventDestroy(engine->evt_d2h0);
+  if (engine->evt_d2h1) cudaEventDestroy(engine->evt_d2h1);
   if (engine->d_dsq)      cudaFree(engine->d_dsq);
   if (engine->h_dsq)      cudaFreeHost(engine->h_dsq);
   if (engine->d_offsets)  cudaFree(engine->d_offsets);
