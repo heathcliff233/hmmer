@@ -890,6 +890,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           info->pli->Z = info->pli->nseqs;
       }
 
+      { double surv_loop_t0 = hmmsearch_WallTime();
       for (int si = 0; si < gpu_f1_nsurv; si++) {
         i = gpu_f1_survivor_idx[si];
         if (search_chu->L[i] == 0) continue;
@@ -1010,7 +1011,12 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
         p7_pipeline_Reuse(info->pli);
         gpu_RestoreSeqStorage(dbsq, dbsq_dsqmem, dbsq_salloc);
       }
+      { double surv_loop_wall = hmmsearch_WallTime() - surv_loop_t0;
+        double surv_loop_known = 0.0;
+        info->pli->exact_survivor_loop_other += surv_loop_wall;
+      } }
 
+      { double vit_fwd_t0 = hmmsearch_WallTime();
       if ((info->gpu_vit_compare || gpu_vit_active) && gpu_vit_n > 0) {
         int run_cuda_vit;
         int enough_min;
@@ -1325,6 +1331,8 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                                     errbuf, sizeof(errbuf));
         if (status != eslOK) p7_Fail("--gpu requested, but CUDA Forward/Backward parser batch failed: %s\n", errbuf);
         gpu_fb_n = 0;
+      }
+      info->pli->exact_vit_fwd_dispatch += hmmsearch_WallTime() - vit_fwd_t0;
       }
       seq_cnt += gpu_processed_n;
       dbsq->dsq = NULL;

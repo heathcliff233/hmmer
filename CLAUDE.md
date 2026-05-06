@@ -99,9 +99,12 @@ The GPU path accelerates MSV + biased-composition filter in CUDA batches. Curren
 
 - Default path: CUDA MSV + bias with CPU-compatible F1 boundary checks
 - Opt-in later stages: `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`
-- Latest all-13 profmark: 1.792x speedup (CPU 29.69s → GPU 16.57s), zero parity errors
-- Remaining bottleneck: CPU survivor continuation after GPU filtering (4.48s of 16.57s)
+- Latest all-13 profmark (with later stages): 1.53x speedup (CPU 10.44s → GPU 6.83s), zero parity errors
+- GPU vs CPU-4 (4-thread): currently 0.72x cold (slower due to 260ms/query CUDA init), 1.29x warm
+- Dominant overhead: CUDA context initialization (260ms per query, 49.5% of GPU wall); amortizable by reusing engine across queries
+- Remaining bottleneck: host sync/blocking (32.8%), CPU survivor continuation (8.0%)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
+- Sequence packing uses bulk `smem` copy (single memcpy of dsqdata's contiguous buffer) with L+1 offset spacing
 
 ## Verification Checklist
 

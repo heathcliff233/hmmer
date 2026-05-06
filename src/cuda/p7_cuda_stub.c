@@ -67,6 +67,13 @@ p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_STATS *stats)
     stats->bck_nseqs       = 0;
     stats->bck_nres        = 0;
     stats->bck_nbatches    = 0;
+    stats->host_malloc_free_seconds    = 0.0;
+    stats->host_metadata_loop_seconds  = 0.0;
+    stats->host_event_ops_seconds      = 0.0;
+    stats->host_pack_loop_seconds      = 0.0;
+    stats->host_score_convert_seconds  = 0.0;
+    stats->host_sync_seconds           = 0.0;
+    stats->host_cudamemcpy_seconds     = 0.0;
   }
 }
 

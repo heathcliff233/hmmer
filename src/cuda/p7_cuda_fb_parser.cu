@@ -1395,8 +1395,9 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
       goto ERROR;
     }
     h_lengths[i] = (int) chu->L[i];
-    total += h_lengths[i] + 2;
+    total += h_lengths[i] + 1;
   }
+  total += 1;
   reuse_batch = (engine->batch_owner == chu && engine->batch_nseq == nseq && engine->batch_total == total);
 
   if (engine->dsq_alloc < total) {
@@ -1465,7 +1466,12 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
 
   cudaEventRecord(h2d0);
   if (!reuse_batch) {
-    for (int i = 0; i < nseq; i++) memcpy(engine->h_dsq + h_offsets[i], chu->dsq[i], h_lengths[i] + 2);
+    if (chu->smem != NULL) {
+      memcpy(engine->h_dsq, chu->smem, total);
+    } else {
+      for (int i = 0; i < nseq; i++)
+        memcpy(engine->h_dsq + h_offsets[i], chu->dsq[i], h_lengths[i] + 1);
+    }
     if ((status = cuda_status(cudaMemcpy(engine->d_dsq, engine->h_dsq, total, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser batch dsq)")) != eslOK) goto CUDA_ERROR;
     if ((status = cuda_status(cudaMemcpy(engine->d_offsets, h_offsets, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser offsets)")) != eslOK) goto CUDA_ERROR;
     if ((status = cuda_status(cudaMemcpy(engine->d_lengths, h_lengths, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser lengths)")) != eslOK) goto CUDA_ERROR;

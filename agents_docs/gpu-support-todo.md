@@ -19,14 +19,20 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 ## Open Work
 
-- Define a true `dsqdata` v2 or compatible length-index extension so GPU batch planning can use per-sequence lengths without relying on chunk unpacking.
-- Replace the CPU-compatible SSV/MSV boundary rescue only if a CUDA-native SSV-equivalent path preserves all-13 profmark parity and improves wall time.
-- Decide default policy for later-stage GPU work. Current evidence supports keeping `--gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser` opt-in until broader validation and auto-gating rules exist.
-- Broaden parser-state validation. Treat final hit parity and bounded posterior/domain inputs (`max_mocc`, `max_btot`, `max_etot`) as more meaningful than raw `p7X_SCALE` row differences alone.
-- Continue reducing CPU post-Fwd/domain/null2 costs after survivor-core migration; these remain the dominant accepted-scope CPU modules.
-- Investigate profile/candidate-shape auto-gating for short/fast CPU queries where later-stage CUDA launches can regress wall time.
-- Reduce `exact_other` (~0.24s/query) via CUDA stream-based overlap: pipeline H2D transfer of the next batch with kernel execution of the current batch, reducing synchronization gaps and amortizing CUDA API overhead. The per-sequence CPU loop is already eliminated by F1 gating; the remaining cost is host-side driver/memcpy overhead.
-- Consider larger batch sizes (>32K seqs) to reduce per-batch CUDA API call count (currently 7 batches per query × multiple API calls per batch).
+### High-impact optimizations
+- **CUDA engine reuse across queries** (highest priority): move `p7_cuda_engine_Create` outside the per-query loop so the ~260ms CUDA context init is paid once per process. Saves ~3.1s across 13 queries. The engine struct already supports reuse; barrier is the per-query create/destroy lifecycle in `hmmsearch.c`.
+- **CUDA stream-based overlap**: pipeline H2D of next batch with kernel of current batch, reducing the 2.24s host sync/blocking time.
+
+### Medium-priority work
+- Decide default policy for later-stage flags (`--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`). Needs broader validation and auto-gating for short profiles.
+- Eliminate multi-chunk view fallback path (~50% of batches still use per-sequence copy because `gpu_pending_max_chunks=2` creates multi-chunk views).
+- Consider larger batch sizes (>32K seqs) to reduce per-batch CUDA API call count.
+
+### Lower-priority / deferred
+- `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.
+- CUDA-native SSV-equivalent (only if it preserves profmark parity and improves wall time).
+- Profile/candidate-shape auto-gating for short queries where CUDA launches regress wall time.
+- Broaden parser-state validation beyond raw `p7X_SCALE` row differences.
 
 ## Validation Checklist
 

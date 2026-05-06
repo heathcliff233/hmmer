@@ -39,6 +39,13 @@ typedef struct p7_cuda_msv_stats_s {
   double   event_overhead_seconds;
   double   overlap_hidden_h2d_seconds;
   double   overlap_hidden_d2h_seconds;
+  double   host_malloc_free_seconds;
+  double   host_metadata_loop_seconds;
+  double   host_event_ops_seconds;
+  double   host_pack_loop_seconds;
+  double   host_score_convert_seconds;
+  double   host_sync_seconds;
+  double   host_cudamemcpy_seconds;
   uint64_t nseqs;
   uint64_t nres;
   uint64_t nbatches;

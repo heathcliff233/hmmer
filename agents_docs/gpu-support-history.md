@@ -41,25 +41,21 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - Failure reason: extra transfer overhead erased expected benefit.
 - Decision: reuse MSV-uploaded sequence buffers for bias stage.
 
-## What Was Tried And Worked (But Not Yet Default)
+## What Was Tried And Worked
 
-### 1) CUDA Viterbi prefilter (opt-in)
-- Outcome: parity-clean on checked all-13 and broader-12 compare runs.
-- Limitation: still experimental/default-off pending broader validation and policy.
+### 1) Later-stage CUDA prefilters (opt-in, default-off)
+- CUDA Viterbi, Forward, and Forward/Backward parser: all parity-clean on checked compare runs.
+- Remain opt-in (`--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`) pending broader validation and auto-gating policy for short profiles.
 
-### 2) CUDA Forward score prefilter (opt-in)
-- Outcome: parity-clean on checked compare runs; useful in combination with later stages.
-- Limitation: remains opt-in; short-profile and launch-overhead tradeoffs require gating policy.
+### 2) GPU-side F1 gating
+- Moved MSV/bias P-value gating to a CUDA kernel; batch loop now iterates only over compact survivor indices.
+- Adopted for architectural cleanliness. Performance gain was minimal (~5-10ms/query) because `exact_other` is dominated by CUDA host-side API overhead, not the per-sequence CPU loop.
 
-### 3) CUDA Forward/Backward parser handoff (opt-in)
-- Outcome: final hit parity on checked prepared runs; meaningful speedups on selected non-compare runs.
-- Limitation: raw scale-row diagnostics remain; requires broader acceptance criteria before default use.
-
-### 6) GPU-side F1 gating to eliminate per-sequence CPU loop
-- Attempt: moved MSV/bias P-value computation to a CUDA kernel (`cuda_f1_gating_kernel`) to produce a compact survivor index list, then restructured the batch loop to iterate only over survivors.
-- Outcome: adopted (architecturally cleaner), but performance gain was minimal (~5-10ms per query, not the ~200ms hypothesized).
-- Failure reason for performance hypothesis: the `exact_other` bucket was misattributed to the per-sequence CPU loop. Actual dominant cost is CUDA host-side API overhead (driver synchronization, cudaMemcpy setup, memcpy packing of 32K sequences into contiguous pinned memory).
-- Decision: keep the F1 gating kernel (correct, cleaner code, negligible GPU cost), but recognize that reducing `exact_other` requires stream-based overlap or larger batches, not loop elimination.
+### 3) Bulk smem copy
+- Replaced 32K individual `memcpy` calls per batch with a single bulk copy of the dsqdata chunk's contiguous `smem` buffer (L+1 offset spacing).
+- Pack loop halved (24ms → 12ms), warm-query wall reduced 19%.
+- Key insight: sequences in `chu->smem` are already contiguous with overlapping sentinels; CUDA kernels access only positions 1..L.
+- Limitation: multi-chunk batch views (`smem=NULL`) fall back to per-sequence copy.
 
 ## Current Correctness Boundary
 

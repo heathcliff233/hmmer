@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 extern "C" {
 #include "p7_cuda.h"
@@ -142,6 +143,14 @@ next_pow2_at_least(int n, int min_n)
   int p = min_n;
   while (p < n) p <<= 1;
   return p;
+}
+
+static inline double
+host_seconds(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double) ts.tv_sec + (double) ts.tv_nsec * 1e-9;
 }
 
 uint8_t cuda_unbiased_byteify(const P7_CUDA_MSVPROFILE *cuom, float sc);

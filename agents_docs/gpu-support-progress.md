@@ -28,77 +28,33 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 
 ## Benchmark Snapshot
 
-- Correctness-first all-13 profmark run in `benchmark-data/profmark-current/gpu-audit/cpu-bias-msv-rescue-all13/` with `--gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser`: CPU wall 26.82 sec, GPU wall 16.32 sec, aggregate speedup 1.643x, median speedup 1.508x, `cpu_only=0`, `gpu_only=0`.
-- Broader 12-query profmark run in `benchmark-data/profmark-current/gpu-audit/broader12-nocompare/` with the same later-stage flags: CPU wall 7.78 sec, GPU wall 7.05 sec, aggregate speedup 1.104x, `cpu_only=0`, `gpu_only=0`.
-- The broader 12-query MSV/bias baseline in `benchmark-data/profmark-current/gpu-audit/broader12-msvbias-baseline/` recorded GPU wall 7.88 sec; the later-stage path saved 0.83 sec but regressed a few short profiles slightly, so later stages remain default-off pending auto-gating policy.
-- Compare-mode runs are validation evidence, not speed claims. The current compare runs produced zero `CUDAVIT` and zero `CUDAFWD` diagnostics; `CUDAFB` raw scale-row diagnostics remain, but domain-decoding input maxima stayed below 0.00002 in the all-13 compare run.
-- Viterbi same-algorithm optimization (2026-05-05) in `benchmark-data/profmark-current/gpu-audit/vit-samealgo-all13-nocompare/`: CPU wall 28.66 sec, GPU wall 26.61 sec, aggregate speedup 1.077x, `cpu_only=0`, `gpu_only=0`; CUDA Viterbi total (H2D+kernel+D2H) 0.945 sec vs CPU stage Viterbi 3.861 sec from CPU logs (about 4.09x stage speedup; kernel 0.941 sec).
-- Same iteration, broader 12 non-compare in `benchmark-data/profmark-current/gpu-audit/vit-samealgo-broader12-nocompare/`: CPU wall 9.82 sec, GPU wall 7.85 sec, aggregate speedup 1.251x, `cpu_only=0`, `gpu_only=0`; CUDA Viterbi total 0.792 sec, while many profiles had no surviving CPU Viterbi work in the GPU run (`stage_vit` near 0 in GPU logs), so CPU-stage comparison should be taken from CPU outputs when evaluating stage-only speedup.
-- Compare validation for the same iteration: `benchmark-data/profmark-current/gpu-audit/vit-samealgo-all13-compare/` and `.../vit-samealgo-broader12-compare/` both had `cpu_only=0`, `gpu_only=0`, and zero `CUDAPREVIT`, `CUDAVIT`, `CUDAFWD`, `CUDAFB` diagnostics.
-- Post-Viterbi Forward/Backward refinement run (2026-05-05) added a pure-GPU F3 decision policy in normal mode and enabled the intended block-parallel Forward parser batch launch.
-  - Compare mode all-13 run: `benchmark-data/profmark-current/gpu-audit/postvit-fwdbck-refine-all13-compare-20260505/`
-    - Command:
-      - `python3 test-speed/x-hmmsearch-gpu-profmark . benchmark-data/profmark-current/work benchmark-data/profmark-current/gpu-audit/postvit-fwdbck-refine-all13-compare-20260505 14-3-3 2-Hacid_dh 23S_rRNA_IVP 2OG-FeII_Oxy_2 3keto-disac_hyd 4TM_phosphoesterase 7tm_1 7tm_3 A2M_BRD AAA_15 ATG2_CAD Nup192 Tra1_ring --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser --gpu-previt-compare --gpu-vit-compare --gpu-fwd-compare --gpu-fb-compare --gpu-vit-min-seqs 1 --gpu-fwd-min-seqs 1`
-    - Aggregate wall summary: CPU wall 30.86 sec, GPU wall 81.64 sec (compare mode intentionally heavy), `cpu_only=0`, `gpu_only=0`.
-    - Compare diagnostics:
-      - `CUDAVIT_SUMMARY` present for all 13 queries with `status_mismatch=0`, `pass_mismatch=0`, `score_drift=0`.
-      - `CUDAFWD`: zero lines (no Forward pass/fail or score mismatches reported).
-      - `CUDAFB`: present (139 lines) with bounded DomainDecoding inputs; maxima from diagnostics sweep:
-        - `max_mocc <= 0.000007`
-        - `max_btot <= 0.000012`
-        - `max_etot <= 0.000019`
-      - `CUDAFB` raw `xmx` row deltas remain (up to `max_fwd=max_bck=0.9375`) but did not produce hit-set parity failures.
-  - Non-compare all-13 run: `benchmark-data/profmark-current/gpu-audit/postvit-fwdbck-refine-all13-nocompare-20260505/`
-    - Command:
-      - `python3 test-speed/x-hmmsearch-gpu-profmark . benchmark-data/profmark-current/work benchmark-data/profmark-current/gpu-audit/postvit-fwdbck-refine-all13-nocompare-20260505 14-3-3 2-Hacid_dh 23S_rRNA_IVP 2OG-FeII_Oxy_2 3keto-disac_hyd 4TM_phosphoesterase 7tm_1 7tm_3 A2M_BRD AAA_15 ATG2_CAD Nup192 Tra1_ring --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser --gpu-vit-min-seqs 1 --gpu-fwd-min-seqs 1`
-    - Aggregate wall summary: CPU wall 29.69 sec, GPU wall 16.57 sec, aggregate speedup 1.792x, `cpu_only=0`, `gpu_only=0`.
-    - Stage-speed gate:
-      - `CPU_FWD_BCK = sum(stage_fwd + stage_bck) = 2.622675 sec`
-      - `GPU_KERNEL_FWD_BCK = sum(gpu_fwd_kernel + gpu_bck_kernel) = 0.643210 sec`
-      - `CPU_FWD_BCK / GPU_KERNEL_FWD_BCK = 4.077x` (passes 3.0x gate).
-  - Regression sanity baseline (MSV/bias-only path): `benchmark-data/profmark-current/gpu-audit/postvit-fwdbck-refine-baseline-all13-20260505/`
-    - Command:
-      - `python3 test-speed/x-hmmsearch-gpu-profmark . benchmark-data/profmark-current/work benchmark-data/profmark-current/gpu-audit/postvit-fwdbck-refine-baseline-all13-20260505 14-3-3 2-Hacid_dh 23S_rRNA_IVP 2OG-FeII_Oxy_2 3keto-disac_hyd 4TM_phosphoesterase 7tm_1 7tm_3 A2M_BRD AAA_15 ATG2_CAD Nup192 Tra1_ring`
-    - Baseline aggregate: CPU wall 28.42 sec, GPU wall 19.49 sec, aggregate speedup 1.458x, `cpu_only=0`, `gpu_only=0`.
-    - Stage-counter sanity versus refined non-compare run:
-      - Total `past_msv`, `past_bias`, `past_vit`, `past_fwd` matched exactly (`117182`, `54504`, `4152`, `210`).
-  - Current bottleneck signal from the same non-compare all-13 run:
-    - Largest aggregate bucket is host survivor continuation (`gpu_survivor = 4.481900 sec`).
-    - Next largest CPU-side stage totals are `stage_msv_host = 3.123544 sec`, `stage_vit = 2.578773 sec`, and `stage_fwd = 2.191749 sec`.
-    - This confirms end-to-end speed is still mostly constrained by CPU continuation after GPU filtering, even though FWD/BCK kernel compute passes the 3x stage-speed gate.
-  - Bottleneck refinement (2026-05-06): the `exact_other` bucket (~0.24s/query, ~3.1s aggregate) is NOT the per-sequence CPU loop (which was only ~5-10ms). It is CUDA host-side API overhead: driver synchronization, cudaMemcpy setup, and the memcpy packing loop that copies 32K sequences into contiguous pinned memory per batch. Reducing `exact_other` requires stream-based overlap (pipelining H2D of next batch with kernel of current batch) or larger batches to amortize per-batch API costs.
-- Resident survivor-core timing/decision migration run (2026-05-05) added exact-sum timing, GPU-side Viterbi/F3 decision buffers, delayed sequence metadata materialization, and zero-copy `P7_OMX` special-state views over batched parser output.
-  - Compare mode all-13 run: `benchmark-data/profmark-current/gpu-audit/survivor-core-all13-compare-20260505/`
-    - Command:
-      - `python3 test-speed/x-hmmsearch-gpu-profmark . benchmark-data/profmark-current/work benchmark-data/profmark-current/gpu-audit/survivor-core-all13-compare-20260505 14-3-3 2-Hacid_dh 23S_rRNA_IVP 2OG-FeII_Oxy_2 3keto-disac_hyd 4TM_phosphoesterase 7tm_1 7tm_3 A2M_BRD AAA_15 ATG2_CAD Nup192 Tra1_ring --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser --gpu-previt-compare --gpu-vit-compare --gpu-fwd-compare --gpu-fb-compare --gpu-vit-min-seqs 1 --gpu-fwd-min-seqs 1`
-    - Aggregate wall summary: CPU wall 28.73 sec, GPU wall 80.56 sec (compare mode intentionally heavy), `cpu_only=0`, `gpu_only=0`.
-    - Boundary diagnostics: `CUDAPREVIT` status/pass mismatches were zero; `CUDAVIT_SUMMARY` totals had `status_mismatch=0`, `pass_mismatch=0`, `score_drift=0`; `CUDAFWD` emitted zero mismatch lines.
-    - `CUDAFB` emitted 139 bounded parser diagnostics; all GPU outputs printed `Exact delta_vs_wall: 0.000000000 sec [OK]`.
-  - Non-compare all-13 run: `benchmark-data/profmark-current/gpu-audit/survivor-core-all13-nocompare-20260505/`
-    - Command:
-      - `python3 test-speed/x-hmmsearch-gpu-profmark . benchmark-data/profmark-current/work benchmark-data/profmark-current/gpu-audit/survivor-core-all13-nocompare-20260505 14-3-3 2-Hacid_dh 23S_rRNA_IVP 2OG-FeII_Oxy_2 3keto-disac_hyd 4TM_phosphoesterase 7tm_1 7tm_3 A2M_BRD AAA_15 ATG2_CAD Nup192 Tra1_ring --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser --gpu-vit-min-seqs 1 --gpu-fwd-min-seqs 1`
-    - Aggregate wall summary: CPU wall 29.64 sec, GPU wall 18.14 sec, aggregate speedup 1.634x, `cpu_only=0`, `gpu_only=0`.
-    - Exact timing reconciled on all 13 GPU outputs (`Exact delta_vs_wall` within `1e-6` and printed `[OK]`).
-    - Stage-speed gate still passed: `CPU_FWD_BCK / GPU_KERNEL_FWD_BCK = 4.678x`.
-    - Performance gates did not pass on this run: `gpu_survivor = 5.330384 sec` versus target `<= 3.14 sec`, and GPU wall 18.14 sec versus target `<= 16.57 sec`.
-  - Large-profile activation experiments were measured and reverted:
-    - Widening both Viterbi and Forward/parser activation was parity-clean on `ATG2_CAD`, `Nup192`, and `Tra1_ring`, but GPU wall rose to 135.69 sec in compare mode because large-profile Forward/parser kernels dominated.
-    - Widening only Viterbi reduced hot3 `gpu_survivor` from the previous 4.330335 sec to 1.771558 sec, but worsened hot3 non-compare GPU wall from 9.34 sec to 11.88 sec because the current large-profile CUDA Viterbi kernel was slower than the CPU SSE continuation.
-    - The accepted code therefore retains the existing conservative Viterbi/Forward activation caps while preserving the new GPU-side decision APIs for the profile sizes where they are beneficial.
-- GPU-side F1 gating run (2026-05-06) added `p7_cuda_F1GatingDsqdataChunk()` to move MSV/bias P-value gating to GPU and restructured the batch loop to iterate only over compact survivor indices.
-  - Non-compare all-13 run: `benchmark-data/profmark-current/gpu-audit/f1-gating-run/`
-    - Command: `hmmsearch --gpu --cpu 0 --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser` on each of 13 queries individually.
-    - Hit parity: `cpu_only=0`, `gpu_only=0` for all 13 queries.
-    - Timing: `exact_other` ranged 0.21-0.27s per query (baseline was 0.22-0.25s); improvement was ~3-7ms per query, not the ~200ms initially hypothesized.
-    - Root cause analysis: `exact_other` is dominated by CUDA host-side API overhead (driver calls, synchronization gaps, memcpy packing of 32K sequences into contiguous pinned buffers) rather than the per-sequence CPU loop. The per-sequence P-value computation + `p7_pipeline_Reuse` was only ~5-10ms of the ~240ms `exact_other` bucket.
-    - Architectural benefit: the batch loop is now cleaner (survivor-only iteration), and the F1 gating kernel adds negligible GPU time (<1ms).
+**Current best (2026-05-06):** smem-optimized run in `benchmark-data/profmark-current/gpu-audit/smem-opt-run/`
+- Flags: `--gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser`
+- Profmark aggregate: CPU wall 10.44 sec, GPU wall 6.83 sec, speedup 1.53x, `cpu_only=0`, `gpu_only=0`.
+- Manual `time` measurements (same 13 queries):
+  - CPU single-thread: 13.58s | CPU 4-thread: 5.55s | GPU cold: 7.68s | GPU warm (amortized init): ~4.30s
+  - GPU vs CPU-1: 1.77x | GPU vs CPU-4 cold: 0.72x | GPU vs CPU-4 warm: 1.29x
+- GPU wall breakdown (6.83s):
+  - CUDA context init: 3.38s (49.5%) — 260ms × 13 queries, amortizable with engine reuse
+  - Host sync/blocking: 2.24s (32.8%) — host waiting for synchronous GPU ops
+  - GPU kernel execution: 0.49s (7.2%)
+  - CPU survivor work: 0.43s (6.3%)
+  - CPU postfwd/domain/null2: 0.12s (1.7%)
+  - Host in-loop overhead: 0.11s (1.6%)
+  - GPU H2D + D2H transfers: 0.07s (0.9%)
+
+**Key historical milestones (superseded runs in `benchmark-data/profmark-current/gpu-audit/`):**
+- Pre-smem baseline (all-13, later-stage flags): CPU 29.69s, GPU 16.57s, 1.792x speedup.
+- MSV/bias-only baseline (all-13): CPU 28.42s, GPU 19.49s, 1.458x speedup.
+- Compare-mode validation: zero `CUDAVIT`/`CUDAFWD` mismatches; `CUDAFB` bounded (max_mocc ≤ 0.000007, max_btot ≤ 0.000012, max_etot ≤ 0.000019).
+- Large-profile Viterbi/Forward activation: tested and reverted — current CUDA kernels are slower than CPU SSE for large profiles.
+- GPU-side F1 gating: adopted for architectural cleanliness, but performance gain was only ~5-10ms/query (not the ~200ms hypothesized).
 
 ## Open Risks
 
-- A fully CUDA-native SSV-equivalent boundary remains deferred. A direct diagonal CUDA port over CPU `sbv` was tested and reverted because it did not reproduce CPU `p7_SSVFilter()` behavior.
-- Viterbi and Forward score prefilters are parity-clean on the checked profmark samples but still need broader validation and a default/auto-gating policy.
-- Forward/Backward parser handoff has useful timing evidence and bounded posterior/domain input differences, but raw `p7X_SCALE` row diagnostics are still open.
-- Backward, domain definition, null2, hit storage, thresholding, and output should remain CPU-side for accepted/default paths.
+- CUDA-native SSV-equivalent boundary deferred (direct diagonal port did not reproduce CPU `p7_SSVFilter()` behavior).
+- Later-stage prefilters (Viterbi, Forward, FB parser) are parity-clean on checked samples but need broader validation before becoming default.
+- FB parser raw `p7X_SCALE` row diagnostics remain open (bounded posterior inputs are acceptable).
 
 ## Verification Guidance
 

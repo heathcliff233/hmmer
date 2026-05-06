@@ -1270,6 +1270,8 @@ typedef struct p7_pipeline_s {
   double        exact_host_survivor_orchestration; /* exclusive host survivor setup */
   double        exact_cpu_survivor_total;   /* exclusive CPU survivor continuation total */
   double        exact_cpu_postfwd_domain_null2_output; /* exclusive CPU post-Fwd work */
+  double        exact_survivor_loop_other;  /* survivor loop time not in other exact buckets */
+  double        exact_vit_fwd_dispatch;     /* Viterbi/Forward GPU dispatch + post-processing */
   double        exact_other_legacy;         /* residual using legacy exact-known formula */
   double        exact_other;                /* residual exclusive wall bucket */
   double        exact_wall;                 /* enclosing elapsed wall for exact buckets */

@@ -268,8 +268,9 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
       goto ERROR;
     }
     h_lengths[i] = (int) chu->L[i];
-    total += h_lengths[i] + 2;
+    total += h_lengths[i] + 1;
   }
+  total += 1;
   reuse_batch = (engine->batch_owner == chu && engine->batch_nseq == nseq && engine->batch_total == total);
 
   if (engine->dsq_alloc < total) {
@@ -347,7 +348,12 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   cudaEventRecord(h2d0);
   if (!reuse_batch) {
     double tsp0 = seconds_now_vit();
-    for (int i = 0; i < nseq; i++) memcpy(engine->h_dsq + h_offsets[i], chu->dsq[i], h_lengths[i] + 2);
+    if (chu->smem != NULL) {
+      memcpy(engine->h_dsq, chu->smem, total);
+    } else {
+      for (int i = 0; i < nseq; i++)
+        memcpy(engine->h_dsq + h_offsets[i], chu->dsq[i], h_lengths[i] + 1);
+    }
     submit_overhead += (seconds_now_vit() - tsp0);
     if ((status = cuda_status(cudaMemcpy(engine->d_dsq, engine->h_dsq, total, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(batch dsq)")) != eslOK) goto CUDA_ERROR;
     if ((status = cuda_status(cudaMemcpy(engine->d_offsets, h_offsets, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(offsets)")) != eslOK) goto CUDA_ERROR;

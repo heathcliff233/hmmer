@@ -281,6 +281,8 @@ p7_pipeline_Create(const ESL_GETOPTS *go, int M_hint, int L_hint, int long_targe
   pli->exact_host_survivor_orchestration = 0.0;
   pli->exact_cpu_survivor_total = 0.0;
   pli->exact_cpu_postfwd_domain_null2_output = 0.0;
+  pli->exact_survivor_loop_other = 0.0;
+  pli->exact_vit_fwd_dispatch = 0.0;
   pli->exact_other_legacy   = 0.0;
   pli->exact_other          = 0.0;
   pli->exact_wall           = 0.0;
@@ -720,6 +722,8 @@ p7_pipeline_Merge(P7_PIPELINE *p1, P7_PIPELINE *p2)
   p1->exact_host_survivor_orchestration += p2->exact_host_survivor_orchestration;
   p1->exact_cpu_survivor_total += p2->exact_cpu_survivor_total;
   p1->exact_cpu_postfwd_domain_null2_output += p2->exact_cpu_postfwd_domain_null2_output;
+  p1->exact_survivor_loop_other += p2->exact_survivor_loop_other;
+  p1->exact_vit_fwd_dispatch += p2->exact_vit_fwd_dispatch;
   p1->exact_other_legacy   += p2->exact_other_legacy;
   p1->exact_other          += p2->exact_other;
   p1->exact_wall           += p2->exact_wall;
@@ -2062,6 +2066,13 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# CUDA dispatch wait time: %.6f sec\n", stats.dispatch_wait_seconds);
     fprintf(ofp, "# CUDA overlap hidden H2D time: %.6f sec\n", stats.overlap_hidden_h2d_seconds);
     fprintf(ofp, "# CUDA overlap hidden D2H time: %.6f sec\n", stats.overlap_hidden_d2h_seconds);
+    fprintf(ofp, "# Host malloc_free time: %.6f sec\n", stats.host_malloc_free_seconds);
+    fprintf(ofp, "# Host metadata_loop time: %.6f sec\n", stats.host_metadata_loop_seconds);
+    fprintf(ofp, "# Host event_ops time: %.6f sec\n", stats.host_event_ops_seconds);
+    fprintf(ofp, "# Host pack_loop time: %.6f sec\n", stats.host_pack_loop_seconds);
+    fprintf(ofp, "# Host score_convert time: %.6f sec\n", stats.host_score_convert_seconds);
+    fprintf(ofp, "# Host sync time: %.6f sec\n", stats.host_sync_seconds);
+    fprintf(ofp, "# Host cudamemcpy time: %.6f sec\n", stats.host_cudamemcpy_seconds);
     fprintf(ofp, "# CUDA Viterbi candidates total: %" PRIu64 "\n", pli->gpu_vit_candidates_total);
     fprintf(ofp, "# CUDA Forward candidates total: %" PRIu64 "\n", pli->gpu_fwd_candidates_total);
     fprintf(ofp, "# CUDA Viterbi residues total: %" PRIu64 "\n", pli->gpu_vit_residues_total);
@@ -2086,6 +2097,8 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# Exact host_survivor_orchestration: %.6f sec\n", pli->exact_host_survivor_orchestration);
     fprintf(ofp, "# Exact cpu_survivor_total: %.6f sec\n", pli->exact_cpu_survivor_total);
     fprintf(ofp, "# Exact cpu_postfwd_domain_null2_output: %.6f sec\n", pli->exact_cpu_postfwd_domain_null2_output);
+    fprintf(ofp, "# Exact survivor_loop_other: %.6f sec\n", pli->exact_survivor_loop_other);
+    fprintf(ofp, "# Exact vit_fwd_dispatch: %.6f sec\n", pli->exact_vit_fwd_dispatch);
     fprintf(ofp, "# Exact other_legacy: %.6f sec\n", pli->exact_other_legacy);
     fprintf(ofp, "# Exact other: %.6f sec\n", pli->exact_other);
     fprintf(ofp, "# Exact total: %.6f sec\n", exact_total);
