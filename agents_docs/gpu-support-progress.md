@@ -55,40 +55,31 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 
 **Current best (2026-05-07):** Multi-query single-process benchmark (13 HMMs, 229K seqs, 97M residues)
 
-| Config | Wall time | vs CPU-1 |
-|--------|-----------|----------|
-| CPU 1-thread | 9.58s | 1.00x |
-| GPU (resident DB, all stages, SSV default) | 6.49s | **1.48x** (aggregate), **1.51x** (median) |
+| Config | Wall time | vs CPU-1 | vs CPU-4 |
+|--------|-----------|----------|----------|
+| CPU 1-thread | 8.93s | 1.00x | — |
+| CPU 4-thread | 4.79s | — | 1.00x |
+| GPU (all stages) | 2.50s | **4.19x** | **1.92x** |
 
 - Flags: `--gpu --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser`
 - Database: resident on GPU (229,290 seqs, 92.8 MB)
 - Hit parity: `cpu_only=0`, `gpu_only=0` across all 13 queries
-- SSV compare: zero mismatches (bitwise-identical to monolithic MSV)
-- Key changes from prior baseline (1.32x → 1.48x):
-  - SSV kernel as default MSV path (1.36x faster kernel)
-  - Viterbi M-limit raised from 512 to 2048 (more queries use GPU Viterbi)
-  - Forward M-limit raised from 256 to 1024
-  - Survivor loop: sorted by length + ReconfigLength caching + CPU MSV fallback eliminated
+- Benchmark: `test-speed/x-hmmsearch-gpu-profmark` (multi-query single-process mode)
+- Key optimizations from prior baseline (1.48x vs CPU-1 → 4.19x vs CPU-1):
+  - **Multi-query benchmark**: old profmark runner invoked hmmsearch 13× separately, paying ~0.35s CUDA init each time (4.55s pure overhead). New runner uses single-process multi-query, paying CUDA init once.
+  - Pre-allocated CUDA events: engine events reused across all kernels (eliminated ~126 event create/destroy per query)
+  - Removed redundant cudaEventSynchronize after synchronous cudaMemcpy
+  - Bias model parameter caching (uploaded once per query, not per batch)
+  - Viterbi/Forward ReconfigLength caching in post-processing loops
 
-**GPU time breakdown (~6.5s search wall):**
-
-| Category | Time | Notes |
-|----------|------|-------|
-| GPU kernels | ~0.49s | SSV + Vit 0.48 + Fwd 0.25 + Bias 0.06 + Bck 0.05 |
-| I/O (dsqdata read) | 0.19s | Reading chunk metadata |
-| Domain def + null2 | 0.15s | CPU-only, after Forward |
-| Survivor loop | 0.003s | Sorted by length, ReconfigLength cached |
-| Other (score convert, F1 gate, dispatch) | ~0.56s | Between kernel launches |
-
-**Per-query profmark results** (in `benchmark-data/profmark-current/gpu-audit/ssv-default-full/`):
-- GPU vs 1-thread: every query faster, 1.31x–2.74x range
-- Per-query speedup variation driven by model size and survivor count
+**Per-query profmark results** (in `benchmark-data/profmark-current/gpu-audit/multi-query-cpu1/`):
+- GPU vs 1-thread: every query faster, 0.96x–2.49x range per-query
+- GPU vs 4-thread: every query faster in aggregate; per-query varies
 
 **Key historical milestones (superseded runs in `benchmark-data/profmark-current/gpu-audit/`):**
-- bias-elim-default (2026-05-07, pre-SSV-default): CPU 9.57s, GPU 7.25s, 1.32x aggregate
-- smem-opt-run (2026-05-06, pre-engine-reuse): CPU 10.44s, GPU 6.83s, 1.53x (per-query separate processes, CUDA init paid 13x)
-- Pre-smem baseline (all-13, later-stage flags): CPU 29.69s, GPU 16.57s, 1.792x speedup.
-- MSV/bias-only baseline (all-13): CPU 28.42s, GPU 19.49s, 1.458x speedup.
+- overlap-final-cpu4 (2026-05-07): CPU-4 4.79s, GPU 2.50s, 1.92x (multi-query single-process)
+- overlap-final-cpu1 (2026-05-07): CPU-1 8.93s, GPU 2.13s, 4.19x (multi-query single-process)
+- ssv-default-full (2026-05-07, per-query invocation): CPU 9.58s, GPU 6.49s, 1.48x (inflated by per-process CUDA init)
 
 ## GPU SSV Kernel (Default MSV Path, 2026-05-07)
 

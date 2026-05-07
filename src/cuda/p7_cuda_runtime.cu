@@ -108,6 +108,7 @@ p7_cuda_engine_Reset(P7_CUDA_ENGINE *engine)
   engine->batch_owner = NULL;
   engine->batch_nseq  = 0;
   engine->batch_total = 0;
+  engine->bias_params_uploaded = 0;
   memset(&engine->stats, 0, sizeof(engine->stats));
 }
 

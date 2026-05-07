@@ -99,3 +99,16 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - Exact final hit parity is demonstrated on prepared all-13 and broader-12 checked samples when using current accepted boundary handling.
 - Later stages (`--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`) are promising but remain opt-in/default-off by policy.
 - Open work is maintained in `gpu-support-todo.md`; current accepted state is maintained in `gpu-support-progress.md`.
+
+### 8) GPU pipeline overlap and efficiency refinements (2026-05-07)
+- Problem: GPU pipeline had redundant synchronization, per-call event creation, and repeated bias parameter uploads. Combined: ~0.05s wasted per query.
+- Solution: (a) use pre-allocated engine events for all SSV/bias functions (eliminated ~126 event create/destroy per query), (b) remove redundant `cudaEventSynchronize` after synchronous `cudaMemcpy`, (c) cache bias model parameters with `engine->bias_params_uploaded` flag, (d) add ReconfigLength caching to Viterbi/Forward post-processing loops.
+- Rejected sub-optimization: CPU null score computation (`logf` on host) broke parity — x86 and CUDA `logf` implementations differ enough to flip borderline threshold decisions. GPU null kernel retained.
+- Outcome: event overhead eliminated, ReconfigLength calls reduced. Combined with multi-query benchmark fix, GPU achieves 1.92x vs CPU-4 and 4.19x vs CPU-1 on all-13 profmark.
+- Files: `src/cuda/p7_cuda_ssv.cu`, `src/cuda/p7_cuda_bias.cu`, `src/cuda/p7_cuda_runtime.cu`, `src/cuda/p7_cuda_internal.h`, `src/hmmsearch_gpu.c`.
+
+### 9) Multi-query profmark benchmark fix (2026-05-07)
+- Problem: `test-speed/x-hmmsearch-gpu-profmark` invoked hmmsearch once per query (13 separate processes). Each GPU invocation paid ~0.35s CUDA initialization overhead, inflating GPU total by ~4.55s. This made GPU appear 0.6x vs CPU-4, when in reality a single-process multi-query search shows 2.20x vs CPU-4.
+- Solution: rewrote the profmark runner to concatenate all HMMs into one file, `hmmpress` it, and run hmmsearch once for CPU and once for GPU. Per-query hit parity parsed from tblout (column 3 = query name). Per-query GPU timing parsed from output blocks between `Query:` and `//` delimiters.
+- Outcome: benchmark now correctly reports GPU 1.92x vs CPU-4 and 4.19x vs CPU-1.
+- Files: `test-speed/x-hmmsearch-gpu-profmark`.

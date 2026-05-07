@@ -323,7 +323,9 @@ p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   int *h_raw = NULL;
   int *h_overflow = NULL;
   size_t shmem = (size_t) (cuom->M + 1) * 2;
-  cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
+  cudaEvent_t h2d0 = engine->evt_h2d0, h2d1 = engine->evt_h2d1;
+  cudaEvent_t k0 = engine->evt_k0, k1 = engine->evt_k1;
+  cudaEvent_t d2h0 = engine->evt_d2h0, d2h1 = engine->evt_d2h1;
   double ht0;
 
   if (!engine || !cuom || !chu || !scores || !statuses) return eslEINVAL;
@@ -397,15 +399,6 @@ p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   }
 
   ht0 = host_seconds();
-  cudaEventCreate(&h2d0);
-  cudaEventCreate(&h2d1);
-  cudaEventCreate(&k0);
-  cudaEventCreate(&k1);
-  cudaEventCreate(&d2h0);
-  cudaEventCreate(&d2h1);
-  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
-
-  ht0 = host_seconds();
   if (chu->smem != NULL) {
     memcpy(engine->h_dsq, chu->smem, total);
   } else {
@@ -422,9 +415,6 @@ p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   if ((status = cuda_status(cudaMemcpy(engine->d_tjb_by_seq, h_tjb_by_seq, sizeof(uint8_t) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(ssv tjb)")) != eslOK) goto CUDA_ERROR;
   engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   cudaEventRecord(h2d1);
-  ht0 = host_seconds();
-  cudaEventSynchronize(h2d1);
-  engine->stats.host_sync_seconds += host_seconds() - ht0;
 
   cudaEventRecord(k0);
   cuda_ssv_opt_kernel<<<nseq, P7_CUDA_MSV_BLOCK_THREADS, shmem>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths, engine->d_tjb_by_seq, nseq,
@@ -444,9 +434,6 @@ p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   if ((status = cuda_status(cudaMemcpy(h_overflow, engine->d_overflow, sizeof(int) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(ssv overflow)")) != eslOK) goto CUDA_ERROR;
   engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   cudaEventRecord(d2h1);
-  ht0 = host_seconds();
-  cudaEventSynchronize(d2h1);
-  engine->stats.host_sync_seconds += host_seconds() - ht0;
 
   engine->batch_owner = chu;
   engine->batch_nseq  = nseq;
@@ -475,14 +462,6 @@ p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   engine->stats.host_score_convert_seconds += host_seconds() - ht0;
 
 CUDA_ERROR:
-  ht0 = host_seconds();
-  cudaEventDestroy(h2d0);
-  cudaEventDestroy(h2d1);
-  cudaEventDestroy(k0);
-  cudaEventDestroy(k1);
-  cudaEventDestroy(d2h0);
-  cudaEventDestroy(d2h1);
-  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
 ERROR:
   ht0 = host_seconds();
   free(h_offsets);
@@ -504,7 +483,9 @@ p7_cuda_SSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   int       *h_raw = NULL;
   int       *h_overflow = NULL;
   size_t     shmem = (size_t) (cuom->M + 1) * 2;
-  cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
+  cudaEvent_t h2d0 = engine->evt_h2d0, h2d1 = engine->evt_h2d1;
+  cudaEvent_t k0 = engine->evt_k0, k1 = engine->evt_k1;
+  cudaEvent_t d2h0 = engine->evt_d2h0, d2h1 = engine->evt_d2h1;
   double     ht0;
 
   if (!engine || !cuom || !scores || !statuses) return eslEINVAL;
@@ -554,23 +535,11 @@ p7_cuda_SSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     engine->result_alloc = nseq;
   }
 
-  ht0 = host_seconds();
-  cudaEventCreate(&h2d0);
-  cudaEventCreate(&h2d1);
-  cudaEventCreate(&k0);
-  cudaEventCreate(&k1);
-  cudaEventCreate(&d2h0);
-  cudaEventCreate(&d2h1);
-  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
-
   cudaEventRecord(h2d0);
   ht0 = host_seconds();
   if ((status = cuda_status(cudaMemcpy(engine->d_tjb_by_seq, h_tjb_by_seq, sizeof(uint8_t) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(tjb_by_seq)")) != eslOK) goto CUDA_ERROR;
   engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   cudaEventRecord(h2d1);
-  ht0 = host_seconds();
-  cudaEventSynchronize(h2d1);
-  engine->stats.host_sync_seconds += host_seconds() - ht0;
 
   cudaEventRecord(k0);
   cuda_ssv_opt_kernel<<<nseq, P7_CUDA_MSV_BLOCK_THREADS, shmem>>>(
@@ -592,9 +561,6 @@ p7_cuda_SSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   if ((status = cuda_status(cudaMemcpy(h_overflow, engine->d_overflow, sizeof(int) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(overflow)")) != eslOK) goto CUDA_ERROR;
   engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   cudaEventRecord(d2h1);
-  ht0 = host_seconds();
-  cudaEventSynchronize(d2h1);
-  engine->stats.host_sync_seconds += host_seconds() - ht0;
 
   engine->stats.h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.kernel_seconds += elapsed_seconds(k0, k1);
@@ -624,14 +590,6 @@ p7_cuda_SSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   engine->resident_batch_nseq = nseq;
 
 CUDA_ERROR:
-  ht0 = host_seconds();
-  cudaEventDestroy(h2d0);
-  cudaEventDestroy(h2d1);
-  cudaEventDestroy(k0);
-  cudaEventDestroy(k1);
-  cudaEventDestroy(d2h0);
-  cudaEventDestroy(d2h1);
-  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
 ERROR:
   ht0 = host_seconds();
   free(h_tjb_by_seq);

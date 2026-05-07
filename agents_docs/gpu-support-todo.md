@@ -56,6 +56,13 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV 
 - ~~SSV as default GPU MSV kernel~~: `p7_cuda_SSVFilterResident()` + `p7_cuda_SSVFilterDsqdataChunk()` always used. 1.36x faster than monolithic MSV.
 - ~~Viterbi/Forward M-limit expansion~~: Viterbi M≤2048, Forward M≤1024, M>2048 tiling tier added.
 - ~~Survivor loop optimization~~: CPU MSV fallback removed, sort-by-length + ReconfigLength caching.
+- ~~GPU pipeline overlap and efficiency refinements (2026-05-07)~~:
+  - Pre-allocated CUDA events: engine events (`evt_h2d0/1`, `evt_k0/1`, `evt_d2h0/1`) reused by all SSV/bias functions instead of per-call create/destroy (~126 event create/destroy pairs eliminated per query).
+  - Removed redundant `cudaEventSynchronize` after synchronous `cudaMemcpy` in SSV and bias functions.
+  - Bias model parameter caching: `engine->bias_params_uploaded` flag skips re-upload of constant pi/t/eo arrays across batches within a query.
+  - Viterbi/Forward ReconfigLength caching in post-processing loops.
+  - Rejected: CPU null score computation broke parity (x86 vs CUDA `logf` divergence). GPU null kernel retained.
+- ~~Multi-query profmark benchmark (2026-05-07)~~: `test-speed/x-hmmsearch-gpu-profmark` rewritten to run all queries in a single hmmsearch process (CPU and GPU), amortizing CUDA init once. Fixed benchmark artifact that made GPU appear 0.6x vs CPU-4 when it is actually 1.92x vs CPU-4, 4.19x vs CPU-1.
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.

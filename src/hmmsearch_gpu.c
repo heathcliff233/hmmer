@@ -1106,6 +1106,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           }
         }
 
+        { int last_vit_reconfig_L = -1;
         for (int j = 0; j < gpu_vit_n; j++) {
           float cpu_vitsc = -eslINFINITY;
           float filtersc;
@@ -1118,8 +1119,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
           if (status != eslOK) goto ERROR;
           t0 = hmmsearch_WallTime();
-          p7_bg_SetLength(info->bg, dbsq->n);
-          p7_oprofile_ReconfigLength(info->om, dbsq->n);
+          if ((int)dbsq->n != last_vit_reconfig_L) {
+            p7_bg_SetLength(info->bg, dbsq->n);
+            p7_oprofile_ReconfigLength(info->om, dbsq->n);
+            last_vit_reconfig_L = (int)dbsq->n;
+          }
           info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
           filtersc = gpu_vit_filtersc_subset[j];
           if (run_cuda_vit) {
@@ -1206,6 +1210,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           p7_pipeline_Reuse(info->pli);
           gpu_RestoreSeqStorage(dbsq, dbsq_dsqmem, dbsq_salloc);
         }
+        } /* end last_vit_reconfig_L scope */
       }
 
       if (gpu_fwd_active && gpu_fwd_n > 0) {
@@ -1246,6 +1251,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           }
         }
 
+        { int last_fwd_reconfig_L = -1;
         for (int j = 0; j < gpu_fwd_n; j++) {
           i = gpu_fwd_idx[j];
           t0 = hmmsearch_WallTime();
@@ -1253,8 +1259,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
           if (status != eslOK) goto ERROR;
           t0 = hmmsearch_WallTime();
-          p7_bg_SetLength(info->bg, dbsq->n);
-          p7_oprofile_ReconfigLength(info->om, dbsq->n);
+          if ((int)dbsq->n != last_fwd_reconfig_L) {
+            p7_bg_SetLength(info->bg, dbsq->n);
+            p7_oprofile_ReconfigLength(info->om, dbsq->n);
+            last_fwd_reconfig_L = (int)dbsq->n;
+          }
           info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
           nullsc = gpu_nullsc[i];
 
@@ -1376,6 +1385,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           p7_pipeline_Reuse(info->pli);
           gpu_RestoreSeqStorage(dbsq, dbsq_dsqmem, dbsq_salloc);
         }
+        } /* end last_fwd_reconfig_L scope */
       }
       if (gpu_fb_n > 0) {
         status = gpu_ProcessFbBatch(info, search_chu, dbsq, dbsq_dsqmem, dbsq_salloc,

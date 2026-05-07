@@ -119,7 +119,9 @@ p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   int *h_lengths = NULL;
   int reuse_batch = FALSE;
   int use_resident = FALSE;
-  cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
+  cudaEvent_t h2d0 = engine->evt_h2d0, h2d1 = engine->evt_h2d1;
+  cudaEvent_t k0 = engine->evt_k0, k1 = engine->evt_k1;
+  cudaEvent_t d2h0 = engine->evt_d2h0, d2h1 = engine->evt_d2h1;
   double ht0;
 
   (void) bg;
@@ -187,15 +189,6 @@ p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
     engine->null_result_alloc = nseq;
   }
 
-  ht0 = host_seconds();
-  cudaEventCreate(&h2d0);
-  cudaEventCreate(&h2d1);
-  cudaEventCreate(&k0);
-  cudaEventCreate(&k1);
-  cudaEventCreate(&d2h0);
-  cudaEventCreate(&d2h1);
-  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
-
   cudaEventRecord(h2d0);
   if (!use_resident && !reuse_batch) {
     ht0 = host_seconds();
@@ -213,9 +206,6 @@ p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
     engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   }
   cudaEventRecord(h2d1);
-  ht0 = host_seconds();
-  cudaEventSynchronize(h2d1);
-  engine->stats.host_sync_seconds += host_seconds() - ht0;
 
   {
     int *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
@@ -233,23 +223,12 @@ p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   if ((status = cuda_status(cudaMemcpy(nullsc, engine->d_null_scores, sizeof(float) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(null scores)")) != eslOK) goto CUDA_ERROR;
   engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   cudaEventRecord(d2h1);
-  ht0 = host_seconds();
-  cudaEventSynchronize(d2h1);
-  engine->stats.host_sync_seconds += host_seconds() - ht0;
 
   engine->stats.null_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.null_kernel_seconds += elapsed_seconds(k0, k1);
   engine->stats.null_d2h_seconds    += elapsed_seconds(d2h0, d2h1);
 
 CUDA_ERROR:
-  ht0 = host_seconds();
-  cudaEventDestroy(h2d0);
-  cudaEventDestroy(h2d1);
-  cudaEventDestroy(k0);
-  cudaEventDestroy(k1);
-  cudaEventDestroy(d2h0);
-  cudaEventDestroy(d2h1);
-  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
 ERROR:
   ht0 = host_seconds();
   free(h_offsets);
@@ -273,7 +252,9 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   size_t eo_bytes;
   int reuse_batch = FALSE;
   int use_resident = FALSE;
-  cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
+  cudaEvent_t h2d0 = engine->evt_h2d0, h2d1 = engine->evt_h2d1;
+  cudaEvent_t k0 = engine->evt_k0, k1 = engine->evt_k1;
+  cudaEvent_t d2h0 = engine->evt_d2h0, d2h1 = engine->evt_d2h1;
   double ht0;
 
   if (!engine || !bg || !bg->fhmm || !chu || !filtersc) return eslEINVAL;
@@ -365,15 +346,6 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   h_t[4] = bg->fhmm->t[1][1];
   h_t[5] = bg->fhmm->t[1][2];
 
-  ht0 = host_seconds();
-  cudaEventCreate(&h2d0);
-  cudaEventCreate(&h2d1);
-  cudaEventCreate(&k0);
-  cudaEventCreate(&k1);
-  cudaEventCreate(&d2h0);
-  cudaEventCreate(&d2h1);
-  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
-
   cudaEventRecord(h2d0);
   if (!use_resident && !reuse_batch) {
     ht0 = host_seconds();
@@ -390,15 +362,15 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
     if ((status = cuda_status(cudaMemcpy(engine->d_lengths, h_lengths, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lengths)")) != eslOK) goto CUDA_ERROR;
     engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   }
-  ht0 = host_seconds();
-  if ((status = cuda_status(cudaMemcpy(engine->d_bias_pi, h_pi, sizeof(h_pi), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(bias pi)")) != eslOK) goto CUDA_ERROR;
-  if ((status = cuda_status(cudaMemcpy(engine->d_bias_t, h_t, sizeof(h_t), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(bias t)")) != eslOK) goto CUDA_ERROR;
-  if ((status = cuda_status(cudaMemcpy(engine->d_bias_eo, bg->fhmm->eo[0], eo_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(bias eo)")) != eslOK) goto CUDA_ERROR;
-  engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
+  if (!engine->bias_params_uploaded) {
+    ht0 = host_seconds();
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_pi, h_pi, sizeof(h_pi), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(bias pi)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_t, h_t, sizeof(h_t), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(bias t)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_eo, bg->fhmm->eo[0], eo_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(bias eo)")) != eslOK) goto CUDA_ERROR;
+    engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
+    engine->bias_params_uploaded = 1;
+  }
   cudaEventRecord(h2d1);
-  ht0 = host_seconds();
-  cudaEventSynchronize(h2d1);
-  engine->stats.host_sync_seconds += host_seconds() - ht0;
 
   {
     uint8_t *d_dsq_ptr = use_resident ? engine->d_resident_dsq : engine->d_dsq;
@@ -420,9 +392,6 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   if ((status = cuda_status(cudaMemcpy(filtersc, engine->d_bias_filtersc, sizeof(float) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(bias filtersc)")) != eslOK) goto CUDA_ERROR;
   engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   cudaEventRecord(d2h1);
-  ht0 = host_seconds();
-  cudaEventSynchronize(d2h1);
-  engine->stats.host_sync_seconds += host_seconds() - ht0;
 
   engine->stats.bias_h2d_seconds    += elapsed_seconds(h2d0, h2d1);
   engine->stats.bias_kernel_seconds += elapsed_seconds(k0, k1);
@@ -432,14 +401,6 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   engine->batch_total = total;
 
 CUDA_ERROR:
-  ht0 = host_seconds();
-  cudaEventDestroy(h2d0);
-  cudaEventDestroy(h2d1);
-  cudaEventDestroy(k0);
-  cudaEventDestroy(k1);
-  cudaEventDestroy(d2h0);
-  cudaEventDestroy(d2h1);
-  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
 ERROR:
   ht0 = host_seconds();
   free(h_offsets);
