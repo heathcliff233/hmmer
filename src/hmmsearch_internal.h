@@ -46,6 +46,7 @@ typedef struct {
   int               gpu_fb_compare;    /* debug CUDA-vs-CPU parser state check  */
   int               gpu_previt_compare;/* debug CUDA-vs-CPU null/bias/F1 checks */
   int               gpu_ssv_compare;   /* debug CUDA SSV-vs-monolithic MSV check */
+  int               gpu_legacy_pipeline; /* use legacy separate kernel launches   */
   P7_GPUDB         *gpudb;             /* optional GPU-native mmap'd database    */
 } WORKER_INFO;
 

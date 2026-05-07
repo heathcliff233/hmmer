@@ -97,9 +97,9 @@ agents_docs/       Detailed architecture documentation (see index below)
 
 The GPU path accelerates SSV/MSV + biased-composition filter + Viterbi + Forward in CUDA batches. Current state:
 
-- Default MSV path: SSV kernel (register-optimized, 1.36x faster than monolithic MSV, with in-kernel MSV fallback for ~0.3% of sequences needing J-state). Supports both resident-database and chunk-based paths.
-- All GPU stages enabled by default with `--gpu`: SSV/MSV → Viterbi prefilter (M≤2048) → Forward prefilter (M≤1024) → FB parser
-- Latest all-13 profmark (multi-query single-process): **7.37x vs CPU-1** (10.68s → 1.45s), **3.30x vs CPU-4** (4.79s → 1.45s), zero parity errors
+- Default MSV path: **fused SSV+null+bias+F1 gate kernel** (`cuda_ssv_null_bias_gate_kernel<STRIDE>`) computes all pre-filter stages in a single kernel launch. Templated on STRIDE with linear rbv layout for coalesced access. Survivors compacted via atomicAdd with in-kernel float score output (D2H only ~32KB/batch vs 1.8MB). Supports both resident-database and chunk-based paths.
+- All GPU stages enabled by default with `--gpu`: fused SSV+null+bias+gate → Viterbi prefilter (M≤2048) → Forward prefilter (M≤1024) → FB parser
+- Latest all-13 profmark (multi-query single-process): **8.68x vs CPU-1** (10.68s → 1.23s), **3.89x vs CPU-4** (4.79s → 1.23s), zero fused-vs-legacy parity errors
 - Survivor loop: sorted by sequence length with ReconfigLength caching; CPU MSV fallback eliminated (double-precision GPU bias is authoritative)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
 - Sequence packing uses bulk `smem` copy (single memcpy of dsqdata's contiguous buffer) with L+1 offset spacing

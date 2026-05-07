@@ -862,8 +862,12 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
     ESL_ALLOC(gpu_fwd_idx, sizeof(int) * gpu_capacity);
     ESL_ALLOC(gpu_vit_idx, sizeof(int) * gpu_capacity);
     int *gpu_f1_survivor_idx = NULL;
+    float *gpu_surv_scores = NULL;
+    int *gpu_surv_statuses = NULL;
     int  gpu_f1_nsurv = 0;
     ESL_ALLOC(gpu_f1_survivor_idx, sizeof(int) * gpu_capacity);
+    ESL_ALLOC(gpu_surv_scores, sizeof(float) * gpu_capacity);
+    ESL_ALLOC(gpu_surv_statuses, sizeof(int) * gpu_capacity);
     gpu_ResolveSurvivorThresholds(info, info->om->M,
                                   &gpu_vit_min_cands, &gpu_fwd_min_cands,
                                   &gpu_vit_collect_cands, &gpu_fwd_collect_cands,
@@ -920,57 +924,87 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
         search_chu = (batch.nchunks == 1) ? batch.chunks[0] : &batch.view;
       }
 
-      t0 = hmmsearch_WallTime();
-      if (p7_cuda_engine_IsResident(info->cuda_engine))
-        status = p7_cuda_SSVFilterResident(info->cuda_engine, info->cuda_msv, (int64_t) batch.view.i0, batch.view.N, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
-      else
-        status = p7_cuda_SSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
-      info->pli->time_msv += hmmsearch_WallTime() - t0;
-      if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch MSV/SSV failed: %s\n", errbuf);
+      /* ====== Fused SSV+Null+Bias+Gate path (default) or legacy separate kernels ====== */
+      if (!info->gpu_legacy_pipeline && !info->gpu_ssv_compare) {
+        gpu_processed_n = (n_targetseqs == -1) ? search_chu->N : ESL_MIN(search_chu->N, n_targetseqs - seq_cnt);
 
-      if (info->gpu_ssv_compare) {
-        float *msv_scores = (float *) malloc(sizeof(float) * search_chu->N);
-        int   *msv_statuses = (int *) malloc(sizeof(int) * search_chu->N);
-        if (p7_cuda_engine_IsResident(info->cuda_engine))
-          status = p7_cuda_MSVFilterResident(info->cuda_engine, info->cuda_msv, (int64_t) batch.view.i0, batch.view.N, msv_scores, msv_statuses, errbuf, sizeof(errbuf));
-        else
-          status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, msv_scores, msv_statuses, errbuf, sizeof(errbuf));
-        if (status != eslOK) p7_Fail("--gpu-ssv-compare: monolithic MSV failed: %s\n", errbuf);
-        for (int ci = 0; ci < search_chu->N; ci++) {
-          if (gpu_statuses[ci] != msv_statuses[ci] || (gpu_statuses[ci] == eslOK && gpu_scores[ci] != msv_scores[ci]))
-            fprintf(stderr, "SSV_COMPARE_MISMATCH seq=%d ssv_score=%.6f msv_score=%.6f ssv_status=%d msv_status=%d\n",
-                    ci, gpu_scores[ci], msv_scores[ci], gpu_statuses[ci], msv_statuses[ci]);
-        }
-        free(msv_scores);
-        free(msv_statuses);
-      }
-      t0 = hmmsearch_WallTime();
-      status = p7_cuda_NullScoreDsqdataChunk(info->cuda_engine, info->bg, search_chu, gpu_nullsc, errbuf, sizeof(errbuf));
-      info->pli->time_null += hmmsearch_WallTime() - t0;
-      if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch null score failed: %s\n", errbuf);
-      if (info->pli->do_biasfilter) {
         t0 = hmmsearch_WallTime();
-        status = p7_cuda_BiasFilterDsqdataChunk(info->cuda_engine, info->bg, search_chu, gpu_filtersc, errbuf, sizeof(errbuf));
-        info->pli->time_bias += hmmsearch_WallTime() - t0;
-        if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch bias filter failed: %s\n", errbuf);
-      }
+        if (p7_cuda_engine_IsResident(info->cuda_engine))
+          status = p7_cuda_SSVNullBiasGateResident(info->cuda_engine, info->cuda_msv, info->bg,
+                     (int64_t) batch.view.i0, gpu_processed_n, info->pli->do_biasfilter,
+                     info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA], info->pli->F1,
+                     gpu_f1_survivor_idx, &gpu_f1_nsurv,
+                     gpu_nullsc, gpu_filtersc, gpu_surv_scores, gpu_surv_statuses,
+                     errbuf, sizeof(errbuf));
+        else
+          status = p7_cuda_SSVNullBiasGateDsqdataChunk(info->cuda_engine, info->cuda_msv, info->bg,
+                     search_chu, info->pli->do_biasfilter,
+                     info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA], info->pli->F1,
+                     gpu_f1_survivor_idx, &gpu_f1_nsurv,
+                     gpu_nullsc, gpu_filtersc, gpu_surv_scores, gpu_surv_statuses,
+                     errbuf, sizeof(errbuf));
+        info->pli->time_msv += hmmsearch_WallTime() - t0;
+        if (status != eslOK) p7_Fail("--gpu fused SSV+null+bias+gate failed: %s\n", errbuf);
 
-      gpu_fwd_n = 0;
-      gpu_vit_n = 0;
-      gpu_fwd_res = 0;
-      gpu_vit_res = 0;
-      gpu_fb_n = 0;
-      gpu_processed_n = (n_targetseqs == -1) ? search_chu->N : ESL_MIN(search_chu->N, n_targetseqs - seq_cnt);
+        gpu_fwd_n = 0;
+        gpu_vit_n = 0;
+        gpu_fwd_res = 0;
+        gpu_vit_res = 0;
+        gpu_fb_n = 0;
+      } else {
+        /* Legacy path: separate SSV, null, bias, F1-gate, survivor-bias kernel launches */
+        t0 = hmmsearch_WallTime();
+        if (p7_cuda_engine_IsResident(info->cuda_engine))
+          status = p7_cuda_SSVFilterResident(info->cuda_engine, info->cuda_msv, (int64_t) batch.view.i0, batch.view.N, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+        else
+          status = p7_cuda_SSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+        info->pli->time_msv += hmmsearch_WallTime() - t0;
+        if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch MSV/SSV failed: %s\n", errbuf);
 
-      t0 = hmmsearch_WallTime();
-      status = p7_cuda_F1GatingDsqdataChunk(info->cuda_engine,
-                                            gpu_scores, gpu_statuses,
-                                            gpu_processed_n, info->pli->do_biasfilter,
-                                            info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA], info->pli->F1,
-                                            gpu_f1_survivor_idx, &gpu_f1_nsurv,
-                                            errbuf, sizeof(errbuf));
-      info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
-      if (status != eslOK) p7_Fail("--gpu requested, but CUDA F1 gating failed: %s\n", errbuf);
+        if (info->gpu_ssv_compare) {
+          float *msv_scores = (float *) malloc(sizeof(float) * search_chu->N);
+          int   *msv_statuses = (int *) malloc(sizeof(int) * search_chu->N);
+          if (p7_cuda_engine_IsResident(info->cuda_engine))
+            status = p7_cuda_MSVFilterResident(info->cuda_engine, info->cuda_msv, (int64_t) batch.view.i0, batch.view.N, msv_scores, msv_statuses, errbuf, sizeof(errbuf));
+          else
+            status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, msv_scores, msv_statuses, errbuf, sizeof(errbuf));
+          if (status != eslOK) p7_Fail("--gpu-ssv-compare: monolithic MSV failed: %s\n", errbuf);
+          for (int ci = 0; ci < search_chu->N; ci++) {
+            if (gpu_statuses[ci] != msv_statuses[ci] || (gpu_statuses[ci] == eslOK && gpu_scores[ci] != msv_scores[ci]))
+              fprintf(stderr, "SSV_COMPARE_MISMATCH seq=%d ssv_score=%.6f msv_score=%.6f ssv_status=%d msv_status=%d\n",
+                      ci, gpu_scores[ci], msv_scores[ci], gpu_statuses[ci], msv_statuses[ci]);
+          }
+          free(msv_scores);
+          free(msv_statuses);
+        }
+        t0 = hmmsearch_WallTime();
+        status = p7_cuda_NullScoreDsqdataChunk(info->cuda_engine, info->bg, search_chu, gpu_nullsc, errbuf, sizeof(errbuf));
+        info->pli->time_null += hmmsearch_WallTime() - t0;
+        if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch null score failed: %s\n", errbuf);
+        if (info->pli->do_biasfilter) {
+          t0 = hmmsearch_WallTime();
+          status = p7_cuda_BiasFilterDsqdataChunk(info->cuda_engine, info->bg, search_chu, gpu_filtersc, errbuf, sizeof(errbuf));
+          info->pli->time_bias += hmmsearch_WallTime() - t0;
+          if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch bias filter failed: %s\n", errbuf);
+        }
+
+        gpu_fwd_n = 0;
+        gpu_vit_n = 0;
+        gpu_fwd_res = 0;
+        gpu_vit_res = 0;
+        gpu_fb_n = 0;
+        gpu_processed_n = (n_targetseqs == -1) ? search_chu->N : ESL_MIN(search_chu->N, n_targetseqs - seq_cnt);
+
+        t0 = hmmsearch_WallTime();
+        status = p7_cuda_F1GatingDsqdataChunk(info->cuda_engine,
+                                              gpu_scores, gpu_statuses,
+                                              gpu_processed_n, info->pli->do_biasfilter,
+                                              info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA], info->pli->F1,
+                                              gpu_f1_survivor_idx, &gpu_f1_nsurv,
+                                              errbuf, sizeof(errbuf));
+        info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
+        if (status != eslOK) p7_Fail("--gpu requested, but CUDA F1 gating failed: %s\n", errbuf);
+      } /* end legacy path */
 
       {
         int64_t batch_nres = 0;
@@ -982,16 +1016,19 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       }
 
       { double surv_loop_t0 = hmmsearch_WallTime();
-      if (info->pli->do_biasfilter && gpu_f1_nsurv > 0) {
-        float *surv_filtersc = NULL;
-        ESL_ALLOC(surv_filtersc, sizeof(float) * gpu_f1_nsurv);
-        status = p7_cuda_BiasFilterSurvivors(info->cuda_engine, info->bg,
-                                             gpu_f1_nsurv, surv_filtersc,
-                                             errbuf, sizeof(errbuf));
-        if (status != eslOK) p7_Fail("CUDA survivor bias filter failed: %s\n", errbuf);
-        for (int si = 0; si < gpu_f1_nsurv; si++)
-          gpu_filtersc[gpu_f1_survivor_idx[si]] = surv_filtersc[si];
-        free(surv_filtersc);
+      if (info->gpu_legacy_pipeline || info->gpu_ssv_compare) {
+        /* Legacy path needs survivor bias recompute (fused kernel does this inline) */
+        if (info->pli->do_biasfilter && gpu_f1_nsurv > 0) {
+          float *surv_filtersc = NULL;
+          ESL_ALLOC(surv_filtersc, sizeof(float) * gpu_f1_nsurv);
+          status = p7_cuda_BiasFilterSurvivors(info->cuda_engine, info->bg,
+                                               gpu_f1_nsurv, surv_filtersc,
+                                               errbuf, sizeof(errbuf));
+          if (status != eslOK) p7_Fail("CUDA survivor bias filter failed: %s\n", errbuf);
+          for (int si = 0; si < gpu_f1_nsurv; si++)
+            gpu_filtersc[gpu_f1_survivor_idx[si]] = surv_filtersc[si];
+          free(surv_filtersc);
+        }
       }
 
       /* Sort survivors by sequence length to maximize ReconfigLength cache hits */
@@ -1028,7 +1065,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
         info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
         {
           GPU_PREVIT_RESULT previt;
-          status = gpu_PreViterbiBoundary(info, dbsq, gpu_scores[i], gpu_statuses[i], gpu_nullsc[i],
+          status = gpu_PreViterbiBoundary(info, dbsq, gpu_surv_scores[si], gpu_surv_statuses[si], gpu_nullsc[i],
                                           (info->pli->do_biasfilter ? gpu_filtersc[i] : gpu_nullsc[i]), &previt);
           if (status != eslOK) goto ERROR;
           nullsc = previt.nullsc;
@@ -1500,6 +1537,8 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
     free(gpu_fwd_idx);
     free(gpu_vit_idx);
     free(gpu_f1_survivor_idx);
+    free(gpu_surv_scores);
+    free(gpu_surv_statuses);
     free(gpu_fb_idx);
     free(gpu_fb_nullsc);
     free(gpu_fb_filtersc);
@@ -1537,6 +1576,8 @@ ERROR:
   free(gpu_fwd_idx);
   free(gpu_vit_idx);
   free(gpu_f1_survivor_idx);
+  free(gpu_surv_scores);
+  free(gpu_surv_statuses);
   free(gpu_fb_idx);
   free(gpu_fb_nullsc);
   free(gpu_fb_filtersc);

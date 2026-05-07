@@ -133,3 +133,21 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - Outcome: Viterbi kernel **2.9x faster** (0.475s → 0.162s). Launches reduced 43% (91 → 52). GPU SM utilization 78% → 87%. Overall wall 1.63s → 1.45s (10.9% faster). Zero parity errors.
 - Lesson: `#pragma unroll` with compile-time template parameter is necessary and sufficient for nvcc to place arrays in true registers. The `break` inside the unrolled loop (for `j >= my_count`) does not prevent register allocation — nvcc still unrolls and uses predicated execution.
 - Files: `src/cuda/p7_cuda_viterbi.cu`, `src/hmmsearch_gpu.c`.
+
+### 13) Fused SSV+null+bias+F1 gate kernel with survivor-indexed D2H (2026-05-07)
+- Problem: After all stage-level kernel optimizations, `exact_other` (inter-stage overhead) was 246ms — 17% of wall time. This overhead came from 5 separate kernel launches per batch (SSV, null, bias, F1 gating, survivor bias) plus host-side score conversion, intermediate D2H transfers, and multiple synchronization points. Additionally, full-array D2H transferred 1.8MB/batch (raw scores + overflow for 229K sequences) but only ~4K survivors (1.7%) were actually used.
+- Solution: Three-part optimization:
+  1. **Kernel fusion**: merged SSV + null score + bias filter + F1 Gumbel gate into a single templated kernel (`cuda_ssv_null_bias_gate_kernel<STRIDE>`). Each warp computes SSV score, null score, bias filtersc, and F1 P-value for its sequence in one pass. Survivors written to compact list via `atomicAdd`.
+  2. **Linear rbv layout**: added `d_rbv_lin[x * M + k]` profile layout for coalesced inner-loop access (eliminates shared-memory q/z lookup tables from SSV fast-path within fused kernel).
+  3. **Survivor-indexed D2H**: kernel writes float `usc` and overflow status directly into per-survivor arrays at the `atomicAdd` point. Host D2H transfers only `nsurv` entries (~32KB) instead of full `nseq` arrays (1.8MB). Eliminates host-side score conversion loop entirely.
+- Intermediate attempts that failed:
+  - Register-cached rbv offsets (`int rbv_off[STRIDE]`): 80 bytes extra registers caused spilling, regression from 34ms to 55ms. Reverted.
+  - `__ldg()` explicit cache hints: no improvement — `const uint8_t*` already uses read-only cache on sm_89. Reverted.
+- Results:
+  - `exact_other` reduced from 246ms to 115ms (−131ms, −53%)
+  - D2H reduced from 28ms to 2.6ms across 13 queries (10.8x reduction)
+  - Host `score_convert` eliminated (−1ms)
+  - Overall fused path: **1.23s** vs legacy 1.49s (17.4% faster)
+  - Hit parity: fused path agrees with legacy GPU path (zero diff). Known precision difference in in-kernel bias gate vs host-side bias causes ±3 survivor count difference per query (accepted: fused bias is length-correct, more accurate).
+- API change: `p7_cuda_SSVNullBiasGateResident()` and `p7_cuda_SSVNullBiasGateDsqdataChunk()` now output survivor-indexed `float *survivor_scores` and `int *survivor_statuses` instead of full-array `float *scores` and `int *statuses`.
+- Files: `src/cuda/p7_cuda_ssv.cu`, `src/cuda/p7_cuda_internal.h`, `src/cuda/p7_cuda_runtime.cu`, `src/cuda/p7_cuda.h`, `src/hmmsearch_gpu.c`.

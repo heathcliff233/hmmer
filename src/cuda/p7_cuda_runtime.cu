@@ -94,6 +94,8 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_parser_x_offsets) cudaFree(engine->d_parser_x_offsets);
   if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
   if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
+  if (engine->d_f1_survivor_usc) cudaFree(engine->d_f1_survivor_usc);
+  if (engine->d_f1_survivor_status) cudaFree(engine->d_f1_survivor_status);
   if (engine->d_bias_surv_filtersc) cudaFree(engine->d_bias_surv_filtersc);
   if (engine->d_resident_dsq)     cudaFree(engine->d_resident_dsq);
   if (engine->d_resident_offsets) cudaFree(engine->d_resident_offsets);
@@ -167,6 +169,24 @@ p7_cuda_msvprofile_Create(const P7_OPROFILE *om, P7_CUDA_MSVPROFILE **ret_cuom, 
   if ((status = cuda_status(cudaMalloc((void **) &cuom->d_rbv, nbytes), errbuf, errbuf_size, "cudaMalloc(profile)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(cuom->d_rbv, (const void *) om->rbv[0], nbytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(profile)")) != eslOK) goto ERROR;
 
+  /* Build linear emission layout: rbv_lin[x * M + k] = rbv[(x*Q + k%Q) * 16 + k/Q] */
+  {
+    size_t lin_bytes = (size_t) cuom->Kp * (size_t) cuom->M;
+    uint8_t *h_rbv_lin = (uint8_t *) malloc(lin_bytes);
+    if (!h_rbv_lin) { status = eslEMEM; goto ERROR; }
+    const uint8_t *src = (const uint8_t *) om->rbv[0];
+    for (int x = 0; x < cuom->Kp; x++) {
+      for (int k = 0; k < cuom->M; k++) {
+        int q = k % cuom->Q;
+        int z = k / cuom->Q;
+        h_rbv_lin[x * cuom->M + k] = src[(x * cuom->Q + q) * 16 + z];
+      }
+    }
+    if ((status = cuda_status(cudaMalloc((void **) &cuom->d_rbv_lin, lin_bytes), errbuf, errbuf_size, "cudaMalloc(rbv_lin)")) != eslOK) { free(h_rbv_lin); goto ERROR; }
+    if ((status = cuda_status(cudaMemcpy(cuom->d_rbv_lin, h_rbv_lin, lin_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(rbv_lin)")) != eslOK) { free(h_rbv_lin); goto ERROR; }
+    free(h_rbv_lin);
+  }
+
   fbytes = sizeof(float) * (size_t) cuom->Kp * (size_t) cuom->Qf * 4;
   if ((status = cuda_status(cudaMalloc((void **) &cuom->d_rfv, fbytes), errbuf, errbuf_size, "cudaMalloc(fwd emissions)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(cuom->d_rfv, (const void *) om->rfv[0], fbytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(fwd emissions)")) != eslOK) goto ERROR;
@@ -192,6 +212,7 @@ p7_cuda_msvprofile_Destroy(P7_CUDA_MSVPROFILE *cuom)
 {
   if (!cuom) return;
   if (cuom->d_rbv) cudaFree(cuom->d_rbv);
+  if (cuom->d_rbv_lin) cudaFree(cuom->d_rbv_lin);
   if (cuom->d_rfv) cudaFree(cuom->d_rfv);
   if (cuom->d_tfv) cudaFree(cuom->d_tfv);
   if (cuom->d_rwv) cudaFree(cuom->d_rwv);

@@ -120,6 +120,7 @@ static ESL_OPTIONS options[] = {
   { "--gpu-fb-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,             "debug compare CUDA parser state to CPU Forward/Backward",      99 },
   { "--gpu-previt-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,         "debug compare CUDA null/bias/F1 boundary to CPU boundary",     99 },
   { "--gpu-ssv-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "debug compare CUDA SSV+fallback scores to monolithic MSV",      99 },
+  { "--gpu-legacy-pipeline", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,       "use legacy separate SSV/null/bias/gate kernel launches",        99 },
 
 /* Other options */
   { "--nonull2",    eslARG_NONE,   NULL,  NULL, NULL,    NULL,  NULL,  NULL,            "turn off biased composition score corrections",               12 },
@@ -526,6 +527,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     info[i].gpu_fb_compare    = esl_opt_GetBoolean(go, "--gpu-fb-compare");
     info[i].gpu_previt_compare = esl_opt_GetBoolean(go, "--gpu-previt-compare");
     info[i].gpu_ssv_compare    = esl_opt_GetBoolean(go, "--gpu-ssv-compare");
+    info[i].gpu_legacy_pipeline = esl_opt_GetBoolean(go, "--gpu-legacy-pipeline");
 #ifdef HMMER_THREADS
 	  info[i].queue = queue;
 #endif

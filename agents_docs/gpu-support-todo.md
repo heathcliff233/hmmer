@@ -26,10 +26,10 @@ This is the live TODO for future GPU work. For detailed dated implementation his
   - Preload transition/emission scores into shared memory per residue
   - Kernel fusion (MSV → bias → Vit in single kernel to avoid re-reading profile)
 
-- **Reduce unaccounted residual** (0.334s, 13.6% of wall): The `exact_other` bucket captures inter-stage sync, host-side score conversion, F1 gating logic, and survivor list construction between kernel launches. Approaches:
-  - Fuse MSV + null + bias into a single kernel (eliminates 2 sync points per batch)
-  - Move score conversion and F1 gating to GPU
+- **Reduce unaccounted residual** ~~(0.334s, 13.6% of wall)~~ → **0.115s (9.3% of wall) after kernel fusion and survivor-indexed D2H**. Remaining sources: Viterbi/Forward batch construction, CUDA event record overhead, host-side survivor list sorting, F1 survivor double-precision bias recompute. Approaches:
+  - Fuse F1 survivor double-precision bias into the main fused kernel (avoid separate `cuda_bias_filter_survivors_kernel` launch)
   - Overlap survivor loop CPU work with next batch's kernel via CUDA streams
+  - Profile with nsys to identify exact remaining hotspots
 
 - **Reduce I/O overhead** ~~(0.258s, 10.5% of wall)~~: **DONE** — gpudb v2 embeds metadata; dsqdata is skipped entirely on the resident path. `io_read_unpack` dropped from 0.258s to 0.000s.
 
@@ -37,13 +37,14 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 - **CPU domain definition** (0.162s, 6.6% of wall): `p7_domaindef_ByPosteriorHeuristics()` on ~15 sequences/query that pass Forward. Approaches: parallelize across survivors with thread pool, or eventually move posterior decoding to GPU (high complexity, deferred).
 
-- **Kernel fusion (MSV → bias)**: MSV and bias are separate launches with host-side sync between them. A single kernel that runs SSV → null → bias → F1 gating would eliminate one round-trip and produce the compact survivor list directly.
+- **Kernel fusion (MSV → bias)**: ~~MSV and bias are separate launches with host-side sync between them. A single kernel that runs SSV → null → bias → F1 gating would eliminate one round-trip and produce the compact survivor list directly.~~ **DONE** — fused into `cuda_ssv_null_bias_gate_kernel<STRIDE>`. Inter-stage overhead reduced 53% (246ms → 115ms). D2H reduced 10.8x via survivor-indexed output.
 
-### SSV kernel — future optimizations
-The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV path. Remaining kernel-level optimization opportunities:
+### SSV/Fused kernel — future optimizations
+The fused SSV+null+bias+gate kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV path. Remaining kernel-level optimization opportunities:
 - **Adaptive thread count**: current kernel uses 32 threads/block regardless of M. For small M (< 64), a single warp is sufficient; for large M (> 512), multiple warps with shared-memory partitioning could improve occupancy.
 - **Early termination**: since ~99.7% of sequences complete in the SSV fast-path, explore whether the SSV section can be further optimized (e.g., skip the warp reduction when the local max is clearly below threshold).
-- **rbv access pattern optimization**: with contiguous node ownership, explore whether L1 cache prefetching or texture memory for the rbv profile improves memory-bound queries.
+- **Double-precision bias fusion**: integrate the survivor double-precision bias recompute directly into the fused kernel, eliminating the separate `cuda_bias_filter_survivors_kernel` launch.
+- **In-kernel null/bias precision**: current in-kernel bias uses float32 `expf`/`logf` which diverges slightly from the double-precision survivor recompute. Explore whether the survivor bias kernel can be eliminated entirely by computing exact-enough bias in the fused kernel.
 
 ### Medium-priority work
 - Consider larger batch sizes (>32K seqs) to reduce per-batch CUDA API call count.
@@ -65,6 +66,9 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV 
 - Viterbi register-based warp-shuffle kernel (32 threads/seq, cleaner architecture, parity-verified)
 - Viterbi templated kernel — stride as compile-time constant for true register residence (2.9x kernel speedup, 0.475s → 0.162s)
 - Viterbi tile sizes 4x increase (4096 candidates/tile for M≤700) + int64 overflow fix in tile heuristic
+- Fused SSV+null+bias+F1 gate kernel (`cuda_ssv_null_bias_gate_kernel<STRIDE>`) — single launch replaces 5 kernels, inter-stage overhead −53%
+- Linear rbv layout (`d_rbv_lin[x * M + k]`) for coalesced fused-kernel inner-loop access
+- Survivor-indexed D2H — transfers only nsurv entries (~32KB) instead of full nseq arrays (1.8MB); D2H 28ms → 2.6ms
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.

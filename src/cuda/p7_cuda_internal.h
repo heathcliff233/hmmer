@@ -76,6 +76,8 @@ struct p7_cuda_msv_engine_s {
   size_t              parser_cell_alloc;
   int                *d_f1_survivor_idx;
   int                *d_f1_counter;
+  float              *d_f1_survivor_usc;
+  int                *d_f1_survivor_status;
   int                 f1_result_alloc;
   float              *d_bias_surv_filtersc;
   int                 bias_surv_alloc;
@@ -106,6 +108,7 @@ struct p7_cuda_msv_profile_s {
   uint8_t  base_b;
   uint8_t  bias_b;
   uint8_t *d_rbv;
+  uint8_t *d_rbv_lin;   /* linear layout: d_rbv_lin[x * M + k] for k in 0..M-1 */
   int      Qf;
   float   *d_rfv;
   float   *d_tfv;

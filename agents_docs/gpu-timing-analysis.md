@@ -1,6 +1,6 @@
 # GPU Timing Analysis
 
-Last updated: 2026-05-07 (benchmark refreshed after default-on flag cleanup)
+Last updated: 2026-05-07 (fused SSV+null+bias+gate kernel with survivor-indexed D2H)
 
 ## Test Configuration
 
@@ -54,67 +54,57 @@ This mode is retained for reference only. With all stages now default-on, Mode 1
 
 Wall time: ~2.94s total (historical). CPU Viterbi (33.6%), GPU kernel (19.7%), CPU Fwd+Bck (26.5%) were the main costs.
 
-## Current Default: Full GPU (`--gpu`, all stages on)
+## Current Default: Full GPU (`--gpu`, fused kernel, all stages on)
 
-Wall time: **2.45s** total, **0.188s** avg/query (13 queries, 229K seqs, resident DB)
+Wall time: **1.23s** total, **0.095s** avg/query (13 queries, 229K seqs, resident DB, fused SSV+null+bias+gate)
 
 | Component | Time (s) | % of wall | Notes |
 |-----------|----------|-----------|-------|
-| GPU Viterbi kernel | 0.475 | 19.4% | Dominant single cost |
-| Stage MSV host (read+kernel) | 0.398 | 16.2% | Includes I/O overlap |
-| Unaccounted residual (exact_other) | 0.334 | 13.6% | Inter-stage sync, host overhead |
-| I/O read + unpack | 0.258 | 10.5% | dsqdata metadata loading |
-| GPU Forward kernel | 0.243 | 9.9% | |
-| CPU post-Fwd/domain/null2 | 0.162 | 6.6% | Domain def + null2 + output |
-| GPU Bias kernel | 0.059 | 2.4% | |
-| GPU Backward kernel | 0.049 | 2.0% | |
-| GPU H2D + D2H | 0.003 | 0.1% | Negligible with resident DB |
+| GPU kernel (all stages) | 0.795 | 64.6% | SSV+null+bias+gate fused + Viterbi + Forward + Backward |
+| CPU post-Fwd/domain/null2 | 0.165 | 13.4% | Domain def + null2 + output |
+| Inter-stage overhead (exact_other) | 0.115 | 9.3% | Reduced from 0.246s by kernel fusion |
+| Vit/Fwd dispatch overlap | 0.100 | 8.1% | Overlaps with gpu_kernel |
+| GPU D2H | 0.003 | 0.2% | Survivor-indexed: ~32KB/batch vs prior 1.8MB |
+| GPU H2D | 0.002 | 0.2% | Negligible with resident DB |
+| Host survivor orchestration | 0.010 | 0.8% | BindSeqView + ReconfigLength |
+| I/O read + unpack | 0.000 | 0.0% | Eliminated by gpudb v2 |
 
-**GPU utilization**: ~34% of wall time is GPU kernel execution (0.827s kernel / 2.45s wall). The remaining time is CPU-bound post-processing, I/O, and inter-stage overhead.
+**GPU utilization**: ~65% of wall time is GPU kernel execution (0.795s kernel / 1.23s wall). The remaining time is CPU-bound post-processing and inter-stage overhead.
 
-**Filter funnel** (avg per query): 229K → 4213 past MSV → 4052 past bias → 288 past Vit → 15 past Fwd
+**Filter funnel** (avg per query): 229K → 4213 past MSV+bias (fused F1 gate) → 288 past Vit → 15 past Fwd
 
 ## Optimization Opportunities (ranked by impact, current benchmark)
 
-### 1. GPU Viterbi kernel — 19.4% of wall
+### 1. Inter-stage overhead (exact_other) — 9.3% of wall
 
-The single largest cost (0.475s across 13 queries). Average 544 candidates/launch, ~217K residues/launch.
-- **Opportunity**: Occupancy tuning (shared memory vs register pressure), warp-level DP with shuffle-based state propagation (as done for SSV), profile tiling for large M.
+0.115s not attributed to measured kernel/D2H buckets. Likely remaining sources: Viterbi/Forward batch construction, CUDA event record overhead, host-side survivor list sorting, and F1 survivor bias recomputation.
+- **Opportunity**: Profile with nsys to identify exact hotspots. Consider fusing F1 survivor bias into the main fused kernel (currently still a separate `cuda_bias_filter_survivors_kernel` call for double-precision recompute).
 
-### 2. Unaccounted residual (exact_other) — 13.6% of wall
+### 2. CPU domain definition — 13.4% of wall
 
-0.334s not attributed to any measured bucket. Likely inter-stage synchronization, host-side score conversion, F1 gating logic, and survivor list construction between kernel launches.
-- **Opportunity**: Instrument further to identify. Fuse MSV + null + bias into a single kernel to eliminate 2 sync points per batch. Move score conversion to GPU.
-
-### 3. I/O read + unpack — 10.5% of wall
-
-0.258s reading dsqdata metadata. With resident DB, sequence data is already on GPU; this cost is chunk metadata (names, accessions, descriptions) loaded for potential hit reporting.
-- **Opportunity**: Lazy-load metadata only for sequences that reach the hit stage (~15 per query). Or overlap I/O with GPU kernel via double-buffering.
-
-### 4. GPU Forward kernel — 9.9% of wall
-
-0.243s total. Same optimization approaches as Viterbi apply.
-- **Opportunity**: Occupancy tuning, kernel fusion with Backward (both traverse the same sequence), async overlap with CPU post-Fwd work.
-
-### 5. CPU domain definition — 6.6% of wall
-
-0.162s for `p7_domaindef_ByPosteriorHeuristics()` on ~15 sequences/query that pass Forward.
+0.165s for `p7_domaindef_ByPosteriorHeuristics()` on ~15 sequences/query that pass Forward.
 - **Opportunity**: Parallelize across survivors (thread pool for domain work). Eventually move posterior decoding to GPU (high complexity, deferred).
 
-### 6. Kernel fusion (MSV → bias) — reduces sync overhead
+### 3. GPU Forward kernel — part of gpu_kernel
 
-Currently MSV and bias are separate kernel launches with host-side sync between them. Fusing would eliminate one round-trip.
-- **Opportunity**: Single kernel that runs SSV → null → bias → F1 gating, producing compact survivor list directly.
+Same optimization approaches as Viterbi. The Forward kernel could be templated similarly to Viterbi.
+- **Opportunity**: Template on stride for register residence, kernel fusion with Backward.
+
+### 4. Viterbi/Forward dispatch overlap — 8.1% of wall
+
+The dispatch block overlaps with GPU kernel time. Reducing dispatch overhead or hiding more work behind kernel execution could shrink this.
+- **Opportunity**: Overlap CPU survivor work with next query's GPU kernel via streams or pipelining.
 
 ## Comparison: GPU vs CPU
 
-Current benchmark (13 queries, 229K seqs, single-process, all GPU stages default-on):
+Current benchmark (13 queries, 229K seqs, single-process, fused kernel, all GPU stages default-on):
 
 | Config | Wall time | Speedup |
 |--------|-----------|---------|
 | CPU 1-thread | 10.68s | 1.00x |
 | CPU 4-thread | 4.79s | 2.23x |
-| GPU (all stages) | 2.45s | **4.36x** vs CPU-1, **1.96x** vs CPU-4 |
+| GPU (fused, all stages) | 1.23s | **8.68x** vs CPU-1, **3.89x** vs CPU-4 |
+| GPU (legacy pipeline) | 1.49s | 7.17x vs CPU-1, 3.21x vs CPU-4 |
 
 **Critical benchmark note**: The profmark runner was previously invoking hmmsearch once per query (13 separate processes), paying ~0.35s CUDA init each time = 4.55s pure overhead. This made GPU appear 0.6x vs CPU-4. The fix: `test-speed/x-hmmsearch-gpu-profmark` now concatenates all HMMs and runs a single hmmsearch process for CPU and GPU respectively, matching real multi-query usage.
 
