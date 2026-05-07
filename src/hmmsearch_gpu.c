@@ -496,13 +496,6 @@ gpu_PreViterbiBoundary(WORKER_INFO *info, const ESL_SQ *dbsq, float gpu_usc, int
   if (P <= info->pli->F1) {
     passed_msv = TRUE;
     if (info->pli->do_biasfilter) {
-      double tbias0 = hmmsearch_WallTime();
-      p7_bg_FilterScore(info->bg, dbsq->dsq, dbsq->n, &filtersc);
-      {
-        double dt = hmmsearch_WallTime() - tbias0;
-        info->pli->time_bias += dt;
-        info->pli->exact_cpu_survivor_total += dt;
-      }
       seq_score = (usc + info->gpu_msv_slack - filtersc) / eslCONST_LOG2;
       P = esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
       if (P > info->pli->F1 && gpu_msv_status == eslOK) {
@@ -940,6 +933,16 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       }
 
       { double surv_loop_t0 = hmmsearch_WallTime();
+      if (info->pli->do_biasfilter) {
+        for (int si = 0; si < gpu_f1_nsurv; si++) {
+          int idx = gpu_f1_survivor_idx[si];
+          if (search_chu->L[idx] == 0) continue;
+          float cpu_fsc;
+          p7_bg_SetLength(info->bg, search_chu->L[idx]);
+          p7_bg_FilterScore(info->bg, search_chu->dsq[idx], search_chu->L[idx], &cpu_fsc);
+          gpu_filtersc[idx] = cpu_fsc;
+        }
+      }
       for (int si = 0; si < gpu_f1_nsurv; si++) {
         i = gpu_f1_survivor_idx[si];
         if (search_chu->L[i] == 0) continue;
@@ -960,7 +963,6 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           if (status != eslOK) goto ERROR;
           nullsc = previt.nullsc;
           usc = previt.usc;
-          if (info->pli->do_biasfilter) gpu_filtersc[i] = previt.filtersc;
           if (previt.passed_msv) {
             int passed = FALSE;
             info->pli->n_past_msv++;

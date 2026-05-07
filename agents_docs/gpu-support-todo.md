@@ -21,7 +21,7 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 ### High-impact optimizations
 
-- **Eliminate redundant CPU bias in survivor loop** (highest priority, ~0.59s savings): The survivor loop in `hmmsearch_gpu.c` calls `p7_bg_FilterScore()` on CPU for every F1 survivor (~4000/query), even though the GPU bias kernel already computed these scores in `gpu_filtersc[]`. The GPU bias kernel takes only 0.06s but the CPU re-computation takes 0.59s (24% of search time) and leaves the GPU idle. Fix: use the GPU-computed `gpu_filtersc[i]` directly in `gpu_PreViterbiBoundary` instead of calling `p7_bg_FilterScore`. This would raise GPU utilization from 54% to ~75%.
+- ~~**Eliminate redundant CPU bias in survivor loop**~~: Done (2026-05-07). Batched `p7_bg_FilterScore` pre-computation before survivor loop eliminates per-survivor pipeline setup overhead. GPU bias kernel values cannot replace CPU filtersc directly (float32 vs double precision divergence breaks downstream F2/F3 thresholds), but batching the CPU computation removes interleaved overhead. Result: 2.86s → 2.62s (8.4%), GPU utilization 54% → 62%.
 
 - **Reduce inter-kernel GPU idle time** (~0.22s savings): Between kernel launches, the host does score conversion, F1 gating, and survivor list construction. During this time the GPU is idle. Potential approaches:
   - Fuse MSV + null + bias into a single kernel launch (eliminates 2 sync points per batch)
@@ -47,6 +47,7 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) achieves 1.36x kernel speed
 - ~~GPU-native database format (.gpudb)~~: `src/p7_gpudb.c` + `src/p7_gpudb.h`, mmap-based reader, written by `hmmseqdb`.
 - ~~Resident database (whole-DB GPU upload)~~: `p7_cuda_engine_UploadDatabase()`, all kernels resident-aware, H2D reduced to ~0.02s.
 - ~~Eliminate multi-chunk view fallback path~~: with gpudb + resident DB, batch upload is eliminated entirely.
+- ~~Batched CPU bias pre-computation~~: pre-compute `filtersc` for all F1 survivors before survivor loop, eliminating per-survivor pipeline interleaving. 8.4% wall-time improvement.
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.
