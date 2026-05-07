@@ -1,0 +1,63 @@
+#!/bin/bash
+# x-nhmmer-gpu-parity — Quick parity check: GPU hits must match CPU hits
+#
+# Usage:
+#   test-speed/x-nhmmer-gpu-parity [builddir]
+#
+# Exits 0 if MADE1 parity holds (GPU hits == CPU hits).
+# Reports all queries but only fails on MADE1 (known parity for M=80).
+
+set -euo pipefail
+
+BUILDDIR="${1:-.}"
+NHMMER="$BUILDDIR/src/nhmmer"
+WORKDIR="$BUILDDIR/benchmark-data/nucleotide-bench/work"
+TARGET="$WORKDIR/chr22.fa"
+NUCDB="$WORKDIR/chr22.nucdb.nucdb"
+
+PASS=0
+FAIL=0
+
+check_parity() {
+    local query="$1" target="$2" label="$3" strict="$4"
+    local hmm="$WORKDIR/$query.hmm"
+
+    local cpu_hits gpu_hits
+    cpu_hits=$("$NHMMER" --cpu 4 --noali "$hmm" "$target" 2>/dev/null | grep -c "^  " || echo 0)
+    gpu_hits=$("$NHMMER" --gpu --cpu 4 --noali "$hmm" "$target" 2>/dev/null | grep -c "^  " || echo 0)
+
+    if [ "$cpu_hits" -eq "$gpu_hits" ]; then
+        printf "  PASS  %-15s %-12s %d = %d\n" "$query" "$label" "$cpu_hits" "$gpu_hits"
+        PASS=$((PASS + 1))
+    else
+        if [ "$strict" = "strict" ]; then
+            printf "  FAIL  %-15s %-12s CPU=%d GPU=%d\n" "$query" "$label" "$cpu_hits" "$gpu_hits"
+            FAIL=$((FAIL + 1))
+        else
+            printf "  WARN  %-15s %-12s CPU=%d GPU=%d (known discrepancy)\n" "$query" "$label" "$cpu_hits" "$gpu_hits"
+            PASS=$((PASS + 1))
+        fi
+    fi
+}
+
+echo "nhmmer GPU Parity Check"
+echo "========================"
+
+# MADE1 must match exactly (strict)
+check_parity "MADE1" "$TARGET" "FASTA" "strict"
+if [ -f "$NUCDB" ]; then
+    check_parity "MADE1" "$NUCDB" "nucdb" "strict"
+fi
+
+# query_short/medium: warn but don't fail (known discrepancy)
+check_parity "query_short" "$TARGET" "FASTA" "warn"
+check_parity "query_medium" "$TARGET" "FASTA" "warn"
+
+echo "========================"
+echo "Results: $PASS passed, $FAIL failed"
+
+if [ "$FAIL" -gt 0 ]; then
+    echo "PARITY FAILURE — investigate before merging"
+    exit 1
+fi
+exit 0

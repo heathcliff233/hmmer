@@ -1,69 +1,65 @@
-# nhmmer GPU vs CPU-4 Performance Gap
+# nhmmer GPU vs CPU Performance Gap
 
 Last updated: 2026-05-07
 
-## Current State
+## Current Benchmark (chr22, single query)
 
-GPU+batch+vit+vlt (all GPU stages) vs CPU-4 on single-query chr22 benchmarks:
+| Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
+|------|:---:|:---:|:---:|
+| CPU-1 | 0.97s | 1.29s | 6.32s |
+| CPU-4 | 0.36s | 0.46s | 1.87s |
+| GPU-4 FASTA | 2.87s | 6.47s | 46.5s |
+| GPU-4 nucdb | 2.31s | — | — |
 
-| Query | CPU-4 | GPU+batch+vit | GPU+batch+vit+vlt | Ratio (vlt) |
-|-------|-------|---------------|-------------------|-------------|
-| MADE1 (M=80) | 0.35s | 0.93s | 0.95s | 2.7x slower |
-| query_short (M=151) | 0.41s | 0.97s | 1.09s | 2.7x slower |
-| query_medium (M=501) | 1.80s | 2.77s | 3.71s | 2.1x slower |
+**GPU is 6-25x slower than CPU-4** on single-query benchmarks.
 
-## Fixed Overhead Breakdown
+## Root Causes
 
-These costs are independent of model size and dominate for short/medium models:
+### 1. CPU downstream dominates (90%+ of GPU wall time for M≥150)
 
-| Source | Cost | Amortizable? |
-|--------|------|-------------|
-| CUDA context init | ~0.5s | Yes (engine reuse across queries) |
-| FASTA sequential I/O | ~0.4s sys | No (inherent to esl_sqio_ReadWindow) |
-| Reverse complement | ~0.05s | No (50MB alloc + memcpy + complement) |
+After GPU SSV + scanning Viterbi identify sub-windows, CPU threads run ForwardParser + Backward + domain definition on each survivor. Cost per window: O(window_length × M).
 
-Total fixed overhead: ~0.9s per query (cold) or ~0.4s (warm, engine reused).
+- query_short (M=151): 372 surviving windows → ~5s CPU downstream
+- query_medium (M=501): 693 surviving windows → ~45s CPU downstream
 
-## GPU Scanning Viterbi Bottleneck
+The extra GPU hits (372 vs 363, 693 vs 648) amplify this — GPU is doing MORE CPU work than the CPU-only path.
 
-With `--gpu-vit-longtarget`, scanning Viterbi runs on GPU but the remaining CPU work (ForwardParser + domain definition on surviving windows) is now the dominant cost. For query_medium with 648 hits, CPU post-Viterbi processing takes ~1-2s.
+### 2. Fixed overhead (~0.5s)
 
-The GPU scanning Viterbi eliminated the CPU threshold computation bottleneck (previously serial bias filter per window) by computing thresholds on GPU: bias filter via existing batch kernel, null scores computed analytically in a threshold kernel. Kernel launch batches 8 warps/block for better occupancy.
+- CUDA context initialization: ~0.5s first query, ~0s subsequent (engine reuse)
+- Amortized over multi-query workloads
 
-## Paths to Parity with CPU-4
+### 3. GPU generates more survivors than CPU (parity issue)
 
-### 1. GPU ForwardParser / domain definition (saves ~1-2s for large models)
+GPU scanning Viterbi uses fixed `xw_*` profile parameters (not reconfigured per window length), making it more permissive than CPU's per-window `p7_oprofile_ReconfigLength`. This causes:
+- More false-positive sub-windows survive to CPU downstream
+- Each false positive costs O(window_length × M) CPU time
+- For M=501: 45 extra hits × ~65ms each ≈ 3s wasted
 
-The dominant remaining CPU cost. Would require GPU implementations of:
-- `p7_ForwardParser` (Forward algorithm with sparse DP)
-- `p7_domaindef` (posterior decoding, domain envelope identification)
+### 4. Kernel cost scales with M
 
-**Effort**: Very high. Complex algorithms with many data dependencies.
-**Impact**: Would make GPU competitive for large models.
+SSV kernel: O(L × M/8) per strand (inner Q-loop).
+Scanning Viterbi: O(L × M/8) per window, shared memory = O(M) per warp → reduced occupancy.
 
-### 2. Eliminate FASTA I/O overhead (saves ~0.4s)
+## What Would Fix It
 
-Replace `esl_sqio_ReadWindow` with memory-mapped I/O or a pre-built binary format.
+| Fix | Savings | Effort | Notes |
+|-----|---------|--------|-------|
+| GPU ForwardParser | ~40s for M=501 | Very high | Only fix for large models |
+| Fix per-window xw_* reconfigure | ~3s for M=501 | Medium | Eliminate false positives |
+| Avoid CPU downstream for false positives | ~3s for M=501 | Low | Tighter GPU thresholds |
+| Multi-query amortization | ~0.5s | Done | Engine reuse implemented |
+| Nucdb format | ~0.4s | Done | Eliminates FASTA parsing |
 
-**Effort**: Medium. Requires new sequence format or mmap support in Easel.
-**Impact**: 0.4s savings per query.
+## When GPU Nhmmer Makes Sense
 
-### 3. Multi-query amortization (already implemented)
+Currently the GPU path is NOT faster than CPU-4 for any single-query workload. It's a development scaffold toward GPU ForwardParser.
 
-Engine reuse saves ~0.25s per additional query. For workloads with 10+ queries, CUDA init becomes negligible.
+Potential future wins:
+- **Multi-query + nucdb**: Engine reuse + no FASTA parsing per query
+- **GPU ForwardParser**: Would eliminate the 90%+ bottleneck
+- **Very large databases**: PCIe bandwidth amortized over more residues (but CPU scales linearly too)
 
-**Effort**: Done.
-**Impact**: Already competitive for multi-query workloads.
+## Benchmark Script
 
-### 4. Parallel strand processing
-
-Overlapping GPU SSV scan of one strand with CPU downstream of the other.
-
-**Effort**: Low-medium. Requires async CUDA stream management.
-**Impact**: Modest (0.1-0.3s).
-
-## Priority Recommendation
-
-1. **GPU Forward/domain** (very high effort, but the only path to beating CPU-4 for large models)
-2. **FASTA I/O** (medium effort, saves fixed ~0.4s per query)
-3. **Parallel strands** (low effort, modest gain)
+Run `test-speed/x-nhmmer-gpu-bench` for quick comparison.

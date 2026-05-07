@@ -1,0 +1,96 @@
+#!/bin/bash
+# x-nhmmer-gpu-bench — Quick benchmark: nhmmer GPU vs CPU on chr22
+#
+# Usage:
+#   test-speed/x-nhmmer-gpu-bench [builddir]
+#
+# Runs MADE1, query_short, query_medium against chr22.fa (and nucdb if available).
+# Reports time and hit counts for CPU-1, CPU-4, GPU-4 (FASTA), GPU-4 (nucdb).
+#
+# Prerequisites:
+#   - Build with --enable-cuda
+#   - benchmark-data/nucleotide-bench/work/ must contain:
+#     chr22.fa, MADE1.hmm, query_short.hmm, query_medium.hmm
+#   - Optional: chr22.nucdb.nucdb (built with: src/hmmnucdb chr22.fa chr22.nucdb)
+
+set -euo pipefail
+
+BUILDDIR="${1:-.}"
+NHMMER="$BUILDDIR/src/nhmmer"
+HMMNUCDB="$BUILDDIR/src/hmmnucdb"
+WORKDIR="$BUILDDIR/benchmark-data/nucleotide-bench/work"
+
+if [ ! -x "$NHMMER" ]; then
+    echo "ERROR: $NHMMER not found. Build first." >&2
+    exit 1
+fi
+
+TARGET="$WORKDIR/chr22.fa"
+NUCDB="$WORKDIR/chr22.nucdb.nucdb"
+QUERIES=("MADE1" "query_short" "query_medium")
+
+if [ ! -f "$TARGET" ]; then
+    echo "ERROR: $TARGET not found. See agents_docs/nucleotide-benchmark.md" >&2
+    exit 1
+fi
+
+# Build nucdb if missing
+if [ ! -f "$NUCDB" ] && [ -x "$HMMNUCDB" ]; then
+    echo "Building nucdb..."
+    "$HMMNUCDB" "$TARGET" "$WORKDIR/chr22.nucdb" 2>/dev/null
+fi
+
+run_bench() {
+    local label="$1"
+    shift
+    local query_hmm="$1"
+    shift
+
+    local start end elapsed hits
+    start=$(date +%s%N)
+    hits=$("$@" 2>/dev/null | grep -c "^  " || echo 0)
+    end=$(date +%s%N)
+    elapsed=$(echo "scale=3; ($end - $start) / 1000000000" | bc)
+
+    printf "  %-22s %6ss  %4d hits\n" "$label" "$elapsed" "$hits"
+}
+
+# Header
+echo "================================================================"
+echo "nhmmer GPU Benchmark — $(date '+%Y-%m-%d %H:%M')"
+echo "Target: chr22.fa (50MB)"
+echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo 'unknown')"
+echo "================================================================"
+echo
+
+for q in "${QUERIES[@]}"; do
+    HMM="$WORKDIR/$q.hmm"
+    if [ ! -f "$HMM" ]; then
+        echo "SKIP: $HMM not found"
+        continue
+    fi
+
+    echo "--- $q ($(grep '^LENG' "$HMM" | awk '{print $2}') nodes) ---"
+
+    run_bench "CPU-1" "$HMM" "$NHMMER" --cpu 1 --noali "$HMM" "$TARGET"
+    run_bench "CPU-4" "$HMM" "$NHMMER" --cpu 4 --noali "$HMM" "$TARGET"
+
+    # GPU requires --enable-cuda build
+    if "$NHMMER" -h 2>&1 | grep -q "\-\-gpu"; then
+        run_bench "GPU-4 (FASTA)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$TARGET"
+
+        if [ -f "$NUCDB" ]; then
+            run_bench "GPU-4 (nucdb)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$NUCDB"
+        fi
+    else
+        echo "  (GPU not available — build with --enable-cuda)"
+    fi
+
+    echo
+done
+
+echo "================================================================"
+echo "Parity check: CPU-4 hit count is reference. GPU hits should match"
+echo "for MADE1. query_short/medium may show +5-10% extra GPU hits"
+echo "(known: GPU scanning Viterbi uses fixed xw_* parameters)."
+echo "================================================================"

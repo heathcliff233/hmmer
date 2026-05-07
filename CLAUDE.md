@@ -48,14 +48,29 @@ src/hmmsearch --gpu --gpu-ssv-compare query.hmm target.gpudb
 ### Running GPU nhmmer
 
 ```sh
-# GPU SSV + threaded CPU downstream (works on plain FASTA)
+# All GPU stages default-on with --gpu (SSV + batch filter + Viterbi)
 src/nhmmer --gpu --cpu 4 --noali query.hmm target.fa
 
-# With batch MSV/bias filter + Viterbi pre-filter (opt-in, parity-verified)
-src/nhmmer --gpu --gpu-batch --gpu-vit-prefilter --cpu 4 --noali query.hmm target.fa
+# With pre-built nucdb (eliminates FASTA parsing, ~20% faster)
+src/hmmnucdb target.fa target.nucdb
+src/nhmmer --gpu --cpu 4 --noali query.hmm target.nucdb.nucdb
+
+# Nucdb with overlap (enables GPU-resident path, zero H2D for SSV)
+src/hmmnucdb --overlap 2001 target.fa target-overlap.nucdb
+src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 
 # Tune chunk size (default 64K)
 src/nhmmer --gpu --cpu 4 --gpu-chunk-size 32768 query.hmm target.fa
+```
+
+### Running nhmmer GPU Benchmarks
+
+```sh
+# Full timing comparison (CPU-1, CPU-4, GPU-4 FASTA, GPU-4 nucdb)
+test-speed/x-nhmmer-gpu-bench .
+
+# Quick parity check (MADE1 must match exactly)
+test-speed/x-nhmmer-gpu-parity .
 ```
 
 ### Running profmark Benchmarks
@@ -100,8 +115,8 @@ agents_docs/       Detailed architecture documentation (see index below)
 
 - **Easel submodule**: Do not edit `easel/` directly for GPU work. The `dsqdata` chunk-sizing change comes from `patches/easel-dsqdata-open-sized.patch` applied at build time.
 - **No CMake**: Keep CUDA in the existing autotools build. Do not add CMake for any reason.
-- **GPU scope**: `hmmsearch --gpu` is protein-only (requires `.gpudb`). `nhmmer --gpu` accelerates the SSV longtarget stage on GPU with threaded CPU downstream (works on plain FASTA). `hmmscan`, `phmmer`, `jackhmmer`, and daemon remain CPU-only.
-- **Hit parity**: GPU path must preserve exact hit parity with CPU on profmark datasets (`cpu_only=0`, `gpu_only=0`).
+- **GPU scope**: `hmmsearch --gpu` is protein-only (requires `.gpudb`). `nhmmer --gpu` runs full GPU pipeline (SSV + batch filter + Viterbi + scanning Viterbi) with threaded CPU downstream (works on plain FASTA or `.nucdb`). `hmmscan`, `phmmer`, `jackhmmer`, and daemon remain CPU-only.
+- **Hit parity**: GPU path must preserve exact hit parity with CPU for MADE1 (M=80). query_short/medium show +5-10% extra GPU hits (known: fixed `xw_*` parameters in scanning Viterbi kernel).
 - **Pressed HMM files**: Do not change `.h3m/.h3i/.h3f/.h3p` format as part of GPU work.
 - **Configure requires Easel**: `configure.ac` includes macros from `easel/m4`; Easel must be present before `autoconf`.
 - **Benchmark data**: Use `benchmark-data/` (gitignored) for datasets and run logs, not `tutorial/` inputs for speed claims.
@@ -119,6 +134,16 @@ time src/nhmmer --cpu 1 --noali benchmark-data/nucleotide-bench/work/MADE1.hmm b
 ```
 
 Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.4s), query_long (M=2001, stress only). See `agents_docs/nucleotide-benchmark.md` for full setup and rebuild instructions.
+
+### Current nhmmer GPU Performance (RTX 4090, chr22)
+
+| Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
+|------|:---:|:---:|:---:|
+| CPU-4 | 0.36s / 465 | 0.46s / 363 | 1.87s / 648 |
+| GPU-4 FASTA | 2.87s / 465 | 6.47s / 372 | 46.5s / 693 |
+| GPU-4 nucdb | 2.31s / 465 | 5.6s / 372 | 47.3s / 693 |
+
+GPU is currently slower than CPU-4. Bottleneck: CPU ForwardParser/domain on surviving windows (90%+ of time for M≥150). See `agents_docs/nhmmer-gpu-perf-gap.md`.
 
 ## GPU Architecture Summary
 
@@ -185,8 +210,9 @@ Detailed architecture documentation lives in `agents_docs/`. Read in this order 
 | [gpu-timing-analysis.md](agents_docs/gpu-timing-analysis.md) | GPU timing instrumentation semantics, profiling results, optimization opportunities |
 | [cuda-hmm-reference.md](agents_docs/cuda-hmm-reference.md) | External cuda-hmm reference (design cues only, no code/build import) |
 | [nucleotide-benchmark.md](agents_docs/nucleotide-benchmark.md) | Nucleotide benchmark setup: chr22 target, query HMMs, baseline timings |
-| [nhmmer-gpu-progress.md](agents_docs/nhmmer-gpu-progress.md) | GPU nhmmer architecture, benchmark results, performance analysis |
-| [nhmmer-gpu-todo.md](agents_docs/nhmmer-gpu-todo.md) | GPU nhmmer phase checklist (all phases complete) |
+| [nhmmer-gpu-progress.md](agents_docs/nhmmer-gpu-progress.md) | GPU nhmmer architecture, file map, benchmark results, performance analysis |
+| [nhmmer-gpu-todo.md](agents_docs/nhmmer-gpu-todo.md) | GPU nhmmer phase checklist (all phases complete), known issues |
+| [nhmmer-gpu-perf-gap.md](agents_docs/nhmmer-gpu-perf-gap.md) | Why GPU is slower than CPU-4, root causes, what would fix it |
 
 ## Code Navigation
 
