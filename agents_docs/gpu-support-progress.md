@@ -8,7 +8,7 @@ Last updated: 2026-05-07
 - GPU code lives under `src/cuda/` with stage-owned CUDA files (`p7_cuda_msv.cu`, `p7_cuda_bias.cu`, `p7_cuda_viterbi.cu`, `p7_cuda_forward.cu`, `p7_cuda_fb_parser.cu`) and shared runtime/profile ownership in `p7_cuda_runtime.cu` + `p7_cuda_internal.h`.
 - `src/cuda_msv.h` is only a compatibility wrapper for existing callers; new CUDA-facing code should include `src/cuda/p7_cuda.h`.
 - The default accepted GPU path accelerates MSV and computes the biased-composition filter score in CUDA batches while reusing the MSV-uploaded sequence batch.
-- Exact hit parity currently depends on CPU-compatible checks at the bias-corrected F1 boundary: CPU `p7_bg_FilterScore()` supplies the final bias score for GPU MSV survivors (batched pre-computation before the survivor loop), and CPU `p7_MSVFilter()` can rescue bias-boundary rejects through the optimized CPU SSV shortcut. The GPU bias kernel (float32) cannot replace CPU filtersc directly due to precision divergence in downstream F2/F3 thresholds.
+- Exact hit parity is maintained by a two-stage GPU bias approach: (1) fast float32 kernel for all sequences (F1 gating pre-filter), (2) double-precision survivor kernel (`cuda_bias_filter_survivors_kernel`) recomputes filtersc with `log()` for ~4000 F1 survivors, achieving bit-identical parity with CPU `p7_bg_FilterScore`. CPU `p7_MSVFilter()` can still rescue bias-boundary rejects through the optimized CPU SSV shortcut. No CPU `p7_bg_FilterScore` calls remain in the GPU path.
 - Resident survivor-core work now keeps Viterbi/F3 pass decisions GPU-side in normal mode, copies only status/pass buffers when full scores are not needed, and materializes `ESL_SQ` metadata only for sequences entering CPU post-Fwd/domain work or compare diagnostics.
 - GPU-side F1 gating kernel (`cuda_f1_gating_kernel` in `p7_cuda_bias.cu`) computes MSV P-values and bias-adjusted P-values on device, producing a compact survivor index list via atomicAdd. The batch loop in `hmmsearch_gpu.c` now iterates only over F1 survivors rather than all sequences in the batch. `p7_pipeline_Reuse` and `gpu_RestoreSeqStorage` are called only for survivors.
 - For post-Viterbi Forward prefilter in normal mode, F3 gating is now pure GPU decision; CPU Forward rerun at the F3 gray zone is retained only in compare/debug paths, not production gating.
@@ -55,21 +55,23 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 
 | Config | Wall time | vs CPU-1 | vs CPU-4 |
 |--------|-----------|----------|----------|
-| CPU 1-thread | 9.59s (median) | 1.00x | — |
-| CPU 4-thread | 3.67s (median) | 2.61x | 1.00x |
-| GPU (resident DB, all stages) | 2.62s (median) | 3.66x | **1.40x** |
+| CPU 1-thread | 10.41s (median) | 1.00x | — |
+| CPU 4-thread | 3.36s (best) | 3.10x | 1.00x |
+| GPU (resident DB, all stages) | 2.59s (median) | 4.02x | **1.30x** |
 
 - Flags: `--gpu --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser`
 - Database: resident on GPU (229,290 seqs, 92.8 MB)
 - Hit parity: `cpu_only=0`, `gpu_only=0` across all 13 queries
 - CUDA init: ~0.51s one-time cost (amortized across queries)
+- CPU bias completely eliminated: double-precision GPU survivor kernel replaces `p7_bg_FilterScore`
+- `--gpu-previt-compare` shows zero CUDAPREVIT mismatches (bit-identical to CPU)
 
 **GPU time breakdown (~2.1s search, excluding CUDA init):**
 
 | Category | Time | % | Notes |
 |----------|------|---|-------|
 | GPU kernels | 1.31s | 62% | MSV 0.48 + Vit 0.47 + Fwd 0.25 + Bias 0.06 + Bck 0.05 |
-| CPU bias (batched pre-compute) | ~0.05s | 2% | Batch `p7_bg_FilterScore` before survivor loop |
+| GPU survivor bias | <0.01s | <1% | Double-precision recompute for ~4000 F1 survivors |
 | I/O (dsqdata read) | 0.22s | 10% | Reading chunk metadata |
 | Domain def + null2 | 0.16s | 8% | CPU-only, after Forward |
 | Other (score convert, F1 gate) | 0.13s | 6% | Between MSV kernel and survivor loop |

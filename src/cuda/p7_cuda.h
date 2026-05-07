@@ -125,6 +125,9 @@ extern int  p7_cuda_F1GatingDsqdataChunk(P7_CUDA_ENGINE *engine,
                                           double ev_mu, double ev_lambda, double F1,
                                           int *survivor_idx, int *ret_nsurv,
                                           char *errbuf, int errbuf_size);
+extern int  p7_cuda_BiasFilterSurvivors(P7_CUDA_ENGINE *engine, const P7_BG *bg,
+                                         int nsurv, float *h_filtersc,
+                                         char *errbuf, int errbuf_size);
 extern int  p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                           ESL_DSQDATA_CHUNK *chu, float *scores, int *statuses,
                                           char *errbuf, int errbuf_size);

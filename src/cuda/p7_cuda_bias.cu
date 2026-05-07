@@ -57,6 +57,56 @@ cuda_bias_filter_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
   sc += logf(p0 * t[2] + p1s * t[5]);
   filtersc[seq] = sc + (float) L * logf(len_p1) + logf(1.0f - len_p1);
 }
+
+__global__ static void
+cuda_bias_filter_survivors_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
+                                  const int *survivor_idx, int nsurv,
+                                  const float *pi, const float *t_fixed, const float *eo,
+                                  float *out_filtersc)
+{
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= nsurv) return;
+
+  int seq = survivor_idx[tid];
+  const uint8_t *sdsq = dsq + offsets[seq];
+  int L = lengths[seq];
+
+  if (L == 0) {
+    out_filtersc[tid] = (float)log((double)pi[2]);
+    return;
+  }
+
+  float t00 = (float)L / (float)(L + 1);
+  float t01 = 1.0f / (float)(L + 1);
+  float t10 = t_fixed[0];
+  float t11 = t_fixed[1];
+  float t02 = t_fixed[2];
+  float t12 = t_fixed[3];
+
+  float p0, p1s, n0, n1, maxv;
+  float logsc = 0.0f;
+
+  p0  = eo[(int)sdsq[1] * 2 + 0] * pi[0];
+  p1s = eo[(int)sdsq[1] * 2 + 1] * pi[1];
+  maxv = fmaxf(fmaxf(p0, p1s), 0.0f);
+  p0  /= maxv;
+  p1s /= maxv;
+  logsc += (float)log((double)maxv);
+
+  for (int i = 2; i <= L; i++) {
+    uint8_t x = sdsq[i];
+    n0  = (p0 * t00 + p1s * t10) * eo[(int)x * 2 + 0];
+    n1  = (p0 * t01 + p1s * t11) * eo[(int)x * 2 + 1];
+    maxv = fmaxf(fmaxf(n0, n1), 0.0f);
+    p0  = n0 / maxv;
+    p1s = n1 / maxv;
+    logsc += (float)log((double)maxv);
+  }
+
+  logsc += (float)log((double)(p0 * t02 + p1s * t12));
+  float len_p1 = (float)L / (float)(L + 1);
+  out_filtersc[tid] = logsc + (float)L * logf(len_p1) + logf(1.0f - len_p1);
+}
 extern "C" int
 p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
                                ESL_DSQDATA_CHUNK *chu, float *nullsc,
@@ -493,5 +543,70 @@ p7_cuda_F1GatingDsqdataChunk(P7_CUDA_ENGINE *engine,
 
 ERROR:
   *ret_nsurv = 0;
+  return status;
+}
+
+extern "C" int
+p7_cuda_BiasFilterSurvivors(P7_CUDA_ENGINE *engine, const P7_BG *bg,
+                            int nsurv, float *h_filtersc,
+                            char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int use_resident;
+  float h_pi[3];
+  float h_t_fixed[4];
+  size_t eo_bytes;
+
+  if (!engine || !bg || !h_filtersc) return eslEINVAL;
+  if (nsurv <= 0) return eslOK;
+
+  use_resident = engine->resident_active;
+
+  if (engine->bias_surv_alloc < nsurv) {
+    if (engine->d_bias_surv_filtersc) cudaFree(engine->d_bias_surv_filtersc);
+    engine->d_bias_surv_filtersc = NULL;
+    engine->bias_surv_alloc = 0;
+    int alloc_n = (nsurv > engine->f1_result_alloc) ? nsurv : engine->f1_result_alloc;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_bias_surv_filtersc, sizeof(float) * alloc_n), errbuf, errbuf_size, "cudaMalloc(bias surv filtersc)")) != eslOK) goto ERROR;
+    engine->bias_surv_alloc = alloc_n;
+  }
+
+  h_pi[0] = bg->fhmm->pi[0];
+  h_pi[1] = bg->fhmm->pi[1];
+  h_pi[2] = bg->fhmm->pi[2];
+  h_t_fixed[0] = bg->fhmm->t[1][0];
+  h_t_fixed[1] = bg->fhmm->t[1][1];
+  h_t_fixed[2] = bg->fhmm->t[0][2];
+  h_t_fixed[3] = bg->fhmm->t[1][2];
+
+  if ((status = cuda_status(cudaMemcpy(engine->d_bias_pi, h_pi, sizeof(h_pi), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(surv bias pi)")) != eslOK) goto ERROR;
+  eo_bytes = (size_t)bg->fhmm->abc->Kp * 2 * sizeof(float);
+  if ((status = cuda_status(cudaMemcpy(engine->d_bias_eo, bg->fhmm->eo[0], eo_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(surv bias eo)")) != eslOK) goto ERROR;
+
+  {
+    float *d_t_fixed = NULL;
+    if ((status = cuda_status(cudaMalloc((void **)&d_t_fixed, sizeof(h_t_fixed)), errbuf, errbuf_size, "cudaMalloc(t_fixed)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMemcpy(d_t_fixed, h_t_fixed, sizeof(h_t_fixed), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(t_fixed)")) != eslOK) { cudaFree(d_t_fixed); goto ERROR; }
+
+    uint8_t *d_dsq_ptr = use_resident ? engine->d_resident_dsq : engine->d_dsq;
+    int     *d_off_ptr = use_resident ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
+    int     *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+
+    cuda_bias_filter_survivors_kernel<<<(nsurv + 127) / 128, 128>>>(
+        d_dsq_ptr, d_off_ptr, d_len_ptr,
+        engine->d_f1_survivor_idx, nsurv,
+        engine->d_bias_pi, d_t_fixed, engine->d_bias_eo,
+        engine->d_bias_surv_filtersc);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_bias_filter_survivors_kernel launch")) != eslOK) { cudaFree(d_t_fixed); goto ERROR; }
+    if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_bias_filter_survivors_kernel sync")) != eslOK) { cudaFree(d_t_fixed); goto ERROR; }
+
+    cudaFree(d_t_fixed);
+  }
+
+  if ((status = cuda_status(cudaMemcpy(h_filtersc, engine->d_bias_surv_filtersc, sizeof(float) * nsurv, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(surv filtersc D2H)")) != eslOK) goto ERROR;
+
+  return eslOK;
+
+ERROR:
   return status;
 }

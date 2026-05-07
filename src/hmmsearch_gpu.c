@@ -933,15 +933,16 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       }
 
       { double surv_loop_t0 = hmmsearch_WallTime();
-      if (info->pli->do_biasfilter) {
-        for (int si = 0; si < gpu_f1_nsurv; si++) {
-          int idx = gpu_f1_survivor_idx[si];
-          if (search_chu->L[idx] == 0) continue;
-          float cpu_fsc;
-          p7_bg_SetLength(info->bg, search_chu->L[idx]);
-          p7_bg_FilterScore(info->bg, search_chu->dsq[idx], search_chu->L[idx], &cpu_fsc);
-          gpu_filtersc[idx] = cpu_fsc;
-        }
+      if (info->pli->do_biasfilter && gpu_f1_nsurv > 0) {
+        float *surv_filtersc = NULL;
+        ESL_ALLOC(surv_filtersc, sizeof(float) * gpu_f1_nsurv);
+        status = p7_cuda_BiasFilterSurvivors(info->cuda_engine, info->bg,
+                                             gpu_f1_nsurv, surv_filtersc,
+                                             errbuf, sizeof(errbuf));
+        if (status != eslOK) p7_Fail("CUDA survivor bias filter failed: %s\n", errbuf);
+        for (int si = 0; si < gpu_f1_nsurv; si++)
+          gpu_filtersc[gpu_f1_survivor_idx[si]] = surv_filtersc[si];
+        free(surv_filtersc);
       }
       for (int si = 0; si < gpu_f1_nsurv; si++) {
         i = gpu_f1_survivor_idx[si];

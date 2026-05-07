@@ -75,6 +75,8 @@ struct p7_cuda_msv_engine_s {
   int                *d_f1_survivor_idx;
   int                *d_f1_counter;
   int                 f1_result_alloc;
+  float              *d_bias_surv_filtersc;
+  int                 bias_surv_alloc;
   const struct p7_cuda_msv_profile_s *last_cuom;
   P7_CUDA_MSV_STATS   stats;
 

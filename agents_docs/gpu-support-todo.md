@@ -21,7 +21,7 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 ### High-impact optimizations
 
-- ~~**Eliminate redundant CPU bias in survivor loop**~~: Done (2026-05-07). Batched `p7_bg_FilterScore` pre-computation before survivor loop eliminates per-survivor pipeline setup overhead. GPU bias kernel values cannot replace CPU filtersc directly (float32 vs double precision divergence breaks downstream F2/F3 thresholds), but batching the CPU computation removes interleaved overhead. Result: 2.86s → 2.62s (8.4%), GPU utilization 54% → 62%.
+- ~~**Eliminate redundant CPU bias in survivor loop**~~: Done (2026-05-07). Double-precision GPU survivor kernel (`cuda_bias_filter_survivors_kernel`) recomputes filtersc with `log()` for ~4000 F1 survivors, achieving bit-identical parity with CPU `p7_bg_FilterScore`. CPU bias computation completely eliminated from GPU path. Result: 2.86s → 2.59s, GPU utilization 54% → 62%.
 
 - **Reduce inter-kernel GPU idle time** (~0.22s savings): Between kernel launches, the host does score conversion, F1 gating, and survivor list construction. During this time the GPU is idle. Potential approaches:
   - Fuse MSV + null + bias into a single kernel launch (eliminates 2 sync points per batch)
@@ -31,7 +31,7 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 - **Reduce I/O overhead** (0.22s, 9% of search): `io_read_unpack` is 0.22s even with resident DB. This is dsqdata chunk reading for metadata (names, accessions). With gpudb resident, the only reason to read dsqdata is for hit reporting metadata. Consider lazy-loading metadata only for sequences that reach the hit stage.
 
 ### SSV kernel — next steps
-The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) achieves 1.36x kernel speedup over monolithic MSV. However, with the current pipeline where kernels are only 54% of wall time, the 0.13s kernel savings from SSV has minimal impact on end-to-end performance. SSV becomes more impactful once the CPU bias bottleneck is eliminated. Remaining work:
+The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) achieves 1.36x kernel speedup over monolithic MSV. With the CPU bias bottleneck now eliminated, GPU kernels are ~62% of wall time, making the 0.13s kernel savings from SSV more impactful (~5% end-to-end). Remaining work:
 - **Make `--gpu-ssv` the default GPU MSV path**: the optimized kernel is parity-verified and 1.36x faster. Consider removing the monolithic kernel and making SSV the only path.
 - **Adaptive thread count**: current kernel uses 32 threads/block regardless of M. For small M (< 64), a single warp is sufficient; for large M (> 512), multiple warps with shared-memory partitioning could improve occupancy.
 - **Early termination**: since ~99.7% of sequences complete in the SSV fast-path, explore whether the SSV section can be further optimized (e.g., skip the warp reduction when the local max is clearly below threshold).
@@ -47,7 +47,7 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) achieves 1.36x kernel speed
 - ~~GPU-native database format (.gpudb)~~: `src/p7_gpudb.c` + `src/p7_gpudb.h`, mmap-based reader, written by `hmmseqdb`.
 - ~~Resident database (whole-DB GPU upload)~~: `p7_cuda_engine_UploadDatabase()`, all kernels resident-aware, H2D reduced to ~0.02s.
 - ~~Eliminate multi-chunk view fallback path~~: with gpudb + resident DB, batch upload is eliminated entirely.
-- ~~Batched CPU bias pre-computation~~: pre-compute `filtersc` for all F1 survivors before survivor loop, eliminating per-survivor pipeline interleaving. 8.4% wall-time improvement.
+- ~~Batched CPU bias pre-computation~~: superseded by double-precision GPU survivor kernel. CPU `p7_bg_FilterScore` completely eliminated from GPU path.
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.

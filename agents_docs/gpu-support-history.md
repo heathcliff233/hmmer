@@ -1,6 +1,6 @@
 # GPU Support History (Condensed)
 
-Last updated: 2026-05-06
+Last updated: 2026-05-07
 
 Purpose: keep a compact record of major GPU attempts, outcomes, and rejected directions. Detailed “daybook” logs are intentionally removed.
 
@@ -61,9 +61,17 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 
 - Active sensitivity risk boundary is bias-corrected F1 near CPU SSV/MSV shortcut behavior.
 - Current accepted mitigation:
-  - CPU `p7_bg_FilterScore()` supplies final bias score for GPU MSV survivors.
+  - Double-precision GPU survivor kernel (`cuda_bias_filter_survivors_kernel`) recomputes filtersc with `log()` for F1 survivors, achieving bit-identical parity with CPU `p7_bg_FilterScore`. No CPU bias calls remain.
   - CPU `p7_MSVFilter()` rescue remains available at the bias/F1 boundary.
-- Rationale: this boundary currently preserves exact parity on prepared all-13 evidence while keeping GPU acceleration useful.
+- Rationale: two-stage approach (fast float32 pre-filter + exact double-precision recompute for survivors) gives both speed and exact parity.
+
+### 5) Double-precision GPU survivor bias kernel (2026-05-07)
+- Problem: GPU float32 bias kernel (`logf()`) diverges from CPU (`log()`) by up to 4.75 nats, breaking downstream F2/F3 threshold decisions. CPU `p7_bg_FilterScore` was required for exact parity.
+- Failed attempt: full double-precision bias kernel for all 229K sequences — 14x slower (0.06s → 0.85s), not viable.
+- Solution: keep fast float32 kernel for F1 gating (conservative pre-filter), add a second kernel that recomputes filtersc with double-precision `log()` only for ~4000 F1 survivors.
+- Precision recipe (matching CPU exactly): float DP values, `(float)log((double)max)` for scale factors, float accumulation, `logf` for length correction. Per-sequence `t[0][0] = L/(L+1)` computed in-kernel.
+- Outcome: zero CUDAPREVIT mismatches (bit-identical to CPU). CPU `p7_bg_FilterScore` completely eliminated from GPU path.
+- Files: `cuda_bias_filter_survivors_kernel` in `src/cuda/p7_cuda_bias.cu`, wrapper `p7_cuda_BiasFilterSurvivors`.
 
 ### 4) Standalone GPU SSV kernel (2026-05-06 → 2026-05-07)
 - Attempt: extract the inline SSV fast-path from the monolithic MSV kernel into a standalone architecture.
