@@ -62,6 +62,7 @@ PROGS = alimask\
 	hmmpgmd_shard\
 	hmmpress\
 	hmmseqdb\
+	hmmnucdb\
 	hmmscan\
 	hmmsearch\
 	hmmsim\
@@ -88,6 +89,7 @@ PROGOBJS =\
 	hmmpgmd.o\
 	hmmpress.o\
 	hmmseqdb.o\
+	hmmnucdb.o\
 	hmmscan.o\
 	hmmsearch.o\
 	hmmsim.o\
@@ -111,6 +113,7 @@ HDRS =  hmmer.h \
 		nhmmer_internal.h \
 		p7_gbands.h \
 		p7_gpudb.h \
+		p7_nucdb.h \
 	p7_gmxb.h \
 	p7_gmxchk.h \
 	p7_hmmcache.h
@@ -150,6 +153,7 @@ OBJS =  build.o\
 	modelstats.o\
 	mpisupport.o\
 	p7_gpudb.o\
+	p7_nucdb.o\
 	seqmodel.o\
 	tracealign.o\
 	p7_alidisplay.o\
