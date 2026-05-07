@@ -21,7 +21,7 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 ### High-impact optimizations (ranked by current benchmark impact)
 
-- **GPU Viterbi kernel optimization** ~~(0.475s, 19.4% of wall)~~: Register-based warp-shuffle kernel implemented (32 threads/seq, contiguous node ownership, `__shfl_up_sync` boundaries). Architecture is cleaner but kernel time is flat for typical profmark workloads (~544 candidates/launch) because the compiler places register arrays in local memory (L1 cache) rather than true registers. The bottleneck is now **global memory bandwidth** (scattered profile accesses). Remaining approaches:
+- **GPU Viterbi kernel optimization** ~~(0.475s, 19.4% of wall)~~ → **0.162s after template optimization (2.9x kernel speedup)**. The kernel is now a C++ template parameterized on `STRIDE` with `#pragma unroll` on inner loops. For stride≤24 (M≤768, covering typical profmark queries), `nvcc` places `reg_M/D/I` in true registers (79 regs, 48-byte stack frame, zero spills at stride=8). For stride>24, a non-templated fallback retains the old local-memory behavior. Tile sizes increased 4x (4096 candidates/tile for M≤700) with int64 overflow fix in the residue-density heuristic. Remaining approaches:
   - Node-contiguous profile layout (`rwv_node[k * Kp + x]`) for coalesced cross-warp access
   - Preload transition/emission scores into shared memory per residue
   - Kernel fusion (MSV → bias → Vit in single kernel to avoid re-reading profile)
@@ -63,6 +63,8 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV 
 - gpudb v2 embedded metadata — eliminates dsqdata I/O entirely on resident path (0.258s → 0.000s)
 - madvise hints + cudaHostRegister for GPU upload DMA acceleration
 - Viterbi register-based warp-shuffle kernel (32 threads/seq, cleaner architecture, parity-verified)
+- Viterbi templated kernel — stride as compile-time constant for true register residence (2.9x kernel speedup, 0.475s → 0.162s)
+- Viterbi tile sizes 4x increase (4096 candidates/tile for M≤700) + int64 overflow fix in tile heuristic
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.

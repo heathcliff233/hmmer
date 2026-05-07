@@ -122,6 +122,14 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 ### 11) Register-based warp-shuffle Viterbi kernel (2026-05-07)
 - Problem: Viterbi kernel was dominant GPU cost (0.918s, 59.6% of wall). Old kernel used 8 threads per sequence (75% warp waste) with shared-memory DP rows.
 - Solution: rewrote as 32-thread/warp register-based kernel matching SSV design. Each thread owns contiguous model-node stripe; cross-thread boundaries via `__shfl_up_sync`. Two variants: small (M≤768, stride≤24) and large (M≤2048, stride≤64).
-- Outcome: Zero parity errors. Architecture cleaner (no wasted threads, less shmem), but Viterbi kernel time flat — compiler places register arrays in local memory (L1 cache) rather than true registers, making access patterns similar to shared memory. Bottleneck identified as global memory bandwidth (scattered profile accesses), not thread utilization. GPU wall 1.51s (6.27x vs CPU-1).
+- Outcome: Zero parity errors. Architecture cleaner (no wasted threads, less shmem), but Viterbi kernel time flat — compiler places register arrays in local memory (L1 cache) rather than true registers, making access patterns similar to shared memory. Bottleneck identified as global memory bandwidth (scattered profile accesses), not thread utilization.
 - Lesson: for Viterbi's 3-state DP (3 arrays × stride × int16), the register array approach that worked for SSV (1 array × stride × uint8) doesn't translate to true register residence. Future improvement requires profile layout changes or shared-memory preloading.
 - Files: `src/cuda/p7_cuda_viterbi.cu`, `src/cuda/p7_cuda_internal.h`.
+
+### 12) Templated Viterbi kernel + tile optimization (2026-05-07)
+- Problem: ptxas confirmed Viterbi "register" arrays were placed on stack (384 bytes stack frame, 48 regs) because `stride` was a runtime variable preventing compile-time array sizing. Additionally, tile sizes (1024 max for M≤700) underutilized RTX 4090's 128 SMs, and the tile heuristic had an int32 overflow bug.
+- Solution: (a) converted kernel to C++ template `cuda_viterbi_opt_kernel<STRIDE>` with `#pragma unroll` on inner loops. Dispatch via switch(stride) for stride 1–24 (VIT_OPT_MAX_STRIDE_SMALL); larger strides fall back to non-templated variant. (b) Increased Viterbi tile sizes 4x (1024→4096 for M≤700). (c) Fixed integer overflow in `gpu_ChooseTileCandidates`: `tile_n * tile_res` can exceed int32; changed to `int64_t` arithmetic.
+- Compiler results (stride=8, M=246): 79 registers, 48-byte stack frame, **zero spills** (was 48 regs + 384-byte stack). Stack residual is `__syncthreads` ABI frame, not DP arrays.
+- Outcome: Viterbi kernel **2.9x faster** (0.475s → 0.162s). Launches reduced 43% (91 → 52). GPU SM utilization 78% → 87%. Overall wall 1.63s → 1.45s (10.9% faster). Zero parity errors.
+- Lesson: `#pragma unroll` with compile-time template parameter is necessary and sufficient for nvcc to place arrays in true registers. The `break` inside the unrolled loop (for `j >= my_count`) does not prevent register allocation — nvcc still unrolls and uses predicated execution.
+- Files: `src/cuda/p7_cuda_viterbi.cu`, `src/hmmsearch_gpu.c`.

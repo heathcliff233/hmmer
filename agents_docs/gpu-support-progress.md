@@ -1,6 +1,6 @@
 # GPU Support Progress
 
-Last updated: 2026-05-07 (benchmark refreshed after default-on flag cleanup)
+Last updated: 2026-05-07 (Viterbi templated kernel + tile optimization)
 
 ## Current State
 
@@ -13,7 +13,7 @@ Last updated: 2026-05-07 (benchmark refreshed after default-on flag cleanup)
 - GPU-side F1 gating kernel (`cuda_f1_gating_kernel` in `p7_cuda_bias.cu`) computes MSV P-values and bias-adjusted P-values on device, producing a compact survivor index list via atomicAdd. The batch loop in `hmmsearch_gpu.c` now iterates only over F1 survivors rather than all sequences in the batch. `p7_pipeline_Reuse` and `gpu_RestoreSeqStorage` are called only for survivors.
 - Survivor loop is sorted by sequence length before processing, with ReconfigLength caching to skip redundant `p7_bg_SetLength`/`p7_oprofile_ReconfigLength` calls for same-length sequences.
 - For post-Viterbi Forward prefilter in normal mode, F3 gating is now pure GPU decision; CPU Forward rerun at the F3 gray zone is retained only in compare/debug paths, not production gating.
-- GPU Viterbi uses a register-based warp-shuffle kernel (32 threads/sequence, one warp per block). Each thread owns a contiguous stripe of model nodes; cross-thread boundaries use `__shfl_up_sync`. Two compile-time variants: small (M≤768, stride≤24) and large (M≤2048, stride≤64). Legacy shared-memory kernel retained as M>2048 fallback. Tiling strategy includes an M>2048 tier for very large models.
+- GPU Viterbi uses a **templated** register-based warp-shuffle kernel (32 threads/sequence, one warp per block). Each thread owns a contiguous stripe of model nodes; cross-thread boundaries use `__shfl_up_sync`. The kernel is a C++ template parameterized on stride (compile-time constant), enabling `nvcc` to place `reg_M/D/I` arrays in true registers for stride≤24 (M≤768). For stride>24 (M>768, ≤2048), a non-templated large-stride fallback is used. Legacy shared-memory kernel retained as M>2048 fallback. Tiling strategy 4x larger than original (up to 4096 candidates/tile for small M) for better GPU occupancy.
 - The stats report now includes exact exclusive timing buckets (`Exact io_read_unpack`, `Exact gpu_h2d`, `Exact gpu_kernel`, `Exact gpu_d2h`, `Exact host_survivor_orchestration`, `Exact cpu_postfwd_domain_null2_output`, `Exact other`) plus `Exact delta_vs_wall`. Legacy `Stage *` and `CUDA *` lines are retained for continuity but can overlap by construction.
 - All GPU stages (SSV/MSV, Viterbi prefilter, Forward prefilter, FB parser) are enabled by default with `--gpu`. Debug compare flags and largem overrides remain available.
 - The Easel `dsqdata` chunk-sizing change is applied at build time from `patches/easel-dsqdata-open-sized.patch`; do not edit the Easel submodule in place for this work.
@@ -71,12 +71,13 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 |--------|-----------|----------|----------|
 | CPU 1-thread | 10.68s | 1.00x | — |
 | CPU 4-thread | 4.79s | — | 1.00x |
-| GPU (all stages) | 1.51s | **6.27x** | **3.17x** |
+| GPU (all stages) | 1.45s | **7.37x** | **3.30x** |
 
 - Flags: `--gpu` (all stages now default-on)
 - Database: resident on GPU (229,290 seqs, 92.8 MB), gpudb v2 with embedded metadata
 - Hit parity: `cpu_only=0`, `gpu_only=0` across all 13 queries
 - Benchmark: `test-speed/x-hmmsearch-gpu-profmark` (multi-query single-process mode)
+- GPU utilization: **87%** SM utilization during kernel execution (`nvidia-smi` sampled)
 - Key optimizations reaching current state:
   - All GPU stages default-on (no separate opt-in flags)
   - Multi-query single-process benchmark (CUDA init paid once)
@@ -86,6 +87,8 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
   - gpudb v2 embedded metadata eliminates dsqdata I/O entirely (~0.26s/query saved)
   - `madvise` hints (SEQUENTIAL for upload, RANDOM for metadata) on mmap'd gpudb
   - `cudaHostRegister` for DMA-accelerated initial GPU upload
+  - **Templated Viterbi kernel** — stride as compile-time constant enables true register residence (2.9x Viterbi kernel speedup)
+  - **Larger Viterbi tile sizes** — 4x increase (4096 candidates/tile for M≤700) with int64 overflow fix
 
 **Benchmark run**: `benchmark-data/profmark-current/gpu-audit/io-opt/`
 

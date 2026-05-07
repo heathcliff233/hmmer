@@ -47,173 +47,182 @@ vit_twv_idx(int t, int q, int lane, int Q)
  * Register-based warp-shuffle Viterbi kernel (optimized).
  * One warp (32 threads) per sequence. Each thread owns a contiguous stripe
  * of model nodes in registers. Cross-thread boundary via __shfl_up_sync.
+ *
+ * The kernel is templated on STRIDE (the compile-time number of nodes per
+ * thread) so that nvcc places reg_M/D/I in true registers rather than
+ * local memory (stack). A dispatch switch selects the right instantiation.
  * ========================================================================= */
 
-#define VIT_OPT_KERNEL_BODY(MAX_STRIDE)                                              \
-{                                                                                    \
-  extern __shared__ uint8_t vit_opt_mem[];                                           \
-  int tid = threadIdx.x;                                                             \
-  int seq = blockIdx.x;                                                              \
-  if (seq >= nidx) return;                                                           \
-                                                                                     \
-  int si = seqidx ? seqidx[seq] : seq;                                              \
-  int L = lengths[si];                                                               \
-  const uint8_t *s = dsq + offsets[si];                                              \
-                                                                                     \
-  int stride = (M + 31) / 32;                                                       \
-  int my_start = tid * stride;                                                       \
-  int my_count = stride;                                                             \
-  if (my_start + my_count > M) my_count = M - my_start;                             \
-  if (my_count < 0) my_count = 0;                                                   \
-                                                                                     \
-  uint8_t *s_q = vit_opt_mem;                                                        \
-  uint8_t *s_z = vit_opt_mem + M;                                                    \
-  for (int k = tid; k < M; k += 32) {                                               \
-    s_q[k] = (uint8_t)(k % Q);                                                      \
-    s_z[k] = (uint8_t)(k / Q);                                                      \
-  }                                                                                  \
-  __syncthreads();                                                                   \
-                                                                                     \
-  int16_t reg_M[MAX_STRIDE];                                                         \
-  int16_t reg_D[MAX_STRIDE];                                                         \
-  int16_t reg_I[MAX_STRIDE];                                                         \
-  for (int j = 0; j < my_count; j++) reg_M[j] = reg_D[j] = reg_I[j] = -32768;      \
-                                                                                     \
-  float pmove = (2.0f + nj) / ((float) L + 2.0f + nj);                              \
-  int16_t xw_move = i16_wordify(scale_w, logf(pmove));                               \
-  int16_t xN = base_w;                                                               \
-  int16_t xB = i16_add_sat(xN, xw_move);                                            \
-  int16_t xJ = -32768;                                                               \
-  int16_t xC = -32768;                                                               \
-  int vit_overflow = 0;                                                              \
-                                                                                     \
-  for (int i = 1; i <= L; i++) {                                                     \
-    uint8_t x = s[i];                                                                \
-    xB = (int16_t) __shfl_sync(0xffffffff, (int) xB, 0);                            \
-                                                                                     \
-    int16_t last_M = (my_count > 0) ? reg_M[my_count-1] : (int16_t)-32768;          \
-    int16_t last_D = (my_count > 0) ? reg_D[my_count-1] : (int16_t)-32768;          \
-    int16_t last_I = (my_count > 0) ? reg_I[my_count-1] : (int16_t)-32768;          \
-    int16_t km1_M = (int16_t) __shfl_up_sync(0xffffffff, (int) last_M, 1);          \
-    int16_t km1_D = (int16_t) __shfl_up_sync(0xffffffff, (int) last_D, 1);          \
-    int16_t km1_I = (int16_t) __shfl_up_sync(0xffffffff, (int) last_I, 1);          \
-    if (tid == 0) { km1_M = -32768; km1_D = -32768; km1_I = -32768; }               \
-                                                                                     \
-    int16_t dcv = -32768;                                                            \
-    int16_t xE_local = -32768;                                                       \
-    int16_t dmax_local = -32768;                                                     \
-                                                                                     \
-    for (int j = 0; j < my_count; j++) {                                             \
-      int k = my_start + j;                                                          \
-      int q_k = (int) s_q[k];                                                       \
-      int z_k = (int) s_z[k];                                                       \
-      int16_t old_M = reg_M[j], old_D = reg_D[j], old_I = reg_I[j];                 \
-                                                                                     \
-      int16_t sv = i16_add_sat(xB, twv[(q_k*7 + p7O_BM)*8 + z_k]);                  \
-      int16_t c;                                                                     \
-      c = i16_add_sat(km1_M, twv[(q_k*7 + p7O_MM)*8 + z_k]); if (c > sv) sv = c;   \
-      c = i16_add_sat(km1_I, twv[(q_k*7 + p7O_IM)*8 + z_k]); if (c > sv) sv = c;   \
-      c = i16_add_sat(km1_D, twv[(q_k*7 + p7O_DM)*8 + z_k]); if (c > sv) sv = c;   \
-      sv = i16_add_sat(sv, rwv[((int)x * Q + q_k) * 8 + z_k]);                      \
-      if (sv > xE_local) xE_local = sv;                                              \
-                                                                                     \
-      int16_t sv_i = i16_add_sat(old_M, twv[(q_k*7 + p7O_MI)*8 + z_k]);             \
-      c = i16_add_sat(old_I, twv[(q_k*7 + p7O_II)*8 + z_k]);                        \
-      if (c > sv_i) sv_i = c;                                                        \
-                                                                                     \
-      int16_t sv_d = dcv;                                                            \
-      dcv = i16_add_sat(sv, twv[(q_k*7 + p7O_MD)*8 + z_k]);                          \
-      if (dcv > dmax_local) dmax_local = dcv;                                        \
-                                                                                     \
-      reg_M[j] = sv;                                                                 \
-      reg_I[j] = sv_i;                                                               \
-      reg_D[j] = sv_d;                                                               \
-      km1_M = old_M; km1_D = old_D; km1_I = old_I;                                  \
-    }                                                                                \
-                                                                                     \
-    int xEi = (int) xE_local, dmaxi = (int) dmax_local;                             \
-    for (int off = 16; off > 0; off >>= 1) {                                        \
-      int o;                                                                         \
-      o = __shfl_down_sync(0xffffffff, xEi, off);   if (o > xEi) xEi = o;           \
-      o = __shfl_down_sync(0xffffffff, dmaxi, off); if (o > dmaxi) dmaxi = o;       \
-    }                                                                                \
-                                                                                     \
-    if (tid == 0) {                                                                  \
-      int16_t xE = (int16_t) xEi;                                                   \
-      if (xE >= 32767) vit_overflow = 1;                                             \
-      xN = i16_add_sat(xN, xw_n_loop);                                              \
-      int16_t c1 = i16_add_sat(xC, xw_c_loop);                                      \
-      int16_t c2 = i16_add_sat(xE, xw_e_move);                                      \
-      xC = (c1 > c2) ? c1 : c2;                                                     \
-      int16_t j1 = i16_add_sat(xJ, xw_j_loop);                                      \
-      int16_t j2 = i16_add_sat(xE, xw_e_loop);                                      \
-      xJ = (j1 > j2) ? j1 : j2;                                                     \
-      int16_t b1 = i16_add_sat(xJ, xw_move);                                        \
-      int16_t b2 = i16_add_sat(xN, xw_move);                                        \
-      xB = (b1 > b2) ? b1 : b2;                                                     \
-    }                                                                                \
-                                                                                     \
-    int dmax_all = __shfl_sync(0xffffffff, dmaxi, 0);                                \
-    int xB_bcast = __shfl_sync(0xffffffff, (int) xB, 0);                             \
-    if (dmax_all + (int) ddbound_w > xB_bcast) {                                     \
-      int16_t from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) dcv, 1);         \
-      if (tid == 0) from_dcv = -32768;                                               \
-      for (int j = 0; j < my_count; j++) {                                           \
-        int k = my_start + j;                                                        \
-        int q_k = (int) s_q[k], z_k = (int) s_z[k];                                 \
-        if (from_dcv > reg_D[j]) reg_D[j] = from_dcv;                               \
-        from_dcv = i16_add_sat(reg_D[j], twv[(7*Q + q_k)*8 + z_k]);                  \
-      }                                                                              \
-      int any_improved;                                                              \
-      do {                                                                           \
-        from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) from_dcv, 1);          \
-        if (tid == 0) from_dcv = -32768;                                             \
-        int improved = 0;                                                            \
-        for (int j = 0; j < my_count; j++) {                                         \
-          int k = my_start + j;                                                      \
-          int q_k = (int) s_q[k], z_k = (int) s_z[k];                               \
-          if (from_dcv > reg_D[j]) { reg_D[j] = from_dcv; improved = 1; }            \
-          from_dcv = i16_add_sat(reg_D[j], twv[(7*Q + q_k)*8 + z_k]);                \
-        }                                                                            \
-        any_improved = __any_sync(0xffffffff, improved);                              \
-      } while (any_improved);                                                        \
-    } else {                                                                         \
-      int16_t from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) dcv, 1);         \
-      if (tid == 0) from_dcv = -32768;                                               \
-      if (my_count > 0 && from_dcv > reg_D[0]) reg_D[0] = from_dcv;                  \
-    }                                                                                \
-  }                                                                                  \
-                                                                                     \
-  if (tid == 0) {                                                                    \
-    if (vit_overflow) {                                                              \
-      scores[seq] = eslINFINITY;                                                     \
-      statuses[seq] = eslERANGE;                                                     \
-    } else {                                                                         \
-      scores[seq] = ((float) xC + (float) xw_move - (float) base_w) / scale_w - 3.0f; \
-      statuses[seq] = eslOK;                                                         \
-    }                                                                                \
-  }                                                                                  \
+template <int STRIDE>
+__global__ static void
+cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
+                        const int *seqidx, int nidx,
+                        const int16_t *rwv, const int16_t *twv, int M, int Q, int Kp,
+                        int16_t xw_n_loop, int16_t xw_n_move, int16_t xw_c_loop, int16_t xw_c_move,
+                        int16_t xw_j_loop, int16_t xw_j_move, int16_t xw_e_loop, int16_t xw_e_move,
+                        float scale_w, int16_t base_w, int16_t ddbound_w, float nj,
+                        float *scores, int *statuses)
+{
+  extern __shared__ uint8_t vit_opt_mem[];
+  int tid = threadIdx.x;
+  int seq = blockIdx.x;
+  if (seq >= nidx) return;
+
+  int si = seqidx ? seqidx[seq] : seq;
+  int L = lengths[si];
+  const uint8_t *s = dsq + offsets[si];
+
+  int stride = (M + 31) / 32;
+  int my_start = tid * stride;
+  int my_count = stride;
+  if (my_start + my_count > M) my_count = M - my_start;
+  if (my_count < 0) my_count = 0;
+
+  uint8_t *s_q = vit_opt_mem;
+  uint8_t *s_z = vit_opt_mem + M;
+  for (int k = tid; k < M; k += 32) {
+    s_q[k] = (uint8_t)(k % Q);
+    s_z[k] = (uint8_t)(k / Q);
+  }
+  __syncthreads();
+
+  int16_t reg_M[STRIDE];
+  int16_t reg_D[STRIDE];
+  int16_t reg_I[STRIDE];
+  #pragma unroll
+  for (int j = 0; j < STRIDE; j++) reg_M[j] = reg_D[j] = reg_I[j] = -32768;
+
+  float pmove = (2.0f + nj) / ((float) L + 2.0f + nj);
+  int16_t xw_move = i16_wordify(scale_w, logf(pmove));
+  int16_t xN = base_w;
+  int16_t xB = i16_add_sat(xN, xw_move);
+  int16_t xJ = -32768;
+  int16_t xC = -32768;
+  int vit_overflow = 0;
+
+  for (int i = 1; i <= L; i++) {
+    uint8_t x = s[i];
+    xB = (int16_t) __shfl_sync(0xffffffff, (int) xB, 0);
+
+    int16_t last_M = (my_count > 0) ? reg_M[my_count-1] : (int16_t)-32768;
+    int16_t last_D = (my_count > 0) ? reg_D[my_count-1] : (int16_t)-32768;
+    int16_t last_I = (my_count > 0) ? reg_I[my_count-1] : (int16_t)-32768;
+    int16_t km1_M = (int16_t) __shfl_up_sync(0xffffffff, (int) last_M, 1);
+    int16_t km1_D = (int16_t) __shfl_up_sync(0xffffffff, (int) last_D, 1);
+    int16_t km1_I = (int16_t) __shfl_up_sync(0xffffffff, (int) last_I, 1);
+    if (tid == 0) { km1_M = -32768; km1_D = -32768; km1_I = -32768; }
+
+    int16_t dcv = -32768;
+    int16_t xE_local = -32768;
+    int16_t dmax_local = -32768;
+
+    #pragma unroll
+    for (int j = 0; j < STRIDE; j++) {
+      if (j >= my_count) break;
+      int k = my_start + j;
+      int q_k = (int) s_q[k];
+      int z_k = (int) s_z[k];
+      int16_t old_M = reg_M[j], old_D = reg_D[j], old_I = reg_I[j];
+
+      int16_t sv = i16_add_sat(xB, twv[(q_k*7 + p7O_BM)*8 + z_k]);
+      int16_t c;
+      c = i16_add_sat(km1_M, twv[(q_k*7 + p7O_MM)*8 + z_k]); if (c > sv) sv = c;
+      c = i16_add_sat(km1_I, twv[(q_k*7 + p7O_IM)*8 + z_k]); if (c > sv) sv = c;
+      c = i16_add_sat(km1_D, twv[(q_k*7 + p7O_DM)*8 + z_k]); if (c > sv) sv = c;
+      sv = i16_add_sat(sv, rwv[((int)x * Q + q_k) * 8 + z_k]);
+      if (sv > xE_local) xE_local = sv;
+
+      int16_t sv_i = i16_add_sat(old_M, twv[(q_k*7 + p7O_MI)*8 + z_k]);
+      c = i16_add_sat(old_I, twv[(q_k*7 + p7O_II)*8 + z_k]);
+      if (c > sv_i) sv_i = c;
+
+      int16_t sv_d = dcv;
+      dcv = i16_add_sat(sv, twv[(q_k*7 + p7O_MD)*8 + z_k]);
+      if (dcv > dmax_local) dmax_local = dcv;
+
+      reg_M[j] = sv;
+      reg_I[j] = sv_i;
+      reg_D[j] = sv_d;
+      km1_M = old_M; km1_D = old_D; km1_I = old_I;
+    }
+
+    int xEi = (int) xE_local, dmaxi = (int) dmax_local;
+    for (int off = 16; off > 0; off >>= 1) {
+      int o;
+      o = __shfl_down_sync(0xffffffff, xEi, off);   if (o > xEi) xEi = o;
+      o = __shfl_down_sync(0xffffffff, dmaxi, off); if (o > dmaxi) dmaxi = o;
+    }
+
+    if (tid == 0) {
+      int16_t xE = (int16_t) xEi;
+      if (xE >= 32767) vit_overflow = 1;
+      xN = i16_add_sat(xN, xw_n_loop);
+      int16_t c1 = i16_add_sat(xC, xw_c_loop);
+      int16_t c2 = i16_add_sat(xE, xw_e_move);
+      xC = (c1 > c2) ? c1 : c2;
+      int16_t j1 = i16_add_sat(xJ, xw_j_loop);
+      int16_t j2 = i16_add_sat(xE, xw_e_loop);
+      xJ = (j1 > j2) ? j1 : j2;
+      int16_t b1 = i16_add_sat(xJ, xw_move);
+      int16_t b2 = i16_add_sat(xN, xw_move);
+      xB = (b1 > b2) ? b1 : b2;
+    }
+
+    int dmax_all = __shfl_sync(0xffffffff, dmaxi, 0);
+    int xB_bcast = __shfl_sync(0xffffffff, (int) xB, 0);
+    if (dmax_all + (int) ddbound_w > xB_bcast) {
+      int16_t from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) dcv, 1);
+      if (tid == 0) from_dcv = -32768;
+      #pragma unroll
+      for (int j = 0; j < STRIDE; j++) {
+        if (j >= my_count) break;
+        int k = my_start + j;
+        int q_k = (int) s_q[k], z_k = (int) s_z[k];
+        if (from_dcv > reg_D[j]) reg_D[j] = from_dcv;
+        from_dcv = i16_add_sat(reg_D[j], twv[(7*Q + q_k)*8 + z_k]);
+      }
+      int any_improved;
+      do {
+        from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) from_dcv, 1);
+        if (tid == 0) from_dcv = -32768;
+        int improved = 0;
+        #pragma unroll
+        for (int j = 0; j < STRIDE; j++) {
+          if (j >= my_count) break;
+          int k = my_start + j;
+          int q_k = (int) s_q[k], z_k = (int) s_z[k];
+          if (from_dcv > reg_D[j]) { reg_D[j] = from_dcv; improved = 1; }
+          from_dcv = i16_add_sat(reg_D[j], twv[(7*Q + q_k)*8 + z_k]);
+        }
+        any_improved = __any_sync(0xffffffff, improved);
+      } while (any_improved);
+    } else {
+      int16_t from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) dcv, 1);
+      if (tid == 0) from_dcv = -32768;
+      if (my_count > 0 && from_dcv > reg_D[0]) reg_D[0] = from_dcv;
+    }
+  }
+
+  if (tid == 0) {
+    if (vit_overflow) {
+      scores[seq] = eslINFINITY;
+      statuses[seq] = eslERANGE;
+    } else {
+      scores[seq] = ((float) xC + (float) xw_move - (float) base_w) / scale_w - 3.0f;
+      statuses[seq] = eslOK;
+    }
+  }
 }
 
-__global__ static void
-cuda_viterbi_opt_small_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
-                              const int *seqidx, int nidx,
-                              const int16_t *rwv, const int16_t *twv, int M, int Q, int Kp,
-                              int16_t xw_n_loop, int16_t xw_n_move, int16_t xw_c_loop, int16_t xw_c_move,
-                              int16_t xw_j_loop, int16_t xw_j_move, int16_t xw_e_loop, int16_t xw_e_move,
-                              float scale_w, int16_t base_w, int16_t ddbound_w, float nj,
-                              float *scores, int *statuses)
-VIT_OPT_KERNEL_BODY(VIT_OPT_MAX_STRIDE_SMALL)
-
-__global__ static void
-cuda_viterbi_opt_large_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
-                              const int *seqidx, int nidx,
-                              const int16_t *rwv, const int16_t *twv, int M, int Q, int Kp,
-                              int16_t xw_n_loop, int16_t xw_n_move, int16_t xw_c_loop, int16_t xw_c_move,
-                              int16_t xw_j_loop, int16_t xw_j_move, int16_t xw_e_loop, int16_t xw_e_move,
-                              float scale_w, int16_t base_w, int16_t ddbound_w, float nj,
-                              float *scores, int *statuses)
-VIT_OPT_KERNEL_BODY(VIT_OPT_MAX_STRIDE_LARGE)
+/* Dispatch helper: select the right stride instantiation at runtime */
+#define VIT_OPT_LAUNCH(STRIDE_VAL)                                             \
+  cuda_viterbi_opt_kernel<STRIDE_VAL><<<nidx, 32, opt_shmem>>>(                \
+    d_dsq_ptr, d_off_ptr, d_len_ptr, d_idx_ptr, nidx,                         \
+    cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,                   \
+    cuom->xw_n_loop, cuom->xw_n_move, cuom->xw_c_loop, cuom->xw_c_move,      \
+    cuom->xw_j_loop, cuom->xw_j_move, cuom->xw_e_loop, cuom->xw_e_move,      \
+    cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,                   \
+    engine->d_vit_scores, engine->d_vit_statuses)
 
 __global__ static void
 cuda_viterbi_score_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
@@ -558,28 +567,28 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     int     *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
     int     *d_idx_ptr = seqidx ? engine->d_vit_seqidx : NULL;
 
-    if (use_opt_small) {
+    if (use_opt_small || use_opt_large) {
       size_t opt_shmem = (size_t) cuom->M * 2;
-      cuda_viterbi_opt_small_kernel<<<nidx, 32, opt_shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
-                                                              d_idx_ptr, nidx,
-                                                              cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,
-                                                              cuom->xw_n_loop, cuom->xw_n_move,
-                                                              cuom->xw_c_loop, cuom->xw_c_move,
-                                                              cuom->xw_j_loop, cuom->xw_j_move,
-                                                              cuom->xw_e_loop, cuom->xw_e_move,
-                                                              cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,
-                                                              engine->d_vit_scores, engine->d_vit_statuses);
-    } else if (use_opt_large) {
-      size_t opt_shmem = (size_t) cuom->M * 2;
-      cuda_viterbi_opt_large_kernel<<<nidx, 32, opt_shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
-                                                              d_idx_ptr, nidx,
-                                                              cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,
-                                                              cuom->xw_n_loop, cuom->xw_n_move,
-                                                              cuom->xw_c_loop, cuom->xw_c_move,
-                                                              cuom->xw_j_loop, cuom->xw_j_move,
-                                                              cuom->xw_e_loop, cuom->xw_e_move,
-                                                              cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,
-                                                              engine->d_vit_scores, engine->d_vit_statuses);
+      int stride = (cuom->M + 31) / 32;
+      if (stride <= VIT_OPT_MAX_STRIDE_SMALL) {
+        switch (stride) {
+          case 1:  VIT_OPT_LAUNCH(1);  break;  case 2:  VIT_OPT_LAUNCH(2);  break;
+          case 3:  VIT_OPT_LAUNCH(3);  break;  case 4:  VIT_OPT_LAUNCH(4);  break;
+          case 5:  VIT_OPT_LAUNCH(5);  break;  case 6:  VIT_OPT_LAUNCH(6);  break;
+          case 7:  VIT_OPT_LAUNCH(7);  break;  case 8:  VIT_OPT_LAUNCH(8);  break;
+          case 9:  VIT_OPT_LAUNCH(9);  break;  case 10: VIT_OPT_LAUNCH(10); break;
+          case 11: VIT_OPT_LAUNCH(11); break;  case 12: VIT_OPT_LAUNCH(12); break;
+          case 13: VIT_OPT_LAUNCH(13); break;  case 14: VIT_OPT_LAUNCH(14); break;
+          case 15: VIT_OPT_LAUNCH(15); break;  case 16: VIT_OPT_LAUNCH(16); break;
+          case 17: VIT_OPT_LAUNCH(17); break;  case 18: VIT_OPT_LAUNCH(18); break;
+          case 19: VIT_OPT_LAUNCH(19); break;  case 20: VIT_OPT_LAUNCH(20); break;
+          case 21: VIT_OPT_LAUNCH(21); break;  case 22: VIT_OPT_LAUNCH(22); break;
+          case 23: VIT_OPT_LAUNCH(23); break;  case 24: VIT_OPT_LAUNCH(24); break;
+          default: VIT_OPT_LAUNCH(24); break;
+        }
+      } else {
+        VIT_OPT_LAUNCH(VIT_OPT_MAX_STRIDE_LARGE);
+      }
     } else {
       int blocks = (nidx + groups_per_block - 1) / groups_per_block;
       cuda_viterbi_score_kernel<<<blocks, threads, shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,

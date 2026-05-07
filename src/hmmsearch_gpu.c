@@ -113,14 +113,14 @@ gpu_ChooseTileCandidates(const WORKER_INFO *info, int is_fwd, int total_n, int t
     tile_n = (M > 2048) ? 96 : (M > 1200) ? 192 : (M > 700 ? 320 : 640);
     tile_res = (M > 2048) ? 100000 : (M > 1200) ? 200000 : (M > 700 ? 350000 : 700000);
   } else {
-    tile_n = (M > 2048) ? 128 : (M > 1200) ? 256 : (M > 700 ? 512 : 1024);
-    tile_res = (M > 2048) ? 150000 : (M > 1200) ? 280000 : (M > 700 ? 500000 : 1000000);
+    tile_n = (M > 2048) ? 512 : (M > 1200) ? 1024 : (M > 700 ? 2048 : 4096);
+    tile_res = (M > 2048) ? 600000 : (M > 1200) ? 1120000 : (M > 700 ? 2000000 : 4000000);
   }
   if (total_n < tile_n) tile_n = total_n;
   if (tile_n < 1) tile_n = 1;
   if (total_res > 0) {
-    int by_res = ESL_MAX(1, (tile_n * tile_res) / total_res);
-    tile_n = ESL_MIN(tile_n, by_res);
+    int64_t by_res = ESL_MAX(1, ((int64_t) tile_n * tile_res) / total_res);
+    if (by_res < tile_n) tile_n = (int) by_res;
     if (tile_n < 1) tile_n = 1;
   }
   return tile_n;
