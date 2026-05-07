@@ -121,6 +121,10 @@ struct p7_cuda_msv_engine_s {
   int                 resident_active;
   int64_t             resident_batch_seq0;
   int                 resident_batch_nseq;
+
+  /* Nucdb resident data (uploaded once, reused across sequences/queries) */
+  uint8_t            *d_resident_nucdb;
+  int64_t             resident_nucdb_size;
 };
 
 struct p7_cuda_msv_profile_s {

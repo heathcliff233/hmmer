@@ -114,6 +114,7 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_vlt_thresholds) cudaFree(engine->d_vlt_thresholds);
   if (engine->d_vlt_windows)   cudaFree(engine->d_vlt_windows);
   if (engine->d_vlt_win_count) cudaFree(engine->d_vlt_win_count);
+  if (engine->d_resident_nucdb) cudaFree(engine->d_resident_nucdb);
   free(engine);
 }
 
@@ -467,4 +468,37 @@ p7_cuda_DefaultWarpsPerBlock(int device_id, int kernel_id,
     }
   }
   return best_w;
+}
+
+extern "C" int
+p7_cuda_engine_UploadNucdb(P7_CUDA_ENGINE *engine, const uint8_t *data, int64_t size,
+                           char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  if (!engine || !data || size <= 0) return eslEINVAL;
+
+  p7_cuda_engine_ReleaseNucdb(engine);
+
+  if ((status = cuda_status(cudaMalloc((void **)&engine->d_resident_nucdb, size), errbuf, errbuf_size, "cudaMalloc(nucdb)")) != eslOK) return status;
+  if ((status = cuda_status(cudaMemcpy(engine->d_resident_nucdb, data, size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(nucdb)")) != eslOK) {
+    cudaFree(engine->d_resident_nucdb);
+    engine->d_resident_nucdb = NULL;
+    return status;
+  }
+  engine->resident_nucdb_size = size;
+  return eslOK;
+}
+
+extern "C" void
+p7_cuda_engine_ReleaseNucdb(P7_CUDA_ENGINE *engine)
+{
+  if (!engine) return;
+  if (engine->d_resident_nucdb) { cudaFree(engine->d_resident_nucdb); engine->d_resident_nucdb = NULL; }
+  engine->resident_nucdb_size = 0;
+}
+
+extern "C" const uint8_t *
+p7_cuda_engine_NucdbDevPtr(const P7_CUDA_ENGINE *engine)
+{
+  return engine ? engine->d_resident_nucdb : NULL;
 }

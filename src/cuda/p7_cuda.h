@@ -200,6 +200,20 @@ extern int  p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
                                   P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
                                   char *errbuf, int errbuf_size);
 
+extern int  p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                          const uint8_t *d_nucdb_data, int nchunks,
+                                          const int *h_offsets, const int *h_lengths,
+                                          const uint8_t *ssv_scores_host, int Kp,
+                                          uint8_t sc_thresh, float scale_b,
+                                          int step,
+                                          P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
+                                          char *errbuf, int errbuf_size);
+
+extern int  p7_cuda_engine_UploadNucdb(P7_CUDA_ENGINE *engine, const uint8_t *data, int64_t size,
+                                       char *errbuf, int errbuf_size);
+extern void p7_cuda_engine_ReleaseNucdb(P7_CUDA_ENGINE *engine);
+extern const uint8_t *p7_cuda_engine_NucdbDevPtr(const P7_CUDA_ENGINE *engine);
+
 extern int  p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                       const ESL_DSQ *dsq, int L,
                                       const P7_HMM_WINDOW *windows, int nwindows,

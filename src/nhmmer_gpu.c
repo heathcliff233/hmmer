@@ -1000,23 +1000,53 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   uint8_t sc_thresh = (uint8_t)ceil(((nullsc + (invP * eslCONST_LOG2) + 3.0) * om->scale_b)
                                     + om->base_b + om->tec_b + om->tjb_b);
 
-  /* Run GPU SSV longtarget on the full-length sq using its dsq directly.
-   * The nucdb chunks serve as the coordinate map, but the GPU SSV kernel
-   * operates on the full sequence (it does its own chunking internally).
-   * This avoids reconstructing the dsq from nucdb chunks. */
   int chunk_size = info->gpu_chunk_size > 0 ? info->gpu_chunk_size : NHMMER_GPU_CHUNK_SIZE;
   int overlap    = om->max_length;
 
   P7_CUDA_LT_WINDOW *gpu_windows = NULL;
   int gpu_nwindows = 0;
 
-  status = p7_cuda_SSVLongtarget(info->cuda_engine, info->cuda_msv,
-                                 sq->dsq, sq->n,
-                                 info->scoredata->ssv_scores, om->abc->Kp,
-                                 sc_thresh, om->scale_b,
-                                 chunk_size, overlap,
-                                 &gpu_windows, &gpu_nwindows,
-                                 errbuf, errbuf_size);
+  /* Use GPU-resident path when nucdb is uploaded and chunks have sufficient overlap */
+  const uint8_t *d_nucdb = p7_cuda_engine_NucdbDevPtr(info->cuda_engine);
+  if (d_nucdb &&
+      (int64_t)ndb->hdr.overlap >= (int64_t)om->max_length &&
+      (int64_t)ndb->hdr.chunk_size == (int64_t)chunk_size)
+  {
+    int *h_offsets = (int *)malloc(sizeof(int) * chunk_count);
+    int *h_lengths = (int *)malloc(sizeof(int) * chunk_count);
+    if (!h_offsets || !h_lengths) { free(h_offsets); free(h_lengths); return eslEMEM; }
+
+    int ndb_step = (int)ndb->hdr.chunk_size - (int)ndb->hdr.overlap;
+    if (ndb_step < 1) ndb_step = 1;
+
+    for (int c = 0; c < chunk_count; c++) {
+      P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+      h_offsets[c] = (int)ci->data_offset;
+      h_lengths[c] = ci->length;
+    }
+
+    status = p7_cuda_SSVLongtargetResident(info->cuda_engine, info->cuda_msv,
+                                            d_nucdb, chunk_count,
+                                            h_offsets, h_lengths,
+                                            info->scoredata->ssv_scores, om->abc->Kp,
+                                            sc_thresh, om->scale_b,
+                                            ndb_step,
+                                            &gpu_windows, &gpu_nwindows,
+                                            errbuf, errbuf_size);
+    free(h_offsets);
+    free(h_lengths);
+  }
+  else
+  {
+    /* Fallback: use host dsq (kernel does its own chunking with overlap) */
+    status = p7_cuda_SSVLongtarget(info->cuda_engine, info->cuda_msv,
+                                   sq->dsq, sq->n,
+                                   info->scoredata->ssv_scores, om->abc->Kp,
+                                   sc_thresh, om->scale_b,
+                                   chunk_size, overlap,
+                                   &gpu_windows, &gpu_nwindows,
+                                   errbuf, errbuf_size);
+  }
   if (status != eslOK) return status;
 
   if (gpu_nwindows == 0) { free(gpu_windows); return eslOK; }
@@ -1287,6 +1317,15 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
   p7_oprofile_ReconfigMSVLength(om, om->max_length);
   p7_cuda_msvprofile_UpdateLength(info->cuda_msv, om, om->max_length, errbuf, sizeof(errbuf));
 
+  /* Upload nucdb data to GPU once for all sequences */
+  int64_t nucdb_data_size = (int64_t)(ndb->mmap_size - ndb->hdr.data_offset);
+  status = p7_cuda_engine_UploadNucdb(info->cuda_engine, ndb->chunk_data, nucdb_data_size,
+                                       errbuf, sizeof(errbuf));
+  if (status != eslOK) {
+    fprintf(stderr, "GPU nhmmer: failed to upload nucdb: %s\n", errbuf);
+    goto ERROR;
+  }
+
   for (int64_t si = 0; si < (int64_t)ndb->hdr.nseq; si++) {
     P7_NUCDB_SEQ_IDX *sidx = &ndb->seq_idx[si];
     const char       *seqname = ndb->name_blob + sidx->name_offset;
@@ -1347,12 +1386,37 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
       }
     }
 
-    /* Reverse complement strand */
+    /* Reverse complement strand — reconstruct directly from nucdb RC chunks */
     if (strands != p7_STRAND_TOPONLY && sidx->rc_chunk_count > 0) {
       ESL_SQ *sq_rc = esl_sq_CreateDigital(om->abc);
       if (!sq_rc) { esl_sq_Destroy(sq); return eslEMEM; }
-      esl_sq_Copy(sq, sq_rc);
-      esl_sq_ReverseComplement(sq_rc);
+      esl_sq_SetName(sq_rc, seqname);
+      esl_sq_GrowTo(sq_rc, sidx->length);
+
+      for (int c = 0; c < sidx->rc_chunk_count; c++) {
+        P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[sidx->rc_chunk_start + c];
+        uint8_t *chunk_dsq = ndb->chunk_data + ci->data_offset;
+
+        int64_t copy_start = 0;
+        int64_t copy_len   = ci->length;
+        if (c > 0) {
+          int64_t prev_end = ndb->chunk_idx[sidx->rc_chunk_start + c - 1].seq_offset +
+                             ndb->chunk_idx[sidx->rc_chunk_start + c - 1].length;
+          if (prev_end > ci->seq_offset) {
+            copy_start = prev_end - ci->seq_offset;
+            copy_len  -= copy_start;
+          }
+        }
+        if (copy_len > 0)
+          memcpy(sq_rc->dsq + 1 + ci->seq_offset + copy_start,
+                 chunk_dsq + 1 + copy_start, copy_len);
+      }
+      sq_rc->n = sidx->length;
+      sq_rc->dsq[0] = eslDSQ_SENTINEL;
+      sq_rc->dsq[sq_rc->n + 1] = eslDSQ_SENTINEL;
+      sq_rc->start = 1;
+      sq_rc->end   = sq_rc->n;
+      sq_rc->L     = sq_rc->n;
       nres += sq_rc->n;
 
       status = nhmmer_gpu_process_nucdb_strand(info, ndb,
@@ -1377,9 +1441,11 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
 
   *ret_nseqs = (int)ndb->hdr.nseq;
   *ret_nres  = nres;
+  p7_cuda_engine_ReleaseNucdb(info->cuda_engine);
   return eslOK;
 
 ERROR:
+  p7_cuda_engine_ReleaseNucdb(info->cuda_engine);
   return status;
 }
 
