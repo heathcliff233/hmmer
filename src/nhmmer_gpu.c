@@ -11,6 +11,7 @@
 
 #include "easel.h"
 #include "esl_alphabet.h"
+#include "esl_dsqdata.h"
 #include "esl_gumbel.h"
 #include "esl_sq.h"
 #include "esl_sqio.h"
@@ -25,8 +26,280 @@
 
 #define NHMMER_GPU_CHUNK_SIZE  65536
 #define NHMMER_GPU_BLOCK_SIZE  (512 * 1024 * 1024)
+#define NHMMER_GPU_BATCH_MIN   32
 
 #ifdef HMMER_CUDA
+
+static char nhmmer_empty_str[] = "";
+
+static int
+nhmmer_gpu_window_batch_init(NHMMER_GPU_WINDOW_BATCH *wb, int alloc)
+{
+  int status;
+  wb->nwindows = 0;
+  wb->alloc    = alloc;
+
+  ESL_ALLOC(wb->dsq_ptrs, sizeof(ESL_DSQ *)  * alloc);
+  ESL_ALLOC(wb->lengths,  sizeof(int64_t)    * alloc);
+  ESL_ALLOC(wb->names,    sizeof(char *)     * alloc);
+  ESL_ALLOC(wb->accs,     sizeof(char *)     * alloc);
+  ESL_ALLOC(wb->descs,    sizeof(char *)     * alloc);
+  ESL_ALLOC(wb->taxids,   sizeof(int32_t)    * alloc);
+  ESL_ALLOC(wb->win_idx,  sizeof(int)        * alloc);
+
+  memset(&wb->chu, 0, sizeof(ESL_DSQDATA_CHUNK));
+  return eslOK;
+
+ERROR:
+  return eslEMEM;
+}
+
+static void
+nhmmer_gpu_window_batch_free(NHMMER_GPU_WINDOW_BATCH *wb)
+{
+  if (wb->dsq_ptrs) free(wb->dsq_ptrs);
+  if (wb->lengths)  free(wb->lengths);
+  if (wb->names)    free(wb->names);
+  if (wb->accs)     free(wb->accs);
+  if (wb->descs)    free(wb->descs);
+  if (wb->taxids)   free(wb->taxids);
+  if (wb->win_idx)  free(wb->win_idx);
+}
+
+/* Pack merged windows into a synthetic ESL_DSQDATA_CHUNK for GPU batch APIs.
+ * Zero-copy: dsq pointers point into the parent sequence. */
+static int
+nhmmer_gpu_window_batch_pack(NHMMER_GPU_WINDOW_BATCH *wb, const ESL_SQ *sq,
+                             P7_HMM_WINDOWLIST *wl)
+{
+  int i;
+  int status;
+
+  if (wl->count > wb->alloc) {
+    wb->alloc = wl->count;
+    ESL_REALLOC(wb->dsq_ptrs, sizeof(ESL_DSQ *)  * wb->alloc);
+    ESL_REALLOC(wb->lengths,  sizeof(int64_t)    * wb->alloc);
+    ESL_REALLOC(wb->names,    sizeof(char *)     * wb->alloc);
+    ESL_REALLOC(wb->accs,     sizeof(char *)     * wb->alloc);
+    ESL_REALLOC(wb->descs,    sizeof(char *)     * wb->alloc);
+    ESL_REALLOC(wb->taxids,   sizeof(int32_t)    * wb->alloc);
+    ESL_REALLOC(wb->win_idx,  sizeof(int)        * wb->alloc);
+  }
+
+  wb->nwindows = wl->count;
+  for (i = 0; i < wl->count; i++) {
+    wb->dsq_ptrs[i] = sq->dsq + wl->windows[i].n - 1;
+    wb->lengths[i]  = wl->windows[i].length;
+    wb->names[i]    = nhmmer_empty_str;
+    wb->accs[i]     = nhmmer_empty_str;
+    wb->descs[i]    = nhmmer_empty_str;
+    wb->taxids[i]   = -1;
+    wb->win_idx[i]  = i;
+  }
+
+  wb->chu.i0       = 0;
+  wb->chu.N        = wl->count;
+  wb->chu.dsq      = wb->dsq_ptrs;
+  wb->chu.name     = wb->names;
+  wb->chu.acc      = wb->accs;
+  wb->chu.desc     = wb->descs;
+  wb->chu.taxid    = wb->taxids;
+  wb->chu.L        = wb->lengths;
+  wb->chu.smem     = NULL;
+  wb->chu.psq      = NULL;
+  wb->chu.pn       = 0;
+  wb->chu.metadata = NULL;
+  wb->chu.mdalloc  = 0;
+  wb->chu.nxt      = NULL;
+
+  return eslOK;
+
+ERROR:
+  return eslEMEM;
+}
+
+/* GPU batch SSV + null + bias + F1 gating.
+ * Filters the merged window list in-place: survivors are compacted to the front.
+ * Returns the number of survivors in *ret_nsurv. */
+static int
+nhmmer_gpu_batch_filter(NHMMER_GPU_INFO *info, NHMMER_GPU_WINDOW_BATCH *wb,
+                        P7_HMM_WINDOWLIST *wl, int *ret_nsurv,
+                        char *errbuf, int errbuf_size)
+{
+  int       status;
+  int       N = wb->nwindows;
+  float    *ssv_scores  = NULL;
+  int      *ssv_status  = NULL;
+  float    *null_scores = NULL;
+  float    *bias_scores = NULL;
+  int       nsurv = 0;
+  int       i;
+  double    P;
+  float     seq_score;
+  P7_OPROFILE *om = info->om;
+  P7_PIPELINE *pli = info->pli;
+
+  ESL_ALLOC(ssv_scores,  sizeof(float) * N);
+  ESL_ALLOC(ssv_status,  sizeof(int)   * N);
+  ESL_ALLOC(null_scores, sizeof(float) * N);
+  ESL_ALLOC(bias_scores, sizeof(float) * N);
+
+  status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv,
+                                         &wb->chu, ssv_scores, ssv_status,
+                                         errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+
+  status = p7_cuda_NullScoreDsqdataChunk(info->cuda_engine, info->bg,
+                                         &wb->chu, null_scores,
+                                         errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+
+  if (pli->do_biasfilter) {
+    status = p7_cuda_BiasFilterDsqdataChunk(info->cuda_engine, info->bg,
+                                            &wb->chu, bias_scores,
+                                            errbuf, errbuf_size);
+    if (status != eslOK) goto ERROR;
+  }
+
+  for (i = 0; i < N; i++) {
+    if (ssv_status[i] == eslERANGE) {
+      /* Overflow = very high score, always passes */
+      if (nsurv != i)
+        wl->windows[nsurv] = wl->windows[i];
+      nsurv++;
+      continue;
+    }
+    if (ssv_status[i] != eslOK) continue;
+
+    int    window_len = (int)wb->lengths[i];
+    float  nullsc     = null_scores[i];
+    float  usc        = ssv_scores[i];
+    int    F1_L       = ESL_MIN(window_len, pli->B1);
+    float  filtersc;
+
+    if (pli->do_biasfilter) {
+      float bias_filtersc = bias_scores[i] - nullsc;
+      filtersc = nullsc + (bias_filtersc * ((F1_L > window_len) ? 1.0f : (float)F1_L / window_len));
+      seq_score = (usc - filtersc) / eslCONST_LOG2;
+    } else {
+      seq_score = (usc - nullsc) / eslCONST_LOG2;
+    }
+
+    P = esl_gumbel_surv(seq_score, om->evparam[p7_MMU], om->evparam[p7_MLAMBDA]);
+    if (P > pli->F1) continue;
+
+    if (nsurv != i)
+      wl->windows[nsurv] = wl->windows[i];
+    nsurv++;
+  }
+
+  wl->count = nsurv;
+  *ret_nsurv = nsurv;
+
+  free(ssv_scores);
+  free(ssv_status);
+  free(null_scores);
+  free(bias_scores);
+  return eslOK;
+
+ERROR:
+  if (ssv_scores)  free(ssv_scores);
+  if (ssv_status)  free(ssv_status);
+  if (null_scores) free(null_scores);
+  if (bias_scores) free(bias_scores);
+  *ret_nsurv = 0;
+  return status;
+}
+
+/* GPU Viterbi pre-filter on a subset of windows.
+ * Windows that fail GPU Viterbi (single-score < threshold) cannot produce
+ * sub-windows in scanning Viterbi, so they are removed.
+ * Filters wl in-place, returns survivor count in *ret_nsurv. */
+static int
+nhmmer_gpu_viterbi_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
+                             NHMMER_GPU_WINDOW_BATCH *wb,
+                             P7_HMM_WINDOWLIST *wl, int *ret_nsurv,
+                             char *errbuf, int errbuf_size)
+{
+  int       status;
+  int       N = wl->count;
+  float    *vit_scores  = NULL;
+  int      *vit_status  = NULL;
+  float    *filtersc    = NULL;
+  int      *passed      = NULL;
+  int      *seqidx      = NULL;
+  int       nsurv = 0;
+  int       i;
+  P7_OPROFILE *om = info->om;
+  P7_PIPELINE *pli = info->pli;
+  P7_BG       *bg = info->bg;
+
+  /* Re-pack batch from current (compacted) window list */
+  nhmmer_gpu_window_batch_pack(wb, sq, wl);
+
+  ESL_ALLOC(vit_scores, sizeof(float) * N);
+  ESL_ALLOC(vit_status, sizeof(int)   * N);
+  ESL_ALLOC(filtersc,   sizeof(float) * N);
+  ESL_ALLOC(passed,     sizeof(int)   * N);
+  ESL_ALLOC(seqidx,     sizeof(int)   * N);
+
+  for (i = 0; i < N; i++) {
+    seqidx[i] = i;
+
+    int   window_len     = (int)wb->lengths[i];
+    int   loc_window_len = ESL_MIN(window_len, om->max_length);
+    int   F2_L           = ESL_MIN(window_len, pli->B2);
+    float nullsc, bias_filtersc_val;
+
+    p7_bg_SetLength(bg, loc_window_len);
+    p7_bg_NullOne(bg, wb->dsq_ptrs[i], loc_window_len, &nullsc);
+
+    if (pli->do_biasfilter) {
+      p7_bg_SetLength(bg, window_len);
+      p7_bg_FilterScore(bg, wb->dsq_ptrs[i], window_len, &bias_filtersc_val);
+      bias_filtersc_val -= nullsc;
+      filtersc[i] = nullsc + (bias_filtersc_val * ((F2_L > window_len) ? 1.0f : (float)F2_L / window_len));
+    } else {
+      filtersc[i] = nullsc;
+    }
+  }
+
+  status = p7_cuda_ViterbiFilterDsqdataSubset(info->cuda_engine, info->cuda_msv,
+                                              &wb->chu, seqidx, N,
+                                              filtersc,
+                                              om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
+                                              pli->F2,
+                                              vit_scores, vit_status, passed,
+                                              errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+
+  for (i = 0; i < N; i++) {
+    if (passed[i]) {
+      if (nsurv != i)
+        wl->windows[nsurv] = wl->windows[i];
+      nsurv++;
+    }
+  }
+
+  wl->count = nsurv;
+  *ret_nsurv = nsurv;
+
+  free(vit_scores);
+  free(vit_status);
+  free(filtersc);
+  free(passed);
+  free(seqidx);
+  return eslOK;
+
+ERROR:
+  if (vit_scores) free(vit_scores);
+  if (vit_status) free(vit_status);
+  if (filtersc)   free(filtersc);
+  if (passed)     free(passed);
+  if (seqidx)     free(seqidx);
+  *ret_nsurv = 0;
+  return status;
+}
 
 typedef struct {
   P7_OPROFILE      *om;
@@ -131,7 +404,6 @@ nhmmer_gpu_worker_process(NHMMER_GPU_WORKER *w)
     p7_MSVFilter(subseq, window->length, w->om, w->pli->oxf, &usc);
     P = esl_gumbel_surv((usc - nullsc) / eslCONST_LOG2,
                         w->om->evparam[p7_MMU], w->om->evparam[p7_MLAMBDA]);
-
     if (P > w->pli->F1) continue;
     w->pli->pos_past_msv += window->length;
 
@@ -205,6 +477,51 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
   if (msv_windowlist.count == 0) {
     free(msv_windowlist.windows);
     return eslOK;
+  }
+
+  /* GPU batch SSV/bias/F1 gating: filter merged windows before thread dispatch */
+  NHMMER_GPU_WINDOW_BATCH wb;
+  memset(&wb, 0, sizeof(wb));
+
+  if (info->do_gpu_batch && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
+    status = nhmmer_gpu_window_batch_init(&wb, msv_windowlist.count);
+    if (status != eslOK) goto ERROR;
+
+    status = nhmmer_gpu_window_batch_pack(&wb, sq, &msv_windowlist);
+    if (status != eslOK) { nhmmer_gpu_window_batch_free(&wb); goto ERROR; }
+
+    int nsurv = 0;
+    status = nhmmer_gpu_batch_filter(info, &wb, &msv_windowlist, &nsurv, errbuf, errbuf_size);
+    if (status != eslOK) {
+      fprintf(stderr, "GPU batch SSV/bias filter failed: %s\n", errbuf);
+      nhmmer_gpu_window_batch_free(&wb);
+      goto ERROR;
+    }
+
+    if (msv_windowlist.count == 0) {
+      nhmmer_gpu_window_batch_free(&wb);
+      free(msv_windowlist.windows);
+      return eslOK;
+    }
+
+    /* GPU Viterbi pre-filter: remove windows whose single-score Viterbi < F2 */
+    if (info->do_gpu_vit && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
+      status = nhmmer_gpu_viterbi_prefilter(info, sq, &wb, &msv_windowlist, &nsurv,
+                                            errbuf, errbuf_size);
+      if (status != eslOK) {
+        fprintf(stderr, "GPU Viterbi pre-filter failed: %s\n", errbuf);
+        nhmmer_gpu_window_batch_free(&wb);
+        goto ERROR;
+      }
+
+      if (msv_windowlist.count == 0) {
+        nhmmer_gpu_window_batch_free(&wb);
+        free(msv_windowlist.windows);
+        return eslOK;
+      }
+    }
+
+    nhmmer_gpu_window_batch_free(&wb);
   }
 
   int ncpus = info->ncpus;

@@ -51,6 +51,9 @@ src/hmmsearch --gpu --gpu-ssv-compare query.hmm target.gpudb
 # GPU SSV + threaded CPU downstream (works on plain FASTA)
 src/nhmmer --gpu --cpu 4 --noali query.hmm target.fa
 
+# With batch MSV/bias filter + Viterbi pre-filter (opt-in, parity-verified)
+src/nhmmer --gpu --gpu-batch --gpu-vit-prefilter --cpu 4 --noali query.hmm target.fa
+
 # Tune chunk size (default 64K)
 src/nhmmer --gpu --cpu 4 --gpu-chunk-size 32768 query.hmm target.fa
 ```

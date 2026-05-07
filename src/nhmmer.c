@@ -182,9 +182,13 @@ static ESL_OPTIONS options[] = {
   { "--cpu",        eslARG_INT, p7_NCPU,"HMMER_NCPU","n>=0",NULL,  NULL,  CPUOPTS,         "number of parallel CPU workers to use for multithreads",      12 },
 #endif
 #ifdef HMMER_CUDA
-  { "--gpu",        eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, NULL,          "use CUDA GPU for the SSV filter stage",                        12 },
-  { "--gpu-device", eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,        "CUDA device id for --gpu",                                     99 },
-  { "--gpu-chunk-size", eslARG_INT, "65536", NULL, "n>0", NULL, "--gpu", NULL,       "chunk size (residues) for GPU SSV longtarget scan",             99 },
+  { "--gpu",              eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, NULL,          "use CUDA GPU for the SSV filter stage",                        12 },
+  { "--gpu-device",       eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,        "CUDA device id for --gpu",                                     99 },
+  { "--gpu-chunk-size",   eslARG_INT, "65536", NULL, "n>0", NULL, "--gpu", NULL,       "chunk size (residues) for GPU SSV longtarget scan",             99 },
+  { "--gpu-batch",        eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU batch SSV/bias filtering on merged windows",            12 },
+  { "--gpu-vit-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Viterbi as pre-filter before scanning Viterbi",         12 },
+  { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Forward as pre-filter for sub-windows",                 12 },
+  { "--gpu-compare",      eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "run both GPU and CPU paths, report mismatches",                 12 },
 #endif
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
@@ -1106,6 +1110,10 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.go             = go;
         gpu_info.gpu_chunk_size = esl_opt_GetInteger(go, "--gpu-chunk-size");
         gpu_info.ncpus          = ncpus;
+        gpu_info.do_gpu_batch   = esl_opt_GetBoolean(go, "--gpu-batch");
+        gpu_info.do_gpu_vit     = esl_opt_GetBoolean(go, "--gpu-vit-prefilter");
+        gpu_info.do_gpu_fwd     = esl_opt_GetBoolean(go, "--gpu-fwd-prefilter");
+        gpu_info.do_gpu_compare = esl_opt_GetBoolean(go, "--gpu-compare");
 
         sstatus = nhmmer_gpu_serial_loop(&gpu_info, dbfp, info[0].pli->strands,
                                          gpu_idlen_cb, id_length_list,

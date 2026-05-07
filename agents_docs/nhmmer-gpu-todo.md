@@ -30,11 +30,24 @@
 - [x] Chunk_size tuning: 64K optimal (32K slightly better for short models, 128K+ worse)
 - [x] CUDA engine reuse across queries: hoisted outside query loop, saves ~250ms/query
 - [ ] Async strand overlap (deferred — GPU SSV is ~0.1s, not worth complexity)
-- [ ] GPU-side FB parser for nhmmer (deferred — requires scanning Viterbi kernel)
+
+## Phase 4: Batch GPU Filters — COMPLETE
+
+- [x] `NHMMER_GPU_WINDOW_BATCH` struct with synthetic ESL_DSQDATA_CHUNK (zero-copy)
+- [x] `nhmmer_gpu_window_batch_init/pack/free` helpers
+- [x] GPU batch MSV + null + bias + F1 gating (`--gpu-batch`)
+- [x] Handle eslERANGE (overflow) as pass in batch filter
+- [x] GPU Viterbi single-score pre-filter (`--gpu-vit-prefilter`)
+- [x] CLI flags: `--gpu-batch`, `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-compare`
+- [x] Hit parity verified: MADE1 154=154, query_short 120=120, query_medium 217=217 (batch only)
+- [x] Viterbi pre-filter: query_medium 215 (removes 2 boundary hits, matches CPU count)
+- [x] Speed: query_medium GPU-4+batch+vit 2.15s vs GPU-4 baseline 3.23s (1.5x improvement)
 
 ## Future Work (Not Planned)
 
+- GPU Forward pre-filter for sub-windows (requires splitting p7_pli_postSSV_LongTarget)
 - GPU scanning Viterbi kernel (`p7_ViterbiFilter_longtarget` equivalent)
 - Memory-mapped sequence I/O to reduce sys time (~0.4s overhead)
 - FM-index GPU path (FM-index remains CPU-only)
 - GPU-side bias filter for nhmmer windows
+- `--gpu-compare` mode implementation (score-level comparison)

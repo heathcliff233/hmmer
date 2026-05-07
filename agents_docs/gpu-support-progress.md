@@ -131,11 +131,13 @@ The fused SSV+null+bias+gate kernel is the default GPU MSV path:
 ## GPU nhmmer (Nucleotide Search) — 2026-05-07
 
 A GPU-accelerated path for `nhmmer` is available via `--gpu`:
-- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + threaded CPU downstream (bias + MSV + Viterbi longtarget + Forward + domain).
+- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + optional batch MSV/bias/F1 filter + optional GPU Viterbi pre-filter + threaded CPU downstream (scanning Viterbi + Forward + domain).
+- **Batch filter** (`--gpu-batch`): Packs merged windows as synthetic ESL_DSQDATA_CHUNK (zero-copy), runs GPU MSV + null + bias batch scoring, applies F1 gating. Removes ~1-2% of windows for short models.
+- **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors. Windows below F2 threshold skipped before expensive CPU scanning Viterbi. 1.5x speedup on query_medium.
 - **Threading**: Merged windows distributed across N CPU threads with deep-copied per-thread state. 2.4x speedup with 4 threads on medium models.
 - **Engine reuse**: CUDA engine created once before query loop, saves ~250ms per additional query.
-- **Hit parity**: Exact match on MADE1/query_short; 2-hit boundary difference on query_medium (consistent, not threading-related).
-- **Performance**: GPU-4 is ~2x slower than CPU-4 for single queries (dominated by CUDA init + FASTA I/O overhead), but competitive for multi-query workloads with engine reuse.
+- **Hit parity**: Exact match on MADE1/query_short; 2-hit boundary difference on query_medium (consistent, not threading-related). Viterbi pre-filter removes those 2 boundary hits (matches CPU count).
+- **Performance**: GPU-4+batch+vit: query_medium 2.15s (vs CPU-4 1.79s, GPU-4 baseline 3.23s). 1.5x improvement over GPU baseline.
 - **Files**: `src/nhmmer_gpu.c`, `src/nhmmer_internal.h`, `src/cuda/p7_cuda_ssv_longtarget.cu`
 - **Detailed docs**: See `nhmmer-gpu-progress.md` and `nhmmer-gpu-todo.md`.
 
