@@ -90,6 +90,7 @@ parser.add_argument("--gpu-vit-collect-res", default="0")
 parser.add_argument("--gpu-fwd-collect-res", default="0")
 parser.add_argument("--gpu-vit-largem", action="store_true")
 parser.add_argument("--gpu-fwd-largem", action="store_true")
+parser.add_argument("--cpu-threads", default="0", help="Number of threads for CPU baseline (default: 0 = single-threaded)")
 parser.add_argument("--tag", default="")
 args = parser.parse_args()
 
@@ -127,7 +128,7 @@ with summary.open("w") as s:
         cpu_time = logs / (q + ".cpu.time")
         gpu_time = logs / (q + ".gpu.time")
 
-        timed([str(hmmsearch), "--cpu", "0", "--noali", "-o", str(cpu_out), "--tblout", str(cpu_tbl), str(hmm), str(targetdb)], cpu_time)
+        timed([str(hmmsearch), "--cpu", args.cpu_threads, "--noali", "-o", str(cpu_out), "--tblout", str(cpu_tbl), str(hmm), str(targetdb)], cpu_time)
         gpu_cmd = [str(hmmsearch), "--gpu", "--cpu", "0", "--gpu-batch-seqs", args.gpu_batch_seqs,
                    "--gpu-batch-res", args.gpu_batch_res,
                    "--gpu-load-seqs", args.gpu_load_seqs,

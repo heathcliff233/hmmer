@@ -536,6 +536,30 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 #endif
 	}
 
+      /* Create CUDA engine once, before the query loop */
+      if (do_gpu) {
+        P7_GPUDB *gpudb = NULL;
+        for (i = 0; i < infocnt; ++i) {
+          status = p7_cuda_engine_Create(esl_opt_GetInteger(go, "--gpu-device"), &info[i].cuda_engine, errbuf, sizeof(errbuf));
+          if (status != eslOK) p7_Fail("--gpu requested, but CUDA initialization failed: %s\n", errbuf);
+        }
+        status = p7_gpudb_Open(cfg->dbfile, &gpudb, errbuf);
+        if (status == eslOK) {
+          for (i = 0; i < infocnt; ++i) info[i].gpudb = gpudb;
+          int64_t dsq_size = (int64_t) gpudb->offsets[gpudb->hdr.nseq - 1] + gpudb->lengths[gpudb->hdr.nseq - 1] + 1;
+          int upload_status = p7_cuda_engine_UploadDatabase(info[0].cuda_engine, gpudb->seq_data, dsq_size,
+                                                            gpudb->offsets, gpudb->lengths, (int64_t) gpudb->hdr.nseq,
+                                                            errbuf, sizeof(errbuf));
+          if (upload_status == eslOK) {
+            if (esl_opt_GetBoolean(go, "--notextw") == FALSE)
+              fprintf(ofp, "Database resident on GPU (%lld seqs, %.1f MB)\n",
+                      (long long) gpudb->hdr.nseq, (double) dsq_size / (1024.0 * 1024.0));
+          }
+        } else {
+          for (i = 0; i < infocnt; ++i) info[i].gpudb = NULL;
+        }
+      }
+
 #ifdef HMMER_THREADS
       for (i = 0; i < ncpus * 2; ++i)
 	{
@@ -586,7 +610,17 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       if (do_gpu) {
         int chunk_maxseq    = esl_opt_GetInteger(go, "--gpu-load-seqs");
         int chunk_maxpacket = ESL_MAX(eslDSQDATA_CHUNK_MAXPACKET, (esl_opt_GetInteger(go, "--gpu-load-res") + 5) / 6);
-        status = esl_dsqdata_OpenSized(&abc, cfg->dbfile, 1, chunk_maxseq, chunk_maxpacket, &dd);
+        const char *dsqdata_base = cfg->dbfile;
+        char *dsqdata_base_stripped = NULL;
+        size_t dblen = strlen(cfg->dbfile);
+        if (dblen > 6 && strcmp(cfg->dbfile + dblen - 6, ".gpudb") == 0) {
+          dsqdata_base_stripped = (char *) malloc(dblen - 5);
+          memcpy(dsqdata_base_stripped, cfg->dbfile, dblen - 6);
+          dsqdata_base_stripped[dblen - 6] = '\0';
+          dsqdata_base = dsqdata_base_stripped;
+        }
+        status = esl_dsqdata_OpenSized(&abc, dsqdata_base, 1, chunk_maxseq, chunk_maxpacket, &dd);
+        free(dsqdata_base_stripped);
         if      (status == eslENOTFOUND) p7_Fail("--gpu requires an hmmseqdb/dsqdata target database; failed to open %s: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
         else if (status == eslEFORMAT)   p7_Fail("--gpu target database %s is not compatible protein dsqdata: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
         else if (status != eslOK)        p7_Fail("Unexpected error %d opening dsqdata target database %s\n", status, cfg->dbfile);
@@ -606,8 +640,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
         if (do_gpu)
         {
-          status = p7_cuda_engine_Create(esl_opt_GetInteger(go, "--gpu-device"), &info[i].cuda_engine, errbuf, sizeof(errbuf));
-          if (status != eslOK) p7_Fail("--gpu requested, but CUDA initialization failed: %s\n", errbuf);
+          p7_cuda_engine_Reset(info[i].cuda_engine);
           status = p7_cuda_msvprofile_Create(info[i].om, &info[i].cuda_msv, errbuf, sizeof(errbuf));
           if (status != eslOK) p7_Fail("--gpu requested, but CUDA MSV profile creation failed: %s\n", errbuf);
           info[i].pli->cuda_engine = info[i].cuda_engine;
@@ -647,9 +680,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         p7_pipeline_Destroy(info[i].pli);
         p7_tophits_Destroy(info[i].th);
         p7_cuda_msvprofile_Destroy(info[i].cuda_msv);
-        p7_cuda_engine_Destroy(info[i].cuda_engine);
         info[i].cuda_msv    = NULL;
-        info[i].cuda_engine = NULL;
         p7_oprofile_Destroy(info[i].om);
       }
 
@@ -691,9 +722,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       p7_pipeline_Destroy(info->pli);
       p7_tophits_Destroy(info->th);
       p7_cuda_msvprofile_Destroy(info->cuda_msv);
-      p7_cuda_engine_Destroy(info->cuda_engine);
       info->cuda_msv    = NULL;
-      info->cuda_engine = NULL;
       p7_oprofile_Destroy(info->om);
       p7_oprofile_Destroy(om);
       p7_profile_Destroy(gm);
@@ -724,8 +753,16 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
   /* Cleanup - prepare for exit
    */
-  for (i = 0; i < infocnt; ++i)
+  for (i = 0; i < infocnt; ++i) {
+    p7_cuda_engine_ReleaseDatabase(info[i].cuda_engine);
+    p7_cuda_engine_Destroy(info[i].cuda_engine);
+    info[i].cuda_engine = NULL;
     p7_bg_Destroy(info[i].bg);
+  }
+  if (infocnt > 0 && info[0].gpudb) {
+    p7_gpudb_Close(info[0].gpudb);
+    for (i = 0; i < infocnt; ++i) info[i].gpudb = NULL;
+  }
 
 #ifdef HMMER_THREADS
   if (ncpus > 0)

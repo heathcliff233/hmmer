@@ -77,6 +77,15 @@ struct p7_cuda_msv_engine_s {
   int                 f1_result_alloc;
   const struct p7_cuda_msv_profile_s *last_cuom;
   P7_CUDA_MSV_STATS   stats;
+
+  uint8_t            *d_resident_dsq;
+  int                *d_resident_offsets;
+  int                *d_resident_lengths;
+  int64_t             resident_nseq;
+  int64_t             resident_dsq_size;
+  int                 resident_active;
+  int64_t             resident_batch_seq0;
+  int                 resident_batch_nseq;
 };
 
 struct p7_cuda_msv_profile_s {

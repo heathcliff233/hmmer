@@ -94,7 +94,20 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_parser_x_offsets) cudaFree(engine->d_parser_x_offsets);
   if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
   if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
+  if (engine->d_resident_dsq)     cudaFree(engine->d_resident_dsq);
+  if (engine->d_resident_offsets) cudaFree(engine->d_resident_offsets);
+  if (engine->d_resident_lengths) cudaFree(engine->d_resident_lengths);
   free(engine);
+}
+
+extern "C" void
+p7_cuda_engine_Reset(P7_CUDA_ENGINE *engine)
+{
+  if (!engine) return;
+  engine->batch_owner = NULL;
+  engine->batch_nseq  = 0;
+  engine->batch_total = 0;
+  memset(&engine->stats, 0, sizeof(engine->stats));
 }
 
 extern "C" void
@@ -191,4 +204,82 @@ p7_cuda_msvprofile_UpdateLength(P7_CUDA_MSVPROFILE *cuom, const P7_OPROFILE *om,
   if (!cuom || !om) return eslEINVAL;
   cuom->tjb_b = om->tjb_b;
   return eslOK;
+}
+
+extern "C" int
+p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, int64_t dsq_size,
+                               const int64_t *offsets, const int32_t *lengths, int64_t nseq,
+                               char *errbuf, int errbuf_size)
+{
+  size_t free_mem, total_mem;
+  size_t needed;
+  int   *h_offsets_int = NULL;
+  int   *h_lengths_int = NULL;
+  int    status;
+
+  if (!engine || !seq_data || !offsets || !lengths || nseq <= 0)
+    return eslEINVAL;
+
+  cudaSetDevice(engine->device_id);
+  cudaMemGetInfo(&free_mem, &total_mem);
+
+  needed = (size_t) dsq_size + (size_t) nseq * (sizeof(int) + sizeof(int)) + 64;
+  if (needed > free_mem * 8 / 10) {
+    if (errbuf && errbuf_size > 0)
+      snprintf(errbuf, errbuf_size, "database (%zu MB) exceeds 80%% of free GPU memory (%zu MB)",
+               needed / (1024*1024), free_mem / (1024*1024));
+    return eslENORESULT;
+  }
+
+  p7_cuda_engine_ReleaseDatabase(engine);
+
+  if ((status = cuda_status(cudaMalloc((void **) &engine->d_resident_dsq, dsq_size), errbuf, errbuf_size, "cudaMalloc(resident dsq)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMalloc((void **) &engine->d_resident_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(resident offsets)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMalloc((void **) &engine->d_resident_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(resident lengths)")) != eslOK) goto ERROR;
+
+  if ((status = cuda_status(cudaMemcpy(engine->d_resident_dsq, seq_data, dsq_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(resident dsq)")) != eslOK) goto ERROR;
+
+  h_offsets_int = (int *) malloc(sizeof(int) * nseq);
+  h_lengths_int = (int *) malloc(sizeof(int) * nseq);
+  if (!h_offsets_int || !h_lengths_int) { status = eslEMEM; goto ERROR; }
+
+  for (int64_t i = 0; i < nseq; i++) {
+    h_offsets_int[i] = (int) offsets[i];
+    h_lengths_int[i] = (int) lengths[i];
+  }
+
+  if ((status = cuda_status(cudaMemcpy(engine->d_resident_offsets, h_offsets_int, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(resident offsets)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_resident_lengths, h_lengths_int, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(resident lengths)")) != eslOK) goto ERROR;
+
+  engine->resident_nseq     = nseq;
+  engine->resident_dsq_size = dsq_size;
+  engine->resident_active   = 1;
+
+  free(h_offsets_int);
+  free(h_lengths_int);
+  return eslOK;
+
+ERROR:
+  free(h_offsets_int);
+  free(h_lengths_int);
+  p7_cuda_engine_ReleaseDatabase(engine);
+  return status;
+}
+
+extern "C" void
+p7_cuda_engine_ReleaseDatabase(P7_CUDA_ENGINE *engine)
+{
+  if (!engine) return;
+  if (engine->d_resident_dsq)     { cudaFree(engine->d_resident_dsq);     engine->d_resident_dsq = NULL; }
+  if (engine->d_resident_offsets) { cudaFree(engine->d_resident_offsets); engine->d_resident_offsets = NULL; }
+  if (engine->d_resident_lengths) { cudaFree(engine->d_resident_lengths); engine->d_resident_lengths = NULL; }
+  engine->resident_nseq     = 0;
+  engine->resident_dsq_size = 0;
+  engine->resident_active   = 0;
+}
+
+extern "C" int
+p7_cuda_engine_IsResident(const P7_CUDA_ENGINE *engine)
+{
+  return (engine && engine->resident_active) ? 1 : 0;
 }

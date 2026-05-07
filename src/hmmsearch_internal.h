@@ -11,6 +11,7 @@
 
 #include "hmmer.h"
 #include "cuda_msv.h"
+#include "p7_gpudb.h"
 
 typedef struct {
 #ifdef HMMER_THREADS
@@ -46,6 +47,7 @@ typedef struct {
   int               gpu_previt_compare;/* debug CUDA-vs-CPU null/bias/F1 checks */
   int               gpu_ssv;           /* use standalone CUDA SSV+fallback       */
   int               gpu_ssv_compare;   /* debug CUDA SSV-vs-monolithic MSV check */
+  P7_GPUDB         *gpudb;             /* optional GPU-native mmap'd database    */
 } WORKER_INFO;
 
 double hmmsearch_WallTime(void);

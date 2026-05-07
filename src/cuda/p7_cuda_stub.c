@@ -28,6 +28,12 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
 }
 
 void
+p7_cuda_engine_Reset(P7_CUDA_ENGINE *engine)
+{
+  return;
+}
+
+void
 p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_STATS *stats)
 {
   if (stats) {

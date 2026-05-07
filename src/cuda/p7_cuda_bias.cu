@@ -68,6 +68,7 @@ p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   int *h_offsets = NULL;
   int *h_lengths = NULL;
   int reuse_batch = FALSE;
+  int use_resident = FALSE;
   cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
   double ht0;
 
@@ -75,6 +76,8 @@ p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   if (!engine || !chu || !nullsc) return eslEINVAL;
   nseq = chu->N;
   if (nseq <= 0) return eslOK;
+
+  use_resident = (engine->resident_active && engine->resident_batch_nseq == nseq);
 
   ht0 = host_seconds();
   h_offsets = (int *) malloc(sizeof(int) * nseq);
@@ -97,32 +100,34 @@ p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   engine->stats.host_metadata_loop_seconds += host_seconds() - ht0;
   reuse_batch = (engine->batch_owner == chu && engine->batch_nseq == nseq && engine->batch_total == total);
 
-  if (engine->dsq_alloc < total) {
-    if (engine->d_dsq) cudaFree(engine->d_dsq);
-    if (engine->h_dsq) cudaFreeHost(engine->h_dsq);
-    engine->d_dsq = NULL;
-    engine->h_dsq = NULL;
-    engine->dsq_alloc = 0;
-    engine->h_dsq_alloc = 0;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_dsq, total), errbuf, errbuf_size, "cudaMalloc(batch dsq)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMallocHost((void **) &engine->h_dsq, total), errbuf, errbuf_size, "cudaMallocHost(batch dsq)")) != eslOK) goto ERROR;
-    engine->dsq_alloc = total;
-    engine->h_dsq_alloc = total;
-    reuse_batch = FALSE;
-  }
-  if (engine->meta_alloc < nseq) {
-    if (engine->d_offsets) cudaFree(engine->d_offsets);
-    if (engine->d_lengths) cudaFree(engine->d_lengths);
-    if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
-    engine->d_offsets = NULL;
-    engine->d_lengths = NULL;
-    engine->d_tjb_by_seq = NULL;
-    engine->meta_alloc = 0;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(offsets)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(lengths)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
-    engine->meta_alloc = nseq;
-    reuse_batch = FALSE;
+  if (!use_resident) {
+    if (engine->dsq_alloc < total) {
+      if (engine->d_dsq) cudaFree(engine->d_dsq);
+      if (engine->h_dsq) cudaFreeHost(engine->h_dsq);
+      engine->d_dsq = NULL;
+      engine->h_dsq = NULL;
+      engine->dsq_alloc = 0;
+      engine->h_dsq_alloc = 0;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_dsq, total), errbuf, errbuf_size, "cudaMalloc(batch dsq)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMallocHost((void **) &engine->h_dsq, total), errbuf, errbuf_size, "cudaMallocHost(batch dsq)")) != eslOK) goto ERROR;
+      engine->dsq_alloc = total;
+      engine->h_dsq_alloc = total;
+      reuse_batch = FALSE;
+    }
+    if (engine->meta_alloc < nseq) {
+      if (engine->d_offsets) cudaFree(engine->d_offsets);
+      if (engine->d_lengths) cudaFree(engine->d_lengths);
+      if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
+      engine->d_offsets = NULL;
+      engine->d_lengths = NULL;
+      engine->d_tjb_by_seq = NULL;
+      engine->meta_alloc = 0;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(offsets)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(lengths)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
+      engine->meta_alloc = nseq;
+      reuse_batch = FALSE;
+    }
   }
   if (engine->null_result_alloc < nseq) {
     if (engine->d_null_scores) cudaFree(engine->d_null_scores);
@@ -142,7 +147,7 @@ p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   engine->stats.host_event_ops_seconds += host_seconds() - ht0;
 
   cudaEventRecord(h2d0);
-  if (!reuse_batch) {
+  if (!use_resident && !reuse_batch) {
     ht0 = host_seconds();
     if (chu->smem != NULL) {
       memcpy(engine->h_dsq, chu->smem, total);
@@ -162,10 +167,13 @@ p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   cudaEventSynchronize(h2d1);
   engine->stats.host_sync_seconds += host_seconds() - ht0;
 
-  cudaEventRecord(k0);
-  cuda_null_score_kernel<<<(nseq + 127) / 128, 128>>>(engine->d_lengths, nseq, engine->d_null_scores);
-  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_null_score_kernel launch")) != eslOK) goto CUDA_ERROR;
-  cudaEventRecord(k1);
+  {
+    int *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+    cudaEventRecord(k0);
+    cuda_null_score_kernel<<<(nseq + 127) / 128, 128>>>(d_len_ptr, nseq, engine->d_null_scores);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_null_score_kernel launch")) != eslOK) goto CUDA_ERROR;
+    cudaEventRecord(k1);
+  }
   ht0 = host_seconds();
   cudaEventSynchronize(k1);
   engine->stats.host_sync_seconds += host_seconds() - ht0;
@@ -214,12 +222,15 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   float h_t[6];
   size_t eo_bytes;
   int reuse_batch = FALSE;
+  int use_resident = FALSE;
   cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
   double ht0;
 
   if (!engine || !bg || !bg->fhmm || !chu || !filtersc) return eslEINVAL;
   nseq = chu->N;
   if (nseq <= 0) return eslOK;
+
+  use_resident = (engine->resident_active && engine->resident_batch_nseq == nseq);
 
   ht0 = host_seconds();
   h_offsets = (int *) malloc(sizeof(int) * nseq);
@@ -242,32 +253,34 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   engine->stats.host_metadata_loop_seconds += host_seconds() - ht0;
   reuse_batch = (engine->batch_owner == chu && engine->batch_nseq == nseq && engine->batch_total == total);
 
-  if (engine->dsq_alloc < total) {
-    if (engine->d_dsq) cudaFree(engine->d_dsq);
-    if (engine->h_dsq) cudaFreeHost(engine->h_dsq);
-    engine->d_dsq = NULL;
-    engine->h_dsq = NULL;
-    engine->dsq_alloc = 0;
-    engine->h_dsq_alloc = 0;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_dsq, total), errbuf, errbuf_size, "cudaMalloc(batch dsq)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMallocHost((void **) &engine->h_dsq, total), errbuf, errbuf_size, "cudaMallocHost(batch dsq)")) != eslOK) goto ERROR;
-    engine->dsq_alloc = total;
-    engine->h_dsq_alloc = total;
-    reuse_batch = FALSE;
-  }
-  if (engine->meta_alloc < nseq) {
-    if (engine->d_offsets) cudaFree(engine->d_offsets);
-    if (engine->d_lengths) cudaFree(engine->d_lengths);
-    if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
-    engine->d_offsets = NULL;
-    engine->d_lengths = NULL;
-    engine->d_tjb_by_seq = NULL;
-    engine->meta_alloc = 0;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(offsets)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(lengths)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
-    engine->meta_alloc = nseq;
-    reuse_batch = FALSE;
+  if (!use_resident) {
+    if (engine->dsq_alloc < total) {
+      if (engine->d_dsq) cudaFree(engine->d_dsq);
+      if (engine->h_dsq) cudaFreeHost(engine->h_dsq);
+      engine->d_dsq = NULL;
+      engine->h_dsq = NULL;
+      engine->dsq_alloc = 0;
+      engine->h_dsq_alloc = 0;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_dsq, total), errbuf, errbuf_size, "cudaMalloc(batch dsq)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMallocHost((void **) &engine->h_dsq, total), errbuf, errbuf_size, "cudaMallocHost(batch dsq)")) != eslOK) goto ERROR;
+      engine->dsq_alloc = total;
+      engine->h_dsq_alloc = total;
+      reuse_batch = FALSE;
+    }
+    if (engine->meta_alloc < nseq) {
+      if (engine->d_offsets) cudaFree(engine->d_offsets);
+      if (engine->d_lengths) cudaFree(engine->d_lengths);
+      if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
+      engine->d_offsets = NULL;
+      engine->d_lengths = NULL;
+      engine->d_tjb_by_seq = NULL;
+      engine->meta_alloc = 0;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(offsets)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(lengths)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
+      engine->meta_alloc = nseq;
+      reuse_batch = FALSE;
+    }
   }
   if (engine->null_result_alloc < nseq) {
     if (engine->d_null_scores) cudaFree(engine->d_null_scores);
@@ -312,7 +325,7 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   engine->stats.host_event_ops_seconds += host_seconds() - ht0;
 
   cudaEventRecord(h2d0);
-  if (!reuse_batch) {
+  if (!use_resident && !reuse_batch) {
     ht0 = host_seconds();
     if (chu->smem != NULL) {
       memcpy(engine->h_dsq, chu->smem, total);
@@ -337,12 +350,17 @@ p7_cuda_BiasFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
   cudaEventSynchronize(h2d1);
   engine->stats.host_sync_seconds += host_seconds() - ht0;
 
-  cudaEventRecord(k0);
-  cuda_bias_filter_kernel<<<(nseq + 127) / 128, 128>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths, nseq,
-                                                       engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo,
-                                                       engine->d_bias_filtersc);
-  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_bias_filter_kernel launch")) != eslOK) goto CUDA_ERROR;
-  cudaEventRecord(k1);
+  {
+    uint8_t *d_dsq_ptr = use_resident ? engine->d_resident_dsq : engine->d_dsq;
+    int     *d_off_ptr = use_resident ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
+    int     *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+    cudaEventRecord(k0);
+    cuda_bias_filter_kernel<<<(nseq + 127) / 128, 128>>>(d_dsq_ptr, d_off_ptr, d_len_ptr, nseq,
+                                                         engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo,
+                                                         engine->d_bias_filtersc);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_bias_filter_kernel launch")) != eslOK) goto CUDA_ERROR;
+    cudaEventRecord(k1);
+  }
   ht0 = host_seconds();
   cudaEventSynchronize(k1);
   engine->stats.host_sync_seconds += host_seconds() - ht0;

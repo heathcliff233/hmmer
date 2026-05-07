@@ -14,6 +14,7 @@
 
 #include "hmmer.h"
 #include "hmmsearch_internal.h"
+#include "p7_gpudb.h"
 
 typedef struct {
   int                nchunks;
@@ -43,6 +44,7 @@ static int gpu_search_batch_Init(GPU_SEARCH_BATCH *batch);
 static void gpu_search_batch_Reset(GPU_SEARCH_BATCH *batch);
 static void gpu_search_batch_Destroy(GPU_SEARCH_BATCH *batch);
 static int gpu_search_batch_AddChunk(GPU_SEARCH_BATCH *batch, ESL_DSQDATA_CHUNK *chu);
+static int gpu_OverlayGpudb(ESL_DSQDATA_CHUNK *chu, const P7_GPUDB *gdb);
 static int gpu_PreViterbiBoundary(WORKER_INFO *info, const ESL_SQ *dbsq, float gpu_usc, int gpu_msv_status,
                                   float gpu_nullsc, float gpu_filtersc, GPU_PREVIT_RESULT *ret);
 static int gpu_BindSeqView(WORKER_INFO *info, ESL_SQ *dbsq, ESL_DSQ *dbsq_dsqmem, int64_t dbsq_salloc,
@@ -273,6 +275,7 @@ gpu_search_batch_Reset(GPU_SEARCH_BATCH *batch)
   batch->nchunks = 0;
   batch->view.i0 = 0;
   batch->view.N  = 0;
+  batch->view.smem = NULL;
 }
 
 static void
@@ -338,6 +341,27 @@ gpu_search_batch_AddChunk(GPU_SEARCH_BATCH *batch, ESL_DSQDATA_CHUNK *chu)
   memcpy(batch->view.taxid + offset, chu->taxid, sizeof(*batch->view.taxid) * chu->N);
   memcpy(batch->view.L     + offset, chu->L,     sizeof(*batch->view.L)     * chu->N);
   batch->view.N += chu->N;
+  return eslOK;
+}
+
+/* gpu_OverlayGpudb()
+ * Replace a dsqdata chunk's dsq[] pointers with gpudb mmap pointers.
+ * The chunk retains its metadata (name/acc/desc/taxid) from dsqdata.
+ * We do NOT modify chu->smem (dsqdata owns that allocation for recycle).
+ * The dsq[i] pointers are redirected to gpudb mmap for survivor materialization.
+ */
+static int
+gpu_OverlayGpudb(ESL_DSQDATA_CHUNK *chu, const P7_GPUDB *gdb)
+{
+  int64_t seq0;
+  int i;
+
+  if (!chu || !gdb) return eslEINVAL;
+  seq0 = chu->i0;
+  if (seq0 < 0 || seq0 + chu->N > (int64_t) gdb->hdr.nseq) return eslEINVAL;
+
+  for (i = 0; i < chu->N; i++)
+    chu->dsq[i] = gdb->seq_data + gdb->offsets[seq0 + i];
   return eslOK;
 }
 
@@ -836,6 +860,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           info->pli->exact_io_read_unpack += dt;
         }
         if (sstatus != eslOK) { gpu_end_of_input = TRUE; break; }
+        if (info->gpudb) gpu_OverlayGpudb(chu, info->gpudb);
         if (chu->N > gpu_capacity)
           p7_Fail("--gpu-batch-seqs %d is smaller than dsqdata load chunk size %d; use --gpu-batch-seqs >= %d or reduce --gpu-load-seqs\n",
                   gpu_capacity, chu->N, chu->N);
@@ -847,11 +872,18 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       }
 
       if (batch.view.N == 0) break;
-      search_chu = (batch.nchunks == 1) ? batch.chunks[0] : &batch.view;
+      if (info->gpudb) {
+        search_chu = &batch.view;
+        batch.view.smem = info->gpudb->seq_data + info->gpudb->offsets[batch.view.i0];
+      } else {
+        search_chu = (batch.nchunks == 1) ? batch.chunks[0] : &batch.view;
+      }
 
       t0 = hmmsearch_WallTime();
       if (info->gpu_ssv || info->gpu_ssv_compare)
         status = p7_cuda_SSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+      else if (p7_cuda_engine_IsResident(info->cuda_engine))
+        status = p7_cuda_MSVFilterResident(info->cuda_engine, info->cuda_msv, (int64_t) batch.view.i0, batch.view.N, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
       else
         status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
       info->pli->time_msv += hmmsearch_WallTime() - t0;

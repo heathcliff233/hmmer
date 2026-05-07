@@ -241,6 +241,7 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   int *h_offsets = NULL;
   int *h_lengths = NULL;
   int reuse_batch = FALSE;
+  int use_resident = FALSE;
   int threads = 32;
   int groups_per_block = 1;
   size_t group_shmem;
@@ -256,49 +257,53 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   if (nidx <= 0) return eslOK;
   if (nseq <= 0) return eslOK;
 
-  h_offsets = (int *) malloc(sizeof(int) * nseq);
-  h_lengths = (int *) malloc(sizeof(int) * nseq);
-  if (!h_offsets || !h_lengths) { status = eslEMEM; goto ERROR; }
+  use_resident = (engine->resident_active && engine->resident_batch_nseq == nseq);
 
-  for (int i = 0; i < nseq; i++) {
-    h_offsets[i] = total;
-    if (chu->L[i] > INT32_MAX) {
-      if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "dsqdata sequence length exceeds CUDA Viterbi v1 limit");
-      status = eslERANGE;
-      goto ERROR;
+  if (!use_resident) {
+    h_offsets = (int *) malloc(sizeof(int) * nseq);
+    h_lengths = (int *) malloc(sizeof(int) * nseq);
+    if (!h_offsets || !h_lengths) { status = eslEMEM; goto ERROR; }
+
+    for (int i = 0; i < nseq; i++) {
+      h_offsets[i] = total;
+      if (chu->L[i] > INT32_MAX) {
+        if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "dsqdata sequence length exceeds CUDA Viterbi v1 limit");
+        status = eslERANGE;
+        goto ERROR;
+      }
+      h_lengths[i] = (int) chu->L[i];
+      total += h_lengths[i] + 1;
     }
-    h_lengths[i] = (int) chu->L[i];
-    total += h_lengths[i] + 1;
-  }
-  total += 1;
-  reuse_batch = (engine->batch_owner == chu && engine->batch_nseq == nseq && engine->batch_total == total);
+    total += 1;
+    reuse_batch = (engine->batch_owner == chu && engine->batch_nseq == nseq && engine->batch_total == total);
 
-  if (engine->dsq_alloc < total) {
-    if (engine->d_dsq) cudaFree(engine->d_dsq);
-    if (engine->h_dsq) cudaFreeHost(engine->h_dsq);
-    engine->d_dsq = NULL;
-    engine->h_dsq = NULL;
-    engine->dsq_alloc = 0;
-    engine->h_dsq_alloc = 0;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_dsq, total), errbuf, errbuf_size, "cudaMalloc(batch dsq)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMallocHost((void **) &engine->h_dsq, total), errbuf, errbuf_size, "cudaMallocHost(batch dsq)")) != eslOK) goto ERROR;
-    engine->dsq_alloc = total;
-    engine->h_dsq_alloc = total;
-    reuse_batch = FALSE;
-  }
-  if (engine->meta_alloc < nseq) {
-    if (engine->d_offsets) cudaFree(engine->d_offsets);
-    if (engine->d_lengths) cudaFree(engine->d_lengths);
-    if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
-    engine->d_offsets = NULL;
-    engine->d_lengths = NULL;
-    engine->d_tjb_by_seq = NULL;
-    engine->meta_alloc = 0;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(offsets)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(lengths)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
-    engine->meta_alloc = nseq;
-    reuse_batch = FALSE;
+    if (engine->dsq_alloc < total) {
+      if (engine->d_dsq) cudaFree(engine->d_dsq);
+      if (engine->h_dsq) cudaFreeHost(engine->h_dsq);
+      engine->d_dsq = NULL;
+      engine->h_dsq = NULL;
+      engine->dsq_alloc = 0;
+      engine->h_dsq_alloc = 0;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_dsq, total), errbuf, errbuf_size, "cudaMalloc(batch dsq)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMallocHost((void **) &engine->h_dsq, total), errbuf, errbuf_size, "cudaMallocHost(batch dsq)")) != eslOK) goto ERROR;
+      engine->dsq_alloc = total;
+      engine->h_dsq_alloc = total;
+      reuse_batch = FALSE;
+    }
+    if (engine->meta_alloc < nseq) {
+      if (engine->d_offsets) cudaFree(engine->d_offsets);
+      if (engine->d_lengths) cudaFree(engine->d_lengths);
+      if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
+      engine->d_offsets = NULL;
+      engine->d_lengths = NULL;
+      engine->d_tjb_by_seq = NULL;
+      engine->meta_alloc = 0;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(offsets)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(lengths)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
+      engine->meta_alloc = nseq;
+      reuse_batch = FALSE;
+    }
   }
   if (engine->vit_result_alloc < nidx) {
     if (engine->d_vit_scores) cudaFree(engine->d_vit_scores);
@@ -346,7 +351,7 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   d2h1 = engine->evt_d2h1;
 
   cudaEventRecord(h2d0);
-  if (!reuse_batch) {
+  if (!use_resident && !reuse_batch) {
     double tsp0 = seconds_now_vit();
     if (chu->smem != NULL) {
       memcpy(engine->h_dsq, chu->smem, total);
@@ -370,7 +375,10 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   cudaEventRecord(k0);
   {
     int blocks = (nidx + groups_per_block - 1) / groups_per_block;
-    cuda_viterbi_score_kernel<<<blocks, threads, shmem>>>(engine->d_dsq, engine->d_offsets, engine->d_lengths,
+    uint8_t *d_dsq_ptr = use_resident ? engine->d_resident_dsq : engine->d_dsq;
+    int     *d_off_ptr = use_resident ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
+    int     *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+    cuda_viterbi_score_kernel<<<blocks, threads, shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
                                                            seqidx ? engine->d_vit_seqidx : NULL, nidx,
                                                            cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,
                                                            cuom->xw_n_loop, cuom->xw_n_move,

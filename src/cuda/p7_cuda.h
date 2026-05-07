@@ -70,6 +70,7 @@ typedef struct p7_cuda_msv_stats_s {
 extern int  p7_cuda_Available(char *errbuf, int errbuf_size);
 extern int  p7_cuda_engine_Create(int device_id, P7_CUDA_ENGINE **ret_engine, char *errbuf, int errbuf_size);
 extern void p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine);
+extern void p7_cuda_engine_Reset(P7_CUDA_ENGINE *engine);
 extern void p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_STATS *stats);
 
 extern int  p7_cuda_msvprofile_Create(const P7_OPROFILE *om, P7_CUDA_MSVPROFILE **ret_cuom, char *errbuf, int errbuf_size);
@@ -127,5 +128,15 @@ extern int  p7_cuda_F1GatingDsqdataChunk(P7_CUDA_ENGINE *engine,
 extern int  p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                           ESL_DSQDATA_CHUNK *chu, float *scores, int *statuses,
                                           char *errbuf, int errbuf_size);
+
+extern int  p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, int64_t dsq_size,
+                                           const int64_t *offsets, const int32_t *lengths, int64_t nseq,
+                                           char *errbuf, int errbuf_size);
+extern void p7_cuda_engine_ReleaseDatabase(P7_CUDA_ENGINE *engine);
+extern int  p7_cuda_engine_IsResident(const P7_CUDA_ENGINE *engine);
+
+extern int  p7_cuda_MSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                       int64_t seq0, int nseq, float *scores, int *statuses,
+                                       char *errbuf, int errbuf_size);
 
 #endif /*P7_CUDA_INCLUDED*/

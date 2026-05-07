@@ -109,6 +109,7 @@ HDRS =  hmmer.h \
 		cachedb.h \
 		hmmsearch_internal.h \
 		p7_gbands.h \
+		p7_gpudb.h \
 	p7_gmxb.h \
 	p7_gmxchk.h \
 	p7_hmmcache.h
@@ -146,6 +147,7 @@ OBJS =  build.o\
 	modelconfig.o\
 	modelstats.o\
 	mpisupport.o\
+	p7_gpudb.o\
 	seqmodel.o\
 	tracealign.o\
 	p7_alidisplay.o\

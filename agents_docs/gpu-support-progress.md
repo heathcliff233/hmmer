@@ -1,10 +1,10 @@
 # GPU Support Progress
 
-Last updated: 2026-05-06
+Last updated: 2026-05-07
 
 ## Current State
 
-- `hmmsearch --gpu` is an opt-in, protein-only CUDA path. It requires target input built by `hmmseqdb` as Easel protein `dsqdata`; ordinary FASTA stays on the CPU path.
+- `hmmsearch --gpu` is an opt-in, protein-only CUDA path. Target databases are built by `hmmseqdb` which produces both Easel `dsqdata` files and a `.gpudb` GPU-native format.
 - GPU code lives under `src/cuda/` with stage-owned CUDA files (`p7_cuda_msv.cu`, `p7_cuda_bias.cu`, `p7_cuda_viterbi.cu`, `p7_cuda_forward.cu`, `p7_cuda_fb_parser.cu`) and shared runtime/profile ownership in `p7_cuda_runtime.cu` + `p7_cuda_internal.h`.
 - `src/cuda_msv.h` is only a compatibility wrapper for existing callers; new CUDA-facing code should include `src/cuda/p7_cuda.h`.
 - The default accepted GPU path accelerates MSV and computes the biased-composition filter score in CUDA batches while reusing the MSV-uploaded sequence batch.
@@ -15,6 +15,29 @@ Last updated: 2026-05-06
 - The stats report now includes exact exclusive timing buckets (`Exact io_read_unpack`, `Exact gpu_h2d`, `Exact gpu_kernel`, `Exact gpu_d2h`, `Exact host_survivor_orchestration`, `Exact cpu_postfwd_domain_null2_output`, `Exact other`) plus `Exact delta_vs_wall`. Legacy `Stage *` and `CUDA *` lines are retained for continuity but can overlap by construction.
 - Experimental/default-off flags remain available for later-stage work: `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`, and their compare/min-batch controls.
 - The Easel `dsqdata` chunk-sizing change is applied at build time from `patches/easel-dsqdata-open-sized.patch`; do not edit the Easel submodule in place for this work.
+
+### Engine Reuse (Phase 1)
+
+The CUDA engine is now created once before the query loop in `hmmsearch.c` and reused across all queries. Only the per-query profile (`P7_CUDA_MSVPROFILE`) is rebuilt inside the loop. A `p7_cuda_engine_Reset()` clears per-query stats without destroying device allocations. This eliminates the ~260ms CUDA context init that was previously paid per query.
+
+### GPU-Native Database Format (Phase 2)
+
+A `.gpudb` file format stores sequences pre-unpacked in GPU-ready layout:
+- Memory-mappable, page-aligned data region with contiguous uint8_t residues
+- Pre-computed int64 offsets and int32 lengths in an index region
+- Written by `hmmseqdb` alongside dsqdata files
+- Reader in `src/p7_gpudb.c` uses mmap for zero-copy host access
+- `hmmsearch --gpu` auto-detects `.gpudb` sidecar; user can also pass `foo.gpudb` directly as the database argument (the `.gpudb` suffix is stripped for dsqdata open)
+
+### Resident Database (Phase 4)
+
+When GPU memory is sufficient, the entire database is uploaded once and reused across all queries:
+- `p7_cuda_engine_UploadDatabase()` bulk-uploads sequence data, offsets, and lengths to device memory
+- Per-query overhead reduced to only `tjb_by_seq` array (1 byte/seq) that changes between queries
+- All kernel functions (MSV, Viterbi, Forward, FB parser) check `engine->resident_active` and use resident device pointers instead of per-batch uploads
+- `p7_cuda_MSVFilterResident()` is the dedicated resident MSV entry point
+- Automatic: if upload fails (insufficient GPU memory), falls back to per-batch streaming
+- Resident pointer arithmetic uses `engine->d_resident_offsets + engine->resident_batch_seq0` for batch-relative addressing
 
 ## CPU-only Modules
 
@@ -28,22 +51,38 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 
 ## Benchmark Snapshot
 
-**Current best (2026-05-06):** smem-optimized run in `benchmark-data/profmark-current/gpu-audit/smem-opt-run/`
-- Flags: `--gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser`
-- Profmark aggregate: CPU wall 10.44 sec, GPU wall 6.83 sec, speedup 1.53x, `cpu_only=0`, `gpu_only=0`.
-- Manual `time` measurements (same 13 queries):
-  - CPU single-thread: 13.58s | CPU 4-thread: 5.55s | GPU cold: 7.68s | GPU warm (amortized init): ~4.30s
-  - GPU vs CPU-1: 1.77x | GPU vs CPU-4 cold: 0.72x | GPU vs CPU-4 warm: 1.29x
-- GPU wall breakdown (6.83s):
-  - CUDA context init: 3.38s (49.5%) — 260ms × 13 queries, amortizable with engine reuse
-  - Host sync/blocking: 2.24s (32.8%) — host waiting for synchronous GPU ops
-  - GPU kernel execution: 0.49s (7.2%)
-  - CPU survivor work: 0.43s (6.3%)
-  - CPU postfwd/domain/null2: 0.12s (1.7%)
-  - Host in-loop overhead: 0.11s (1.6%)
-  - GPU H2D + D2H transfers: 0.07s (0.9%)
+**Current best (2026-05-07):** Multi-query single-process benchmark (13 HMMs, 229K seqs, 97M residues)
+
+| Config | Wall time | vs CPU-1 | vs CPU-4 |
+|--------|-----------|----------|----------|
+| CPU 1-thread | 9.68s (median) | 1.00x | — |
+| CPU 4-thread | 3.34s (median) | 2.90x | 1.00x |
+| GPU (resident DB, all stages) | 2.86s (median) | 3.38x | **1.17x** |
+
+- Flags: `--gpu --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser`
+- Database: resident on GPU (229,290 seqs, 92.8 MB)
+- Hit parity: `cpu_only=0`, `gpu_only=0` across all 13 queries
+- CUDA init: ~0.51s one-time cost (amortized across queries)
+
+**GPU time breakdown (2.41s search, excluding CUDA init):**
+
+| Category | Time | % | Notes |
+|----------|------|---|-------|
+| GPU kernels | 1.31s | 54% | MSV 0.48 + Vit 0.47 + Fwd 0.25 + Bias 0.06 + Bck 0.05 |
+| CPU bias in survivor loop | 0.59s | 24% | `p7_bg_FilterScore` per-survivor (redundant, see TODO) |
+| I/O (dsqdata read) | 0.22s | 9% | Reading chunk metadata |
+| Domain def + null2 | 0.16s | 7% | CPU-only, after Forward |
+| Other (score convert, F1 gate) | 0.13s | 5% | Between MSV kernel and survivor loop |
+
+**GPU utilization: 54%** — the GPU is idle during the 0.59s CPU bias survivor loop.
+
+**Per-query profmark results** (in `benchmark-data/profmark-current/gpu-audit/gpu-vs-cpu1/` and `gpu-vs-cpu4/`):
+- GPU vs 1-thread: every query faster, 1.77x–2.95x range
+- GPU vs 4-thread: GPU wins overall but individual queries vary (0.53x–1.13x per-query due to CUDA init overhead in per-process measurement)
+- Per-process CUDA init (~260ms) dominates per-query measurements; multi-query single-process is the fair comparison
 
 **Key historical milestones (superseded runs in `benchmark-data/profmark-current/gpu-audit/`):**
+- smem-opt-run (2026-05-06, pre-engine-reuse): CPU 10.44s, GPU 6.83s, 1.53x (per-query separate processes, CUDA init paid 13×)
 - Pre-smem baseline (all-13, later-stage flags): CPU 29.69s, GPU 16.57s, 1.792x speedup.
 - MSV/bias-only baseline (all-13): CPU 28.42s, GPU 19.49s, 1.458x speedup.
 - Compare-mode validation: zero `CUDAVIT`/`CUDAFWD` mismatches; `CUDAFB` bounded (max_mocc ≤ 0.000007, max_btot ≤ 0.000012, max_etot ≤ 0.000019).

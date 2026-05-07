@@ -11,9 +11,11 @@
 #include "esl_alphabet.h"
 #include "esl_dsqdata.h"
 #include "esl_getopts.h"
+#include "esl_sq.h"
 #include "esl_sqio.h"
 
 #include "hmmer.h"
+#include "p7_gpudb.h"
 
 static ESL_OPTIONS options[] = {
   /* name           type       default env  range toggles reqs incomp help                                            docgroup */
@@ -111,6 +113,40 @@ main(int argc, char **argv)
   else if (status == eslEFORMAT)        p7_Fail("Parse failed (sequence file %s):\n%s\n", seqfile, errbuf);
   else if (status == eslEUNIMPLEMENTED) p7_Fail("Failed to create GPU sequence database: unsupported large protein sequence\n");
   else if (status != eslOK)             p7_Fail("Unexpected error %d while creating GPU sequence database\n", status);
+
+  /* Write .gpudb (GPU-native mmap format) by re-reading the sequence file */
+  {
+    ESL_SQ   **sqarr    = NULL;
+    ESL_SQ    *sq       = NULL;
+    int64_t    nseq_gpu = 0;
+    int64_t    alloc_n  = 4096;
+
+    esl_sqfile_Position(sqfp, 0);
+    sq = esl_sq_CreateDigital(abc);
+    if (!sq) p7_Fail("Failed to allocate sequence for gpudb\n");
+    sqarr = (ESL_SQ **) malloc(sizeof(ESL_SQ *) * alloc_n);
+    if (!sqarr) p7_Fail("Failed to allocate sequence array for gpudb\n");
+
+    while ((status = esl_sqio_Read(sqfp, sq)) == eslOK) {
+      if (nseq_gpu >= alloc_n) {
+        alloc_n *= 2;
+        sqarr = (ESL_SQ **) realloc(sqarr, sizeof(ESL_SQ *) * alloc_n);
+        if (!sqarr) p7_Fail("Failed to reallocate sequence array for gpudb\n");
+      }
+      sqarr[nseq_gpu] = sq;
+      nseq_gpu++;
+      sq = esl_sq_CreateDigital(abc);
+      if (!sq) p7_Fail("Failed to allocate sequence for gpudb\n");
+    }
+    esl_sq_Destroy(sq);
+    if (status != eslEOF) p7_Fail("Error reading sequences for gpudb: %d\n", status);
+
+    status = p7_gpudb_Write(seqdb, abc, sqarr, nseq_gpu, errbuf);
+    if (status != eslOK) p7_Fail("Failed to write gpudb: %s\n", errbuf);
+
+    for (i = 0; i < (int) nseq_gpu; i++) esl_sq_Destroy(sqarr[i]);
+    free(sqarr);
+  }
 
   printf("done.\n");
   printf("Created protein dsqdata database %s for hmmsearch --gpu.\n", seqdb);

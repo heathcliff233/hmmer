@@ -20,11 +20,18 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 ## Open Work
 
 ### High-impact optimizations
-- **CUDA engine reuse across queries** (highest priority): move `p7_cuda_engine_Create` outside the per-query loop so the ~260ms CUDA context init is paid once per process. Saves ~3.1s across 13 queries. The engine struct already supports reuse; barrier is the per-query create/destroy lifecycle in `hmmsearch.c`.
-- **CUDA stream-based overlap**: pipeline H2D of next batch with kernel of current batch, reducing the 2.24s host sync/blocking time.
+
+- **Eliminate redundant CPU bias in survivor loop** (highest priority, ~0.59s savings): The survivor loop in `hmmsearch_gpu.c` calls `p7_bg_FilterScore()` on CPU for every F1 survivor (~4000/query), even though the GPU bias kernel already computed these scores in `gpu_filtersc[]`. The GPU bias kernel takes only 0.06s but the CPU re-computation takes 0.59s (24% of search time) and leaves the GPU idle. Fix: use the GPU-computed `gpu_filtersc[i]` directly in `gpu_PreViterbiBoundary` instead of calling `p7_bg_FilterScore`. This would raise GPU utilization from 54% to ~75%.
+
+- **Reduce inter-kernel GPU idle time** (~0.22s savings): Between kernel launches, the host does score conversion, F1 gating, and survivor list construction. During this time the GPU is idle. Potential approaches:
+  - Fuse MSV + null + bias into a single kernel launch (eliminates 2 sync points per batch)
+  - Overlap survivor loop CPU work with next batch's kernel via CUDA streams
+  - Move score conversion to GPU (currently `host_score_convert_seconds = 0.019s`)
+
+- **Reduce I/O overhead** (0.22s, 9% of search): `io_read_unpack` is 0.22s even with resident DB. This is dsqdata chunk reading for metadata (names, accessions). With gpudb resident, the only reason to read dsqdata is for hit reporting metadata. Consider lazy-loading metadata only for sequences that reach the hit stage.
 
 ### SSV kernel — next steps
-The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) now achieves 1.36x kernel speedup over monolithic MSV via register-based DP, precomputed q/z lookups, and warp shuffle for boundary values. Remaining work:
+The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) achieves 1.36x kernel speedup over monolithic MSV. However, with the current pipeline where kernels are only 54% of wall time, the 0.13s kernel savings from SSV has minimal impact on end-to-end performance. SSV becomes more impactful once the CPU bias bottleneck is eliminated. Remaining work:
 - **Make `--gpu-ssv` the default GPU MSV path**: the optimized kernel is parity-verified and 1.36x faster. Consider removing the monolithic kernel and making SSV the only path.
 - **Adaptive thread count**: current kernel uses 32 threads/block regardless of M. For small M (< 64), a single warp is sufficient; for large M (> 512), multiple warps with shared-memory partitioning could improve occupancy.
 - **Early termination**: since ~99.7% of sequences complete in the SSV fast-path, explore whether the SSV section can be further optimized (e.g., skip the warp reduction when the local max is clearly below threshold).
@@ -32,13 +39,19 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) now achieves 1.36x kernel s
 
 ### Medium-priority work
 - Decide default policy for later-stage flags (`--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`). Needs broader validation and auto-gating for short profiles.
-- Eliminate multi-chunk view fallback path (~50% of batches still use per-sequence copy because `gpu_pending_max_chunks=2` creates multi-chunk views).
 - Consider larger batch sizes (>32K seqs) to reduce per-batch CUDA API call count.
+- Profile/candidate-shape auto-gating for short queries where CUDA launches regress wall time.
+
+### Completed (2026-05-07)
+- ~~CUDA engine reuse across queries~~: engine created once before query loop, ~3.1s saved.
+- ~~GPU-native database format (.gpudb)~~: `src/p7_gpudb.c` + `src/p7_gpudb.h`, mmap-based reader, written by `hmmseqdb`.
+- ~~Resident database (whole-DB GPU upload)~~: `p7_cuda_engine_UploadDatabase()`, all kernels resident-aware, H2D reduced to ~0.02s.
+- ~~Eliminate multi-chunk view fallback path~~: with gpudb + resident DB, batch upload is eliminated entirely.
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.
-- Profile/candidate-shape auto-gating for short queries where CUDA launches regress wall time.
 - Broaden parser-state validation beyond raw `p7X_SCALE` row differences.
+- CUDA context init reduction (~0.51s): explore `cudaSetDevice` lazy init, persistent context across process invocations, or CUDA MPS.
 
 ## Validation Checklist
 
