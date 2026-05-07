@@ -14,7 +14,7 @@ cuda_compute_viterbi_thresholds_kernel(
     const float *null_scores, const float *bias_scores,
     const int *lengths, int nwindows, int do_biasfilter,
     int B2, float F2, float vmu, float vlambda,
-    float scale_w, float xw_e_move, float xw_c_move, float base_w,
+    float scale_w, float xw_e_move, float nj, float base_w,
     int max_length, int16_t *sc_thresholds)
 {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -35,6 +35,9 @@ cuda_compute_viterbi_thresholds_kernel(
   } else {
     filtersc = nullsc;
   }
+
+  float pmove = (2.0f + nj) / ((float)loc_window_len + 2.0f + nj);
+  float xw_c_move = roundf(scale_w * logf(pmove));
 
   float invP = esl_gumbel_invsurv_device(F2, vmu, vlambda);
   sc_thresholds[i] = (int16_t)ceilf(((filtersc + 0.69314718f * invP + 3.0f) * scale_w)
@@ -61,9 +64,7 @@ cuda_viterbi_longtarget_kernel(
     const uint8_t *dsq, const int *offsets, const int *lengths,
     int nwindows,
     const int16_t *rwv, const int16_t *twv, int M, int Q, int Kp,
-    int16_t xw_n_loop, int16_t xw_n_move,
-    int16_t xw_c_loop, int16_t xw_c_move,
-    int16_t xw_j_loop, int16_t xw_j_move,
+    float nj, float scale_w, int max_length,
     int16_t xw_e_loop, int16_t xw_e_move,
     int16_t base_w, int16_t ddbound_w,
     const int16_t *sc_thresholds,
@@ -87,6 +88,11 @@ cuda_viterbi_longtarget_kernel(
   const uint8_t *s = dsq + offsets[bi];
   int16_t my_thresh = sc_thresholds[bi];
 
+  /* Per-window length reconfiguration (matches CPU ReconfigRestLength) */
+  int loc_L = (L < max_length) ? L : max_length;
+  float pmove = (2.0f + nj) / ((float)loc_L + 2.0f + nj);
+  int16_t xw_move = (int16_t)roundf(scale_w * logf(pmove));
+
   for (int q = 0; q < Q; q++) {
     int cell = (q + lane * Q) * 3;
     prev[cell + 0] = -32768;
@@ -95,7 +101,7 @@ cuda_viterbi_longtarget_kernel(
   }
 
   int16_t xN = base_w;
-  int16_t xB = vlt_i16_add_sat(xN, xw_n_move);
+  int16_t xB = vlt_i16_add_sat(xN, xw_move);
   int16_t xJ = -32768;
   int16_t xC = -32768;
 
@@ -178,21 +184,19 @@ cuda_viterbi_longtarget_kernel(
       }
       if (lane == 0) {
         xN = base_w;
-        xB = vlt_i16_add_sat(xN, xw_n_move);
+        xB = vlt_i16_add_sat(xN, xw_move);
         xJ = -32768;
         xC = -32768;
       }
     } else {
       if (lane == 0) {
-        xN = vlt_i16_add_sat(xN, xw_n_loop);
-        int16_t c1 = vlt_i16_add_sat(xC, xw_c_loop);
+        xN = xN;  /* xw_n_loop = 0 (3nat approx) */
         int16_t c2 = vlt_i16_add_sat(xE, xw_e_move);
-        xC = c1 > c2 ? c1 : c2;
-        int16_t j1 = vlt_i16_add_sat(xJ, xw_j_loop);
+        xC = xC > c2 ? xC : c2;  /* xw_c_loop = 0 */
         int16_t j2 = vlt_i16_add_sat(xE, xw_e_loop);
-        xJ = j1 > j2 ? j1 : j2;
-        int16_t b1 = vlt_i16_add_sat(xJ, xw_j_move);
-        int16_t b2 = vlt_i16_add_sat(xN, xw_n_move);
+        xJ = xJ > j2 ? xJ : j2;  /* xw_j_loop = 0 */
+        int16_t b1 = vlt_i16_add_sat(xJ, xw_move);
+        int16_t b2 = vlt_i16_add_sat(xN, xw_move);
         xB = b1 > b2 ? b1 : b2;
       }
       xB = (int16_t) __shfl_sync(mask, (int) xB, 0);
@@ -242,7 +246,7 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
                           const P7_HMM_WINDOW *windows, int nwindows,
                           const float *bias_scores, int do_biasfilter,
                           int B2, float F2, float vmu, float vlambda,
-                          float scale_w, float xw_e_move, float xw_c_move,
+                          float scale_w, float xw_e_move, float nj,
                           float base_w, int max_length,
                           P7_CUDA_VIT_LT_WINDOW **ret_windows, int *ret_nwindows,
                           char *errbuf, int errbuf_size)
@@ -328,40 +332,54 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     memcpy(dest + 1, dsq + seq_start, wlen);
   }
 
-  /* Upload */
-  if ((status = cuda_status(cudaMemcpy(engine->d_vlt_dsq, engine->h_vlt_dsq, total_packed, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt dsq)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemcpy(engine->d_vlt_offsets, h_offsets, sizeof(int) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt offsets)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemcpy(engine->d_vlt_lengths, h_lengths, sizeof(int) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt lengths)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemset(engine->d_vlt_win_count, 0, sizeof(int)), errbuf, errbuf_size, "cudaMemset(vlt win_count)")) != eslOK) goto ERROR;
-
-  /* Compute thresholds on GPU from bias scores and window lengths */
+  /* Upload and compute thresholds concurrently using streams */
   {
+    cudaStream_t stream_copy, stream_thresh;
+    cudaStreamCreate(&stream_copy);
+    cudaStreamCreate(&stream_thresh);
+
+    /* Stream 1: upload DSQ data (large transfer) */
+    cudaMemcpyAsync(engine->d_vlt_dsq, engine->h_vlt_dsq, total_packed, cudaMemcpyHostToDevice, stream_copy);
+    cudaMemcpyAsync(engine->d_vlt_offsets, h_offsets, sizeof(int) * nwindows, cudaMemcpyHostToDevice, stream_copy);
+
+    /* Stream 2 (default): upload lengths + bias + compute thresholds */
+    if ((status = cuda_status(cudaMemcpy(engine->d_vlt_lengths, h_lengths, sizeof(int) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt lengths)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
+    if ((status = cuda_status(cudaMemset(engine->d_vlt_win_count, 0, sizeof(int)), errbuf, errbuf_size, "cudaMemset(vlt win_count)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
+
     float *d_bias = NULL;
     if (do_biasfilter && bias_scores) {
-      if ((status = cuda_status(cudaMalloc((void **)&d_bias, sizeof(float) * nwindows), errbuf, errbuf_size, "cudaMalloc(vlt bias)")) != eslOK) goto ERROR;
-      if ((status = cuda_status(cudaMemcpy(d_bias, bias_scores, sizeof(float) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt bias)")) != eslOK) { cudaFree(d_bias); goto ERROR; }
+      if ((status = cuda_status(cudaMalloc((void **)&d_bias, sizeof(float) * nwindows), errbuf, errbuf_size, "cudaMalloc(vlt bias)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
+      if ((status = cuda_status(cudaMemcpy(d_bias, bias_scores, sizeof(float) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt bias)")) != eslOK) { cudaFree(d_bias); cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
     }
-    cuda_compute_viterbi_thresholds_kernel<<<(nwindows + 127) / 128, 128>>>(
+    cuda_compute_viterbi_thresholds_kernel<<<(nwindows + 127) / 128, 128, 0, stream_thresh>>>(
         NULL, d_bias, engine->d_vlt_lengths, nwindows, do_biasfilter,
-        B2, F2, vmu, vlambda, scale_w, xw_e_move, xw_c_move, base_w,
+        B2, F2, vmu, vlambda, scale_w, xw_e_move, nj, base_w,
         max_length, engine->d_vlt_thresholds);
     if (d_bias) cudaFree(d_bias);
-    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "vlt threshold kernel launch")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "vlt threshold kernel launch")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
+
+    /* Wait for both streams to complete before launching main kernel */
+    cudaStreamSynchronize(stream_copy);
+    cudaStreamSynchronize(stream_thresh);
+    cudaStreamDestroy(stream_copy);
+    cudaStreamDestroy(stream_thresh);
   }
 
-  /* Launch kernel: multiple warps per block for better GPU occupancy */
+  /* Launch kernel: dynamically choose warps-per-block for occupancy */
   {
-    int wpb = VIT_LT_WARPS_PER_BLOCK;
-    int nblocks = (nwindows + wpb - 1) / wpb;
     size_t shmem_per_warp = (size_t) Q * 8 * 3 * 2 * sizeof(int16_t);
+    int wpb = VIT_LT_WARPS_PER_BLOCK;
+    /* Reduce warps/block for large M to fit in shared memory and increase occupancy.
+     * Target: shmem <= 24KB to allow 2+ blocks/SM on RTX 4090 (48KB default). */
+    while (wpb > 1 && shmem_per_warp * wpb > 24 * 1024)
+      wpb >>= 1;
+    int nblocks = (nwindows + wpb - 1) / wpb;
     size_t shmem = shmem_per_warp * wpb;
     cuda_viterbi_longtarget_kernel<<<nblocks, wpb * 32, shmem>>>(
       engine->d_vlt_dsq, engine->d_vlt_offsets, engine->d_vlt_lengths,
       nwindows,
       cuom->d_rwv, cuom->d_twv, M, Q, cuom->Kp,
-      cuom->xw_n_loop, cuom->xw_n_move,
-      cuom->xw_c_loop, cuom->xw_c_move,
-      cuom->xw_j_loop, cuom->xw_j_move,
+      nj, scale_w, max_length,
       cuom->xw_e_loop, cuom->xw_e_move,
       cuom->base_w, cuom->ddbound_w,
       engine->d_vlt_thresholds,

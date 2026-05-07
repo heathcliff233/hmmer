@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "easel.h"
 #include "esl_alphabet.h"
@@ -1143,6 +1144,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.h_null_scores  = NULL;
         gpu_info.h_bias_scores  = NULL;
         gpu_info.h_filter_alloc = 0;
+        gpu_info.n_vit_lt_windows_in  = 0;
+        gpu_info.n_vit_lt_windows_out = 0;
+        gpu_info.n_post_vit_windows   = 0;
 
         /* Detect nucdb format: check for .nucdb extension or .nucdb file alongside target */
         {
@@ -1162,6 +1166,12 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
         info[0].pli->nres  = gpu_nres;
         info[0].pli->nseqs = gpu_nseqs;
+
+        if (gpu_info.n_post_vit_windows > 0)
+          fprintf(stderr, "GPU pipeline: vit_lt_in=%" PRId64 " vit_lt_out=%" PRId64 " post_vit=%" PRId64 " hits=%" PRId64 " (%.1f%% windows→hits)\n",
+                  gpu_info.n_vit_lt_windows_in, gpu_info.n_vit_lt_windows_out,
+                  gpu_info.n_post_vit_windows, (int64_t)info[0].th->N,
+                  100.0 * (double)info[0].th->N / (double)gpu_info.n_post_vit_windows);
 
         p7_cuda_msvprofile_Destroy(cuda_msv);
         free(gpu_info.h_ssv_scores);

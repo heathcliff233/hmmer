@@ -219,7 +219,7 @@ extern int  p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVP
                                       const P7_HMM_WINDOW *windows, int nwindows,
                                       const float *bias_scores, int do_biasfilter,
                                       int B2, float F2, float vmu, float vlambda,
-                                      float scale_w, float xw_e_move, float xw_c_move,
+                                      float scale_w, float xw_e_move, float nj,
                                       float base_w, int max_length,
                                       P7_CUDA_VIT_LT_WINDOW **ret_windows, int *ret_nwindows,
                                       char *errbuf, int errbuf_size);

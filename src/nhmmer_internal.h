@@ -48,6 +48,10 @@ typedef struct {
   float            *h_null_scores;
   float            *h_bias_scores;
   int               h_filter_alloc;
+  /* Instrumentation counters (accumulated across strands/blocks) */
+  int64_t           n_vit_lt_windows_in;   /* windows entering scanning Viterbi */
+  int64_t           n_vit_lt_windows_out;  /* sub-windows from scanning Viterbi */
+  int64_t           n_post_vit_windows;    /* windows sent to CPU ForwardParser */
 } NHMMER_GPU_INFO;
 
 int nhmmer_gpu_serial_loop(NHMMER_GPU_INFO *info, ESL_SQFILE *dbfp,
