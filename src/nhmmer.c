@@ -28,6 +28,7 @@
 #include "hmmer.h"
 #ifdef HMMER_CUDA
 #include "nhmmer_internal.h"
+#include "p7_nucdb.h"
 #include "cuda/p7_cuda.h"
 #endif
 
@@ -185,9 +186,9 @@ static ESL_OPTIONS options[] = {
   { "--gpu",              eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, NULL,          "use CUDA GPU for the SSV filter stage",                        12 },
   { "--gpu-device",       eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,        "CUDA device id for --gpu",                                     99 },
   { "--gpu-chunk-size",   eslARG_INT, "65536", NULL, "n>0", NULL, "--gpu", NULL,       "chunk size (residues) for GPU SSV longtarget scan",             99 },
-  { "--gpu-batch",        eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU batch SSV/bias filtering on merged windows",            12 },
-  { "--gpu-vit-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Viterbi as pre-filter before scanning Viterbi",         12 },
-  { "--gpu-vit-longtarget",eslARG_NONE, FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU scanning Viterbi for longtarget sub-window detection",   12 },
+  { "--gpu-batch",        eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU batch SSV/bias filtering on merged windows",            99 },
+  { "--gpu-vit-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Viterbi as pre-filter before scanning Viterbi",         99 },
+  { "--gpu-vit-longtarget",eslARG_NONE, FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU scanning Viterbi for longtarget sub-window detection",   99 },
   { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Forward as pre-filter for sub-windows",                 12 },
   { "--gpu-compare",      eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "run both GPU and CPU paths, report mismatches",                 12 },
 #endif
@@ -700,7 +701,30 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
    * unspecified and the file isn't readable as one of the other formats,
    * will fall through to testing the fmindex in step (2)
    */
-  if (dbformat != eslSQFILE_FMINDEX) { /* either we've been told what it is, or we need to autodetect. Start with sequence file */
+  /* Step (0): check if target is a .nucdb GPU database.
+   * If so, skip the sequence file open — nucdb is handled in the GPU code path. */
+  int is_nucdb = 0;
+#ifdef HMMER_CUDA
+  {
+    size_t dblen = strlen(cfg->dbfile);
+    if ((dblen > 6 && strcmp(cfg->dbfile + dblen - 6, ".nucdb") == 0) ||
+        (access(cfg->dbfile, F_OK) != 0))  /* if the raw file doesn't exist, try .nucdb */
+    {
+      char nucdb_path[4096];
+      if (dblen > 6 && strcmp(cfg->dbfile + dblen - 6, ".nucdb") == 0)
+        snprintf(nucdb_path, sizeof(nucdb_path), "%s", cfg->dbfile);
+      else
+        snprintf(nucdb_path, sizeof(nucdb_path), "%s.nucdb", cfg->dbfile);
+
+      if (access(nucdb_path, F_OK) == 0) {
+        is_nucdb = 1;
+        if (abc == NULL) abc = esl_alphabet_Create(eslDNA);
+      }
+    }
+  }
+#endif
+
+  if (dbformat != eslSQFILE_FMINDEX && !is_nucdb) { /* either we've been told what it is, or we need to autodetect. Start with sequence file */
 
     status = esl_sqfile_Open(cfg->dbfile, dbformat, p7_SEQDBENV, &dbfp);
     if (status == eslEFORMAT) {
@@ -751,7 +775,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
    * We've either been told it's fmindex format, or the autodetect
    * has fallen through to ask us to check fmindex format
    */
-  if (dbfp == NULL ) {
+  if (dbfp == NULL && !is_nucdb) {
 
 #if !defined (eslENABLE_SSE)
     if (dbformat == eslSQFILE_FMINDEX) {
@@ -849,7 +873,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       /* One-time initializations after alphabet <abc> becomes known */
       output_header(ofp, go, cfg->queryfile, cfg->dbfile, ncpus);
 
-      if (dbformat != eslSQFILE_FMINDEX)
+      if (dbformat != eslSQFILE_FMINDEX && dbfp != NULL)
         dbfp->abc = abc;
 
       for (i = 0; i < infocnt; ++i)    {
@@ -979,7 +1003,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       esl_stopwatch_Start(w);
 
       /* seqfile may need to be rewound (multiquery mode) */
-      if (nquery > 1) {
+      if (nquery > 1 && dbfp != NULL) {
 #if defined (eslENABLE_SSE)
         if (dbformat == eslSQFILE_FMINDEX) { //rewind
           if (fsetpos(fm_meta->fp, &fm_basepos) != 0)  ESL_EXCEPTION(eslESYS, "rewind via fsetpos() failed");
@@ -995,7 +1019,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         }
       }
 
-      if (dbformat == eslSQFILE_FASTA) {
+      if (dbformat == eslSQFILE_FASTA && dbfp != NULL) {
         if ( cfg->firstseq_key != NULL ) { //it's tempting to want to do this once and capture the offset position for future passes, but ncbi files make this non-trivial, so this keeps it general
           sstatus = esl_sqfile_PositionByKey(dbfp, cfg->firstseq_key);
           if (sstatus != eslOK)
@@ -1111,20 +1135,41 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.go             = go;
         gpu_info.gpu_chunk_size = esl_opt_GetInteger(go, "--gpu-chunk-size");
         gpu_info.ncpus          = ncpus;
-        gpu_info.do_gpu_batch   = esl_opt_GetBoolean(go, "--gpu-batch");
-        gpu_info.do_gpu_vit     = esl_opt_GetBoolean(go, "--gpu-vit-prefilter");
-        gpu_info.do_gpu_vit_lt  = esl_opt_GetBoolean(go, "--gpu-vit-longtarget");
+        gpu_info.do_gpu_batch   = TRUE;
+        gpu_info.do_gpu_vit     = TRUE;
+        gpu_info.do_gpu_vit_lt  = TRUE;
         gpu_info.do_gpu_fwd     = esl_opt_GetBoolean(go, "--gpu-fwd-prefilter");
         gpu_info.do_gpu_compare = esl_opt_GetBoolean(go, "--gpu-compare");
+        gpu_info.h_ssv_scores   = NULL;
+        gpu_info.h_ssv_status   = NULL;
+        gpu_info.h_null_scores  = NULL;
+        gpu_info.h_bias_scores  = NULL;
+        gpu_info.h_filter_alloc = 0;
 
-        sstatus = nhmmer_gpu_serial_loop(&gpu_info, dbfp, info[0].pli->strands,
-                                         gpu_idlen_cb, id_length_list,
-                                         &gpu_nseqs, &gpu_nres);
+        /* Detect nucdb format: check for .nucdb extension or .nucdb file alongside target */
+        {
+          P7_NUCDB *nucdb = NULL;
+          int nucdb_status = p7_nucdb_Open(cfg->dbfile, &nucdb, errbuf);
+          if (nucdb_status == eslOK) {
+            sstatus = nhmmer_gpu_nucdb_loop(&gpu_info, nucdb, info[0].pli->strands,
+                                            gpu_idlen_cb, id_length_list,
+                                            &gpu_nseqs, &gpu_nres);
+            p7_nucdb_Close(nucdb);
+          } else {
+            sstatus = nhmmer_gpu_serial_loop(&gpu_info, dbfp, info[0].pli->strands,
+                                             gpu_idlen_cb, id_length_list,
+                                             &gpu_nseqs, &gpu_nres);
+          }
+        }
 
         info[0].pli->nres  = gpu_nres;
         info[0].pli->nseqs = gpu_nseqs;
 
         p7_cuda_msvprofile_Destroy(cuda_msv);
+        free(gpu_info.h_ssv_scores);
+        free(gpu_info.h_ssv_status);
+        free(gpu_info.h_null_scores);
+        free(gpu_info.h_bias_scores);
       }
       else
 #endif
@@ -1275,6 +1320,10 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       p7_hmm_Destroy(hmm);
       destroy_id_length(id_length_list);
       if (qsq != NULL) esl_sq_Reuse(qsq);
+
+#ifdef HMMER_CUDA
+      if (cuda_engine) p7_cuda_engine_Reset(cuda_engine);
+#endif
 
       if (hfp != NULL) {
         qhstatus = p7_hmmfile_Read(hfp, &abc, &hmm);

@@ -8,6 +8,7 @@
 
 #include "hmmer.h"
 #include "cuda_msv.h"
+#include "p7_nucdb.h"
 
 typedef int (*NHMMER_GPU_IDLEN_CB)(void *data, int id, int64_t L);
 
@@ -42,10 +43,20 @@ typedef struct {
   int               do_gpu_vit_lt;      /* --gpu-vit-longtarget: scanning Viterbi on GPU */
   int               do_gpu_fwd;         /* --gpu-fwd-prefilter */
   int               do_gpu_compare;     /* --gpu-compare */
+  /* Persistent scratch arrays (grow-only, freed at end) */
+  float            *h_ssv_scores;
+  int              *h_ssv_status;
+  float            *h_null_scores;
+  float            *h_bias_scores;
+  int               h_filter_alloc;
 } NHMMER_GPU_INFO;
 
 int nhmmer_gpu_serial_loop(NHMMER_GPU_INFO *info, ESL_SQFILE *dbfp,
                            int strands, NHMMER_GPU_IDLEN_CB idlen_cb, void *idlen_data,
                            int *ret_nseqs, int64_t *ret_nres);
+
+int nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
+                          int strands, NHMMER_GPU_IDLEN_CB idlen_cb, void *idlen_data,
+                          int *ret_nseqs, int64_t *ret_nres);
 
 #endif /*NHMMER_INTERNAL_INCLUDED*/
