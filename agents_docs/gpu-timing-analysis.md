@@ -42,7 +42,7 @@ Designed to partition wall time into non-overlapping buckets that sum to `exact_
 | `vit_fwd_dispatch` | Wall time of the Viterbi+Forward+FB dispatch block (lines 1071–1387). Includes GPU Vit/Fwd kernel launches, CPU fallback Vit/Fwd, and FB parser batch. **Overlaps** with `gpu_kernel` and `cpu_survivor_total` when later-stage GPU flags are active. |
 | `other` | `wall - known_sum`. Residual unaccounted time. |
 
-**Important**: In Mode 1 (default `--gpu`), `vit_fwd_dispatch` is ~0 because Vit/Fwd run inside `survivor_loop_other`. In Mode 2 (with `--gpu-vit-prefilter` etc.), `vit_fwd_dispatch` becomes large and **overlaps** with `gpu_kernel` — the "Exact" buckets are no longer fully exclusive.
+**Important**: With all GPU stages active (default), `vit_fwd_dispatch` **overlaps** with `gpu_kernel` — the "Exact" buckets are not fully exclusive.
 
 ### Verification
 
@@ -67,7 +67,7 @@ Wall time: **2.94s** total, **0.226s** avg/query
 
 **GPU utilization**: 20% of wall time is GPU kernel execution. The remaining 80% is CPU-bound survivor processing.
 
-## Mode 2: Full GPU (`--gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser`)
+## Full GPU Mode (default with `--gpu`)
 
 Wall time: **2.07s** total, **0.159s** avg/query (1.42x faster than Mode 1)
 
@@ -115,7 +115,7 @@ In full-GPU mode, the dispatch block (GPU Viterbi launch → GPU Forward launch 
 
 ### 6. GPU kernel optimization — 19.7% (Mode 1), 63.3% (Mode 2)
 
-In Mode 2, GPU kernel becomes the dominant cost (good sign — CPU bottlenecks are addressed). The SSV kernel (`--gpu-ssv`) already provides 1.36x over monolithic MSV.
+In full GPU mode, GPU kernel becomes the dominant cost (good sign — CPU bottlenecks are addressed). The SSV kernel already provides 1.36x over monolithic MSV.
 - **Opportunity**: Make SSV the default MSV path. Occupancy tuning for Viterbi/Forward kernels. Kernel fusion (MSV → bias in single launch).
 
 ## Comparison: GPU vs CPU-4

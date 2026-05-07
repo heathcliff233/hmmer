@@ -27,9 +27,9 @@ When `--gpu` is active, `src/hmmsearch_gpu.c` replaces the inner target loop:
 1. `dsqdata` chunks are loaded and packed into CUDA search batches.
 2. CUDA MSV kernel scores all sequences in the batch; survivors pass to CUDA bias scoring (reusing uploaded sequence data — no second transfer).
 3. CPU `p7_bg_FilterScore()` supplies the final bias score; CPU `p7_MSVFilter()` can rescue bias-boundary rejects.
-4. Opt-in stages: CUDA Viterbi prefilter (`--gpu-vit-prefilter`), CUDA Forward prefilter (`--gpu-fwd-prefilter`), CUDA Forward/Backward parser (`--gpu-fb-parser`).
+4. Default GPU stages: CUDA Viterbi prefilter (M≤2048), CUDA Forward prefilter (M≤1024), CUDA Forward/Backward parser.
 5. Survivors continue through CPU Viterbi → Forward/Backward → domain definition → null2 → hit reporting.
-6. In normal mode with `--gpu-fwd-prefilter`, F3 gating is pure GPU decision (no CPU Forward rerun at gray zone).
+6. F3 gating is pure GPU decision (no CPU Forward rerun at gray zone).
 
 The GPU path reports exact exclusive timing buckets: `io_read_unpack`, `gpu_h2d`, `gpu_kernel`, `gpu_d2h`, `host_survivor_orchestration`, `cpu_postfwd_domain_null2_output`, and `other`.
 

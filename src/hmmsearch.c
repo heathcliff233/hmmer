@@ -105,11 +105,8 @@ static ESL_OPTIONS options[] = {
   { "--gpu-load-seqs",  eslARG_INT, "32768", NULL, "n>0", NULL, "--gpu", NULL,          "maximum target sequences per dsqdata load chunk",              99 },
   { "--gpu-load-res",   eslARG_INT, "8000000", NULL, "n>0", NULL, "--gpu", NULL,        "approximate target residues per dsqdata load chunk",           99 },
   { "--gpu-msv-slack", eslARG_REAL,  "0.0", NULL, "x>=0", NULL, "--gpu", NULL,           "experimental extra nats added to GPU MSV scores",              99 },
-  { "--gpu-vit-prefilter", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,          "experimental CUDA Viterbi score prefilter before CPU Forward", 99 },
-  { "--gpu-fwd-prefilter", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,          "experimental CUDA Forward score prefilter before CPU Forward", 99 },
-  { "--gpu-fb-parser", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,              "experimental CUDA Forward/Backward parser state handoff",      99 },
-  { "--gpu-vit-largem", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu-vit-prefilter", NULL, "allow CUDA Viterbi prefilter on large models (M>2048)",      99 },
-  { "--gpu-fwd-largem", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu-fwd-prefilter", NULL, "allow CUDA Forward prefilter on large models (M>1024)",      99 },
+  { "--gpu-vit-largem", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,              "allow CUDA Viterbi prefilter on large models (M>2048)",        99 },
+  { "--gpu-fwd-largem", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,              "allow CUDA Forward prefilter on large models (M>1024)",        99 },
   { "--gpu-vit-min-seqs", eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Viterbi prefilter (0=auto)",   99 },
   { "--gpu-fwd-min-seqs", eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Forward prefilter (0=auto)",   99 },
   { "--gpu-vit-min-res",  eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidate residues needed for CUDA Viterbi prefilter (0=auto)", 99 },
@@ -122,7 +119,6 @@ static ESL_OPTIONS options[] = {
   { "--gpu-vit-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "debug compare CUDA Viterbi scores to CPU Viterbi scores",      99 },
   { "--gpu-fb-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,             "debug compare CUDA parser state to CPU Forward/Backward",      99 },
   { "--gpu-previt-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,         "debug compare CUDA null/bias/F1 boundary to CPU boundary",     99 },
-  { "--gpu-ssv",         eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "use standalone CUDA SSV+fallback instead of monolithic MSV",    99 },
   { "--gpu-ssv-compare", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,            "debug compare CUDA SSV+fallback scores to monolithic MSV",      99 },
 
 /* Other options */
@@ -512,11 +508,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     info[i].gpu_load_seqs  = esl_opt_GetInteger(go, "--gpu-load-seqs");
     info[i].gpu_load_res   = esl_opt_GetInteger(go, "--gpu-load-res");
     info[i].gpu_msv_slack  = esl_opt_GetReal(go, "--gpu-msv-slack");
-    info[i].gpu_vit_prefilter = esl_opt_GetBoolean(go, "--gpu-vit-prefilter");
-    info[i].gpu_fwd_prefilter = esl_opt_GetBoolean(go, "--gpu-fwd-prefilter");
+    info[i].gpu_vit_prefilter = TRUE;
+    info[i].gpu_fwd_prefilter = TRUE;
     info[i].gpu_vit_largem    = esl_opt_GetBoolean(go, "--gpu-vit-largem");
     info[i].gpu_fwd_largem    = esl_opt_GetBoolean(go, "--gpu-fwd-largem");
-    info[i].gpu_fb_parser     = esl_opt_GetBoolean(go, "--gpu-fb-parser");
+    info[i].gpu_fb_parser     = TRUE;
     info[i].gpu_vit_min_seqs  = esl_opt_GetInteger(go, "--gpu-vit-min-seqs");
     info[i].gpu_fwd_min_seqs  = esl_opt_GetInteger(go, "--gpu-fwd-min-seqs");
     info[i].gpu_vit_min_res   = esl_opt_GetInteger(go, "--gpu-vit-min-res");
@@ -529,7 +525,6 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     info[i].gpu_vit_compare   = esl_opt_GetBoolean(go, "--gpu-vit-compare");
     info[i].gpu_fb_compare    = esl_opt_GetBoolean(go, "--gpu-fb-compare");
     info[i].gpu_previt_compare = esl_opt_GetBoolean(go, "--gpu-previt-compare");
-    info[i].gpu_ssv            = esl_opt_GetBoolean(go, "--gpu-ssv");
     info[i].gpu_ssv_compare    = esl_opt_GetBoolean(go, "--gpu-ssv-compare");
 #ifdef HMMER_THREADS
 	  info[i].queue = queue;

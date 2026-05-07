@@ -7,7 +7,7 @@ Last updated: 2026-05-07
 - `hmmsearch --gpu` is an opt-in, protein-only CUDA path. Target databases are built by `hmmseqdb` which produces both Easel `dsqdata` files and a `.gpudb` GPU-native format.
 - GPU code lives under `src/cuda/` with stage-owned CUDA files (`p7_cuda_msv.cu`, `p7_cuda_bias.cu`, `p7_cuda_viterbi.cu`, `p7_cuda_forward.cu`, `p7_cuda_fb_parser.cu`, `p7_cuda_ssv.cu`) and shared runtime/profile ownership in `p7_cuda_runtime.cu` + `p7_cuda_internal.h`.
 - `src/cuda_msv.h` is only a compatibility wrapper for existing callers; new CUDA-facing code should include `src/cuda/p7_cuda.h`.
-- The default GPU MSV path uses the SSV kernel (register-optimized, 1.36x faster than monolithic MSV). The SSV kernel handles both resident-database and chunk-based paths via `p7_cuda_SSVFilterResident()` and `p7_cuda_SSVFilterDsqdataChunk()`. The `--gpu-ssv` flag is now a no-op (SSV is always used).
+- The default GPU MSV path uses the SSV kernel (register-optimized, 1.36x faster than monolithic MSV). The SSV kernel handles both resident-database and chunk-based paths via `p7_cuda_SSVFilterResident()` and `p7_cuda_SSVFilterDsqdataChunk()`.
 - Exact hit parity is maintained by a two-stage GPU bias approach: (1) fast float32 kernel for all sequences (F1 gating pre-filter), (2) double-precision survivor kernel (`cuda_bias_filter_survivors_kernel`) recomputes filtersc with `log()` for ~4000 F1 survivors, achieving bit-identical parity with CPU `p7_bg_FilterScore`. No CPU `p7_bg_FilterScore` or `p7_MSVFilter` calls remain in the GPU path.
 - Resident survivor-core work now keeps Viterbi/F3 pass decisions GPU-side in normal mode, copies only status/pass buffers when full scores are not needed, and materializes `ESL_SQ` metadata only for sequences entering CPU post-Fwd/domain work or compare diagnostics.
 - GPU-side F1 gating kernel (`cuda_f1_gating_kernel` in `p7_cuda_bias.cu`) computes MSV P-values and bias-adjusted P-values on device, producing a compact survivor index list via atomicAdd. The batch loop in `hmmsearch_gpu.c` now iterates only over F1 survivors rather than all sequences in the batch. `p7_pipeline_Reuse` and `gpu_RestoreSeqStorage` are called only for survivors.
@@ -15,7 +15,7 @@ Last updated: 2026-05-07
 - For post-Viterbi Forward prefilter in normal mode, F3 gating is now pure GPU decision; CPU Forward rerun at the F3 gray zone is retained only in compare/debug paths, not production gating.
 - GPU Viterbi is active by default for M≤2048 (was M≤512); GPU Forward for M≤1024 (was M≤256). Tiling strategy includes an M>2048 tier for very large models.
 - The stats report now includes exact exclusive timing buckets (`Exact io_read_unpack`, `Exact gpu_h2d`, `Exact gpu_kernel`, `Exact gpu_d2h`, `Exact host_survivor_orchestration`, `Exact cpu_postfwd_domain_null2_output`, `Exact other`) plus `Exact delta_vs_wall`. Legacy `Stage *` and `CUDA *` lines are retained for continuity but can overlap by construction.
-- Experimental/default-off flags remain available for later-stage work: `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`, and their compare/min-batch controls.
+- All GPU stages (SSV/MSV, Viterbi prefilter, Forward prefilter, FB parser) are enabled by default with `--gpu`. Debug compare flags and largem overrides remain available.
 - The Easel `dsqdata` chunk-sizing change is applied at build time from `patches/easel-dsqdata-open-sized.patch`; do not edit the Easel submodule in place for this work.
 
 ### Engine Reuse (Phase 1)
@@ -61,7 +61,7 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 | CPU 4-thread | 4.79s | — | 1.00x |
 | GPU (all stages) | 2.50s | **4.19x** | **1.92x** |
 
-- Flags: `--gpu --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser`
+- Flags: `--gpu` (all stages now default-on)
 - Database: resident on GPU (229,290 seqs, 92.8 MB)
 - Hit parity: `cpu_only=0`, `gpu_only=0` across all 13 queries
 - Benchmark: `test-speed/x-hmmsearch-gpu-profmark` (multi-query single-process mode)
@@ -83,7 +83,7 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 
 ## GPU SSV Kernel (Default MSV Path, 2026-05-07)
 
-The SSV kernel is now the default GPU MSV path (no `--gpu-ssv` flag needed):
+The SSV kernel is the default GPU MSV path:
 - **Architecture**: Register-based SSV fast-path (no J-state, constant xB) with in-kernel MSV fallback for ~0.3% of sequences that need J-state. Each thread owns a contiguous stripe of model nodes in registers; cross-thread boundary values communicated via `__shfl_up_sync` (no `__syncthreads()` in the SSV inner loop). Precomputed q/z lookup tables in shared memory eliminate integer division from the inner loop.
 - **Profile format**: uses `rbv` (unsigned byte) — same as monolithic MSV kernel. Does NOT use the CPU `sbv` (signed byte) profile that caused the earlier failed attempt.
 - **Paths**: `p7_cuda_SSVFilterResident()` for resident-database mode, `p7_cuda_SSVFilterDsqdataChunk()` for chunk-based mode.

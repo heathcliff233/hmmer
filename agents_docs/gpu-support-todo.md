@@ -23,7 +23,7 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 - ~~**Eliminate redundant CPU bias in survivor loop**~~: Done (2026-05-07). Double-precision GPU survivor kernel (`cuda_bias_filter_survivors_kernel`) recomputes filtersc with `log()` for ~4000 F1 survivors, achieving bit-identical parity with CPU `p7_bg_FilterScore`. CPU bias computation completely eliminated from GPU path. Result: 2.86s → 2.59s, GPU utilization 54% → 62%.
 
-- ~~**Make SSV the default GPU MSV kernel**~~: Done (2026-05-07). SSV kernel is now always used (both resident and chunk paths). `--gpu-ssv` flag is a no-op. `p7_cuda_SSVFilterResident()` added for resident-database path. Monolithic MSV retained only for `--gpu-ssv-compare` debug mode. Result: 1.36x faster MSV kernel, contributing to 1.32x → 1.48x aggregate speedup.
+- ~~**Make SSV the default GPU MSV kernel**~~: Done (2026-05-07). SSV kernel is now always used (both resident and chunk paths). `p7_cuda_SSVFilterResident()` added for resident-database path. Monolithic MSV retained only for `--gpu-ssv-compare` debug mode. Result: 1.36x faster MSV kernel, contributing to 1.32x → 1.48x aggregate speedup.
 
 - ~~**Raise Viterbi/Forward M-limits**~~: Done (2026-05-07). Viterbi default gate raised from M≤512 to M≤2048 (shmem fits in 48KB). Forward default gate raised from M≤256 to M≤1024. Added M>2048 tiling tier. `--gpu-vit-largem`/`--gpu-fwd-largem` flags now gate at the new thresholds.
 
@@ -43,7 +43,7 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV 
 - **rbv access pattern optimization**: with contiguous node ownership, explore whether L1 cache prefetching or texture memory for the rbv profile improves memory-bound queries.
 
 ### Medium-priority work
-- Decide default policy for later-stage flags (`--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`). Needs broader validation and auto-gating for short profiles.
+- ~~Decide default policy for later-stage flags~~: Done. All GPU stages (Viterbi prefilter, Forward prefilter, FB parser) are now default-on with `--gpu`.
 - Consider larger batch sizes (>32K seqs) to reduce per-batch CUDA API call count.
 - Profile/candidate-shape auto-gating for short queries where CUDA launches regress wall time.
 

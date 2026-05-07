@@ -43,9 +43,9 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 
 ## What Was Tried And Worked
 
-### 1) Later-stage CUDA prefilters (opt-in, default-off)
+### 1) Later-stage CUDA prefilters (now default-on)
 - CUDA Viterbi, Forward, and Forward/Backward parser: all parity-clean on checked compare runs.
-- Remain opt-in (`--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`) pending broader validation and auto-gating policy for short profiles.
+- Now enabled by default with `--gpu` (previously required separate opt-in flags).
 
 ### 2) GPU-side F1 gating
 - Moved MSV/bias P-value gating to a CUDA kernel; batch loop now iterates only over compact survivor indices.
@@ -77,7 +77,7 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - **Phase 1** (two-pass): SSV kernel first (no J-state), then MSV fallback kernel only for uncertain sequences (~0.3%). Used `rbv` (unsigned byte) profile — same as the monolithic MSV kernel — avoiding the `sbv` pitfall of attempt #3. Parity-verified but ~15–20% slower due to host round-trip between passes.
 - **Phase 2** (fused): eliminated the two-pass overhead by fusing the MSV fallback directly into the SSV kernel. The fused kernel runs SSV as the primary fast-path with in-kernel MSV fallback for sequences that need J-state. No intermediate copies, no second kernel launch. Performance-equivalent to monolithic MSV (<0.2% delta).
 - **Phase 3** (register-optimized): exploited SSV's constant-xB property for register-based DP. Key changes: (1) precomputed q/z lookup tables in shared memory eliminate integer division from inner loop, (2) each thread owns a contiguous stripe of model nodes in registers instead of shared memory, (3) `__shfl_up_sync` replaces `__syncthreads()` for the single cross-thread boundary value. Result: 1.36x kernel speedup over monolithic MSV (376ms vs 511ms on all-13 profmark), with 1.57-1.79x for larger profiles.
-- **Phase 4** (default, 2026-05-07): made SSV the default GPU MSV path. Added `p7_cuda_SSVFilterResident()` for resident-database mode. `--gpu-ssv` flag is now a no-op. Monolithic MSV retained only for `--gpu-ssv-compare` debug mode.
+- **Phase 4** (default, 2026-05-07): made SSV the default GPU MSV path. Added `p7_cuda_SSVFilterResident()` for resident-database mode. Monolithic MSV retained only for `--gpu-ssv-compare` debug mode.
 - Outcome: adopted as default GPU MSV kernel. 1.36x faster than monolithic MSV, contributing to 1.32x → 1.48x aggregate speedup.
 - Parity: bitwise-identical scores to monolithic MSV on all-13 profmark (229,290 sequences × 13 queries, zero mismatches via `--gpu-ssv-compare`). Zero hit-level parity differences.
 - Files: `src/cuda/p7_cuda_ssv.cu`, CLI flags in `hmmsearch.c`.
@@ -97,7 +97,7 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 ## Current Status Summary
 
 - Exact final hit parity is demonstrated on prepared all-13 and broader-12 checked samples when using current accepted boundary handling.
-- Later stages (`--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`) are promising but remain opt-in/default-off by policy.
+- Later stages (Viterbi prefilter, Forward prefilter, FB parser) are now default-on with `--gpu`.
 - Open work is maintained in `gpu-support-todo.md`; current accepted state is maintained in `gpu-support-progress.md`.
 
 ### 8) GPU pipeline overlap and efficiency refinements (2026-05-07)

@@ -38,11 +38,8 @@ make -j$(nproc)
 # Build GPU-capable target database
 src/hmmseqdb target.fa target.gpudb
 
-# Run GPU search (protein-only, opt-in; uses SSV kernel by default)
+# Run GPU search (protein-only, opt-in; all GPU stages on by default)
 src/hmmsearch --gpu query.hmm target.gpudb
-
-# With later-stage GPU acceleration (experimental, default-off)
-src/hmmsearch --gpu --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser query.hmm target.gpudb
 
 # Debug: compare SSV scores to monolithic MSV (prints mismatches to stderr)
 src/hmmsearch --gpu --gpu-ssv-compare query.hmm target.gpudb
@@ -101,7 +98,7 @@ agents_docs/       Detailed architecture documentation (see index below)
 The GPU path accelerates SSV/MSV + biased-composition filter + Viterbi + Forward in CUDA batches. Current state:
 
 - Default MSV path: SSV kernel (register-optimized, 1.36x faster than monolithic MSV, with in-kernel MSV fallback for ~0.3% of sequences needing J-state). Supports both resident-database and chunk-based paths.
-- Opt-in later stages: `--gpu-vit-prefilter` (M≤2048 default), `--gpu-fwd-prefilter` (M≤1024 default), `--gpu-fb-parser`
+- All GPU stages enabled by default with `--gpu`: SSV/MSV → Viterbi prefilter (M≤2048) → Forward prefilter (M≤1024) → FB parser
 - Latest all-13 profmark (multi-query single-process, with later stages): **4.19x vs CPU-1** (8.93s → 2.13s), **1.92x vs CPU-4** (4.79s → 2.50s), zero parity errors
 - Survivor loop: sorted by sequence length with ReconfigLength caching; CPU MSV fallback eliminated (double-precision GPU bias is authoritative)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
@@ -115,19 +112,15 @@ The GPU output reports three timing layers (see `agents_docs/gpu-timing-analysis
 - **"Stage *" lines**: CPU pipeline stage wall-clock (overlap with CUDA timings by construction)
 - **"Exact *" lines**: exclusive wall-clock buckets that sum to `exact_wall`
 
-Key gotcha: `survivor_loop_other` is the **total wall time** of the survivor loop, not "unaccounted residual". In Mode 2 (with `--gpu-vit-prefilter`), `vit_fwd_dispatch` **overlaps** with `gpu_kernel` — the Exact buckets are not fully exclusive in that mode.
+Key gotcha: `survivor_loop_other` is the **total wall time** of the survivor loop, not "unaccounted residual". With all GPU stages active, `vit_fwd_dispatch` **overlaps** with `gpu_kernel` — the Exact buckets are not fully exclusive.
 
 ## GPU Expert Flags (hidden, docgroup 99)
 
 These flags are not shown in `hmmsearch -h` output but are defined in `src/hmmsearch.c`:
 
 ```
---gpu-vit-prefilter    GPU Viterbi score prefilter (requires --gpu, M≤2048 default)
---gpu-fwd-prefilter    GPU Forward score prefilter (requires --gpu, M≤1024 default)
---gpu-fb-parser        GPU Forward/Backward parser state handoff (requires --gpu)
---gpu-vit-largem       Allow GPU Viterbi on large models M>2048 (requires --gpu-vit-prefilter)
---gpu-fwd-largem       Allow GPU Forward on large models M>1024 (requires --gpu-fwd-prefilter)
---gpu-ssv              No-op (SSV is now the default GPU MSV kernel)
+--gpu-vit-largem       Allow GPU Viterbi on large models M>2048 (requires --gpu)
+--gpu-fwd-largem       Allow GPU Forward on large models M>1024 (requires --gpu)
 --gpu-ssv-compare      Debug: compare SSV scores to monolithic MSV
 ```
 
