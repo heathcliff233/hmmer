@@ -61,9 +61,8 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 
 - Active sensitivity risk boundary is bias-corrected F1 near CPU SSV/MSV shortcut behavior.
 - Current accepted mitigation:
-  - Double-precision GPU survivor kernel (`cuda_bias_filter_survivors_kernel`) recomputes filtersc with `log()` for F1 survivors, achieving bit-identical parity with CPU `p7_bg_FilterScore`. No CPU bias calls remain.
-  - CPU `p7_MSVFilter()` rescue remains available at the bias/F1 boundary.
-- Rationale: two-stage approach (fast float32 pre-filter + exact double-precision recompute for survivors) gives both speed and exact parity.
+  - Double-precision GPU survivor kernel (`cuda_bias_filter_survivors_kernel`) recomputes filtersc with `log()` for F1 survivors, achieving bit-identical parity with CPU `p7_bg_FilterScore`. No CPU bias or MSV calls remain in the GPU path.
+- Rationale: two-stage approach (fast float32 pre-filter + exact double-precision recompute for survivors) gives both speed and exact parity. CPU MSV fallback was removed as dead code since the double-precision GPU bias is authoritative.
 
 ### 5) Double-precision GPU survivor bias kernel (2026-05-07)
 - Problem: GPU float32 bias kernel (`logf()`) diverges from CPU (`log()`) by up to 4.75 nats, breaking downstream F2/F3 threshold decisions. CPU `p7_bg_FilterScore` was required for exact parity.
@@ -78,9 +77,22 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - **Phase 1** (two-pass): SSV kernel first (no J-state), then MSV fallback kernel only for uncertain sequences (~0.3%). Used `rbv` (unsigned byte) profile — same as the monolithic MSV kernel — avoiding the `sbv` pitfall of attempt #3. Parity-verified but ~15–20% slower due to host round-trip between passes.
 - **Phase 2** (fused): eliminated the two-pass overhead by fusing the MSV fallback directly into the SSV kernel. The fused kernel runs SSV as the primary fast-path with in-kernel MSV fallback for sequences that need J-state. No intermediate copies, no second kernel launch. Performance-equivalent to monolithic MSV (<0.2% delta).
 - **Phase 3** (register-optimized): exploited SSV's constant-xB property for register-based DP. Key changes: (1) precomputed q/z lookup tables in shared memory eliminate integer division from inner loop, (2) each thread owns a contiguous stripe of model nodes in registers instead of shared memory, (3) `__shfl_up_sync` replaces `__syncthreads()` for the single cross-thread boundary value. Result: 1.36x kernel speedup over monolithic MSV (376ms vs 511ms on all-13 profmark), with 1.57-1.79x for larger profiles.
-- Outcome: adopted as opt-in (`--gpu-ssv`), 1.36x faster than monolithic MSV on all-13 profmark.
+- **Phase 4** (default, 2026-05-07): made SSV the default GPU MSV path. Added `p7_cuda_SSVFilterResident()` for resident-database mode. `--gpu-ssv` flag is now a no-op. Monolithic MSV retained only for `--gpu-ssv-compare` debug mode.
+- Outcome: adopted as default GPU MSV kernel. 1.36x faster than monolithic MSV, contributing to 1.32x → 1.48x aggregate speedup.
 - Parity: bitwise-identical scores to monolithic MSV on all-13 profmark (229,290 sequences × 13 queries, zero mismatches via `--gpu-ssv-compare`). Zero hit-level parity differences.
 - Files: `src/cuda/p7_cuda_ssv.cu`, CLI flags in `hmmsearch.c`.
+
+### 6) Survivor loop optimization (2026-05-07)
+- Problem: per-survivor overhead from (a) CPU MSV fallback for bias-boundary sequences, (b) redundant ReconfigLength calls for same-length sequences.
+- Solution: (a) removed CPU MSV fallback entirely — double-precision GPU bias kernel is authoritative and bit-identical to CPU. (b) sort survivors by sequence length before processing, cache last ReconfigLength call to skip redundant `p7_bg_SetLength`/`p7_oprofile_ReconfigLength`.
+- Outcome: survivor loop time reduced from ~0.01s to ~0.003s. Combined with SSV default and M-limit changes, aggregate speedup improved from 1.32x to 1.48x.
+- Files: `src/hmmsearch_gpu.c` (PreViterbiBoundary, survivor loop).
+
+### 7) Viterbi/Forward M-limit expansion (2026-05-07)
+- Problem: GPU Viterbi was gated at M≤512 and Forward at M≤256, despite shared memory easily supporting larger models.
+- Solution: raised Viterbi default to M≤2048 (at M=2048, Qw=256, shmem=24576 bytes per group, fits in 48KB). Raised Forward default to M≤1024. Added M>2048 tiling tier with smaller batch sizes.
+- Outcome: more queries use GPU Viterbi/Forward instead of falling back to CPU. No parity issues.
+- Files: `src/hmmsearch_gpu.c` (M gates, tiling function).
 
 ## Current Status Summary
 

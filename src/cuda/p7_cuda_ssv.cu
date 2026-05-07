@@ -493,3 +493,150 @@ ERROR:
   engine->stats.host_malloc_free_seconds += host_seconds() - ht0;
   return status;
 }
+
+extern "C" int
+p7_cuda_SSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                          int64_t seq0, int nseq, float *scores, int *statuses,
+                          char *errbuf, int errbuf_size)
+{
+  int        status = eslOK;
+  uint8_t   *h_tjb_by_seq = NULL;
+  int       *h_raw = NULL;
+  int       *h_overflow = NULL;
+  size_t     shmem = (size_t) (cuom->M + 1) * 2;
+  cudaEvent_t h2d0, h2d1, k0, k1, d2h0, d2h1;
+  double     ht0;
+
+  if (!engine || !cuom || !scores || !statuses) return eslEINVAL;
+  if (!engine->resident_active) return eslEINVAL;
+  if (nseq <= 0) return eslOK;
+  if (seq0 < 0 || seq0 + nseq > engine->resident_nseq) return eslEINVAL;
+  if (shmem > 96 * 1024) {
+    if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA SSV profile M=%d exceeds shared-memory limit", cuom->M);
+    return eslERANGE;
+  }
+
+  ht0 = host_seconds();
+  h_tjb_by_seq = (uint8_t *) malloc(sizeof(uint8_t) * nseq);
+  h_raw        = (int *)     malloc(sizeof(int) * nseq);
+  h_overflow   = (int *)     malloc(sizeof(int) * nseq);
+  if (!h_tjb_by_seq || !h_raw || !h_overflow) { status = eslEMEM; goto ERROR; }
+  engine->stats.host_malloc_free_seconds += host_seconds() - ht0;
+
+  ht0 = host_seconds();
+  {
+    int *h_lengths_tmp = (int *) malloc(sizeof(int) * nseq);
+    if (!h_lengths_tmp) { status = eslEMEM; goto ERROR; }
+    if ((status = cuda_status(cudaMemcpy(h_lengths_tmp, engine->d_resident_lengths + seq0, sizeof(int) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(resident lengths->host)")) != eslOK) { free(h_lengths_tmp); goto ERROR; }
+    for (int i = 0; i < nseq; i++) {
+      if ((status = cuda_msvprofile_GrowLengthLookup((P7_CUDA_MSVPROFILE *) cuom, h_lengths_tmp[i])) != eslOK) { free(h_lengths_tmp); goto ERROR; }
+      h_tjb_by_seq[i] = cuom->h_tjb_by_len[h_lengths_tmp[i]];
+    }
+    free(h_lengths_tmp);
+  }
+  engine->stats.host_metadata_loop_seconds += host_seconds() - ht0;
+
+  if (engine->meta_alloc < nseq) {
+    if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
+    engine->d_tjb_by_seq = NULL;
+    engine->meta_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(tjb_by_seq)")) != eslOK) goto ERROR;
+    engine->meta_alloc = nseq;
+  }
+  if (engine->result_alloc < nseq) {
+    if (engine->d_raw) cudaFree(engine->d_raw);
+    if (engine->d_overflow) cudaFree(engine->d_overflow);
+    engine->d_raw = NULL;
+    engine->d_overflow = NULL;
+    engine->result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_raw, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(raw)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_overflow, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(overflow)")) != eslOK) goto ERROR;
+    engine->result_alloc = nseq;
+  }
+
+  ht0 = host_seconds();
+  cudaEventCreate(&h2d0);
+  cudaEventCreate(&h2d1);
+  cudaEventCreate(&k0);
+  cudaEventCreate(&k1);
+  cudaEventCreate(&d2h0);
+  cudaEventCreate(&d2h1);
+  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
+
+  cudaEventRecord(h2d0);
+  ht0 = host_seconds();
+  if ((status = cuda_status(cudaMemcpy(engine->d_tjb_by_seq, h_tjb_by_seq, sizeof(uint8_t) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(tjb_by_seq)")) != eslOK) goto CUDA_ERROR;
+  engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
+  cudaEventRecord(h2d1);
+  ht0 = host_seconds();
+  cudaEventSynchronize(h2d1);
+  engine->stats.host_sync_seconds += host_seconds() - ht0;
+
+  cudaEventRecord(k0);
+  cuda_ssv_opt_kernel<<<nseq, P7_CUDA_MSV_BLOCK_THREADS, shmem>>>(
+    engine->d_resident_dsq, engine->d_resident_offsets + seq0, engine->d_resident_lengths + seq0,
+    engine->d_tjb_by_seq, nseq,
+    cuom->d_rbv, cuom->M, cuom->Q, cuom->Kp,
+    cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
+    cuom->base_b, cuom->bias_b,
+    engine->d_raw, engine->d_overflow);
+  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_opt_kernel(resident) launch")) != eslOK) goto CUDA_ERROR;
+  cudaEventRecord(k1);
+  ht0 = host_seconds();
+  cudaEventSynchronize(k1);
+  engine->stats.host_sync_seconds += host_seconds() - ht0;
+
+  cudaEventRecord(d2h0);
+  ht0 = host_seconds();
+  if ((status = cuda_status(cudaMemcpy(h_raw, engine->d_raw, sizeof(int) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(raw)")) != eslOK) goto CUDA_ERROR;
+  if ((status = cuda_status(cudaMemcpy(h_overflow, engine->d_overflow, sizeof(int) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(overflow)")) != eslOK) goto CUDA_ERROR;
+  engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
+  cudaEventRecord(d2h1);
+  ht0 = host_seconds();
+  cudaEventSynchronize(d2h1);
+  engine->stats.host_sync_seconds += host_seconds() - ht0;
+
+  engine->stats.h2d_seconds    += elapsed_seconds(h2d0, h2d1);
+  engine->stats.kernel_seconds += elapsed_seconds(k0, k1);
+  engine->stats.ssv_kernel_seconds += elapsed_seconds(k0, k1);
+  engine->stats.d2h_seconds    += elapsed_seconds(d2h0, d2h1);
+  engine->stats.nseqs          += nseq;
+  engine->stats.nbatches       += 1;
+
+  ht0 = host_seconds();
+  for (int i = 0; i < nseq; i++) {
+    if (h_overflow[i]) {
+      scores[i] = eslINFINITY;
+      statuses[i] = eslERANGE;
+    } else {
+      scores[i] = ((float) (h_raw[i] - h_tjb_by_seq[i]) - (float) cuom->base_b);
+      scores[i] /= cuom->scale_b;
+      scores[i] -= 3.0f;
+      statuses[i] = eslOK;
+    }
+  }
+  engine->stats.host_score_convert_seconds += host_seconds() - ht0;
+
+  engine->last_cuom           = cuom;
+  engine->batch_owner         = NULL;
+  engine->batch_nseq          = nseq;
+  engine->resident_batch_seq0 = seq0;
+  engine->resident_batch_nseq = nseq;
+
+CUDA_ERROR:
+  ht0 = host_seconds();
+  cudaEventDestroy(h2d0);
+  cudaEventDestroy(h2d1);
+  cudaEventDestroy(k0);
+  cudaEventDestroy(k1);
+  cudaEventDestroy(d2h0);
+  cudaEventDestroy(d2h1);
+  engine->stats.host_event_ops_seconds += host_seconds() - ht0;
+ERROR:
+  ht0 = host_seconds();
+  free(h_tjb_by_seq);
+  free(h_raw);
+  free(h_overflow);
+  engine->stats.host_malloc_free_seconds += host_seconds() - ht0;
+  return status;
+}

@@ -108,11 +108,11 @@ gpu_ChooseTileCandidates(const WORKER_INFO *info, int is_fwd, int total_n, int t
   int tile_res;
 
   if (is_fwd) {
-    tile_n = (M > 1200) ? 192 : (M > 700 ? 320 : 640);
-    tile_res = (M > 1200) ? 200000 : (M > 700 ? 350000 : 700000);
+    tile_n = (M > 2048) ? 96 : (M > 1200) ? 192 : (M > 700 ? 320 : 640);
+    tile_res = (M > 2048) ? 100000 : (M > 1200) ? 200000 : (M > 700 ? 350000 : 700000);
   } else {
-    tile_n = (M > 1200) ? 256 : (M > 700 ? 512 : 1024);
-    tile_res = (M > 1200) ? 280000 : (M > 700 ? 500000 : 1000000);
+    tile_n = (M > 2048) ? 128 : (M > 1200) ? 256 : (M > 700 ? 512 : 1024);
+    tile_res = (M > 2048) ? 150000 : (M > 1200) ? 280000 : (M > 700 ? 500000 : 1000000);
   }
   if (total_n < tile_n) tile_n = total_n;
   if (tile_n < 1) tile_n = 1;
@@ -498,27 +498,6 @@ gpu_PreViterbiBoundary(WORKER_INFO *info, const ESL_SQ *dbsq, float gpu_usc, int
     if (info->pli->do_biasfilter) {
       seq_score = (usc + info->gpu_msv_slack - filtersc) / eslCONST_LOG2;
       P = esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
-      if (P > info->pli->F1 && gpu_msv_status == eslOK) {
-        float cpu_usc = -eslINFINITY;
-        int cpu_msv_status;
-        double tmsv0 = hmmsearch_WallTime();
-        int status = p7_omx_GrowTo(info->pli->oxf, info->om->M, 0, dbsq->n);
-        if (status != eslOK) return status;
-        cpu_msv_status = p7_MSVFilter(dbsq->dsq, dbsq->n, info->om, info->pli->oxf, &cpu_usc);
-        {
-          double dt = hmmsearch_WallTime() - tmsv0;
-          info->pli->time_msv += dt;
-          info->pli->exact_cpu_survivor_total += dt;
-        }
-        if (cpu_msv_status == eslERANGE) {
-          usc = cpu_usc;
-          P = 0.0;
-        } else if (cpu_msv_status == eslOK) {
-          seq_score = (cpu_usc - filtersc) / eslCONST_LOG2;
-          P = esl_gumbel_surv(seq_score, info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA]);
-          if (P <= info->pli->F1) usc = cpu_usc;
-        }
-      }
       if (P <= info->pli->F1) passed_bias = TRUE;
     } else {
       filtersc = nullsc;
@@ -788,8 +767,8 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
   int64_t  effective_load_res = 0;
   int64_t  batch_res_cap = 0;
   double   t0;
-  int      gpu_vit_active = info->gpu_vit_prefilter && (info->gpu_vit_largem || info->om->M <= 512);
-  int      gpu_fwd_active = info->gpu_fwd_prefilter && (info->gpu_fwd_largem || info->om->M <= 256);
+  int      gpu_vit_active = info->gpu_vit_prefilter && (info->gpu_vit_largem || info->om->M <= 2048);
+  int      gpu_fwd_active = info->gpu_fwd_prefilter && (info->gpu_fwd_largem || info->om->M <= 1024);
   int      gpu_strict_mode = !(info->gpu_vit_compare || info->gpu_fwd_compare || info->gpu_fb_compare || info->gpu_previt_compare || info->gpu_ssv_compare);
   int      vit_cmp_status_mismatch = 0;
   int      vit_cmp_pass_mismatch = 0;
@@ -873,19 +852,20 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       }
 
       t0 = hmmsearch_WallTime();
-      if (info->gpu_ssv || info->gpu_ssv_compare)
-        status = p7_cuda_SSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
-      else if (p7_cuda_engine_IsResident(info->cuda_engine))
-        status = p7_cuda_MSVFilterResident(info->cuda_engine, info->cuda_msv, (int64_t) batch.view.i0, batch.view.N, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+      if (p7_cuda_engine_IsResident(info->cuda_engine))
+        status = p7_cuda_SSVFilterResident(info->cuda_engine, info->cuda_msv, (int64_t) batch.view.i0, batch.view.N, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
       else
-        status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
+        status = p7_cuda_SSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, gpu_scores, gpu_statuses, errbuf, sizeof(errbuf));
       info->pli->time_msv += hmmsearch_WallTime() - t0;
       if (status != eslOK) p7_Fail("--gpu requested, but CUDA batch MSV/SSV failed: %s\n", errbuf);
 
       if (info->gpu_ssv_compare) {
         float *msv_scores = (float *) malloc(sizeof(float) * search_chu->N);
         int   *msv_statuses = (int *) malloc(sizeof(int) * search_chu->N);
-        status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, msv_scores, msv_statuses, errbuf, sizeof(errbuf));
+        if (p7_cuda_engine_IsResident(info->cuda_engine))
+          status = p7_cuda_MSVFilterResident(info->cuda_engine, info->cuda_msv, (int64_t) batch.view.i0, batch.view.N, msv_scores, msv_statuses, errbuf, sizeof(errbuf));
+        else
+          status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv, search_chu, msv_scores, msv_statuses, errbuf, sizeof(errbuf));
         if (status != eslOK) p7_Fail("--gpu-ssv-compare: monolithic MSV failed: %s\n", errbuf);
         for (int ci = 0; ci < search_chu->N; ci++) {
           if (gpu_statuses[ci] != msv_statuses[ci] || (gpu_statuses[ci] == eslOK && gpu_scores[ci] != msv_scores[ci]))
@@ -944,6 +924,23 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
           gpu_filtersc[gpu_f1_survivor_idx[si]] = surv_filtersc[si];
         free(surv_filtersc);
       }
+
+      /* Sort survivors by sequence length to maximize ReconfigLength cache hits */
+      {
+        const int64_t *surv_L = search_chu->L;
+        for (int a = 1; a < gpu_f1_nsurv; a++) {
+          int key = gpu_f1_survivor_idx[a];
+          int64_t keyL = surv_L[key];
+          int b = a - 1;
+          while (b >= 0 && surv_L[gpu_f1_survivor_idx[b]] > keyL) {
+            gpu_f1_survivor_idx[b+1] = gpu_f1_survivor_idx[b];
+            b--;
+          }
+          gpu_f1_survivor_idx[b+1] = key;
+        }
+      }
+
+      int last_reconfig_L = -1;
       for (int si = 0; si < gpu_f1_nsurv; si++) {
         i = gpu_f1_survivor_idx[si];
         if (search_chu->L[i] == 0) continue;
@@ -954,8 +951,11 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
         info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
         if (status != eslOK) goto ERROR;
         t0 = hmmsearch_WallTime();
-        p7_bg_SetLength(info->bg, dbsq->n);
-        p7_oprofile_ReconfigLength(info->om, dbsq->n);
+        if ((int)dbsq->n != last_reconfig_L) {
+          p7_bg_SetLength(info->bg, dbsq->n);
+          p7_oprofile_ReconfigLength(info->om, dbsq->n);
+          last_reconfig_L = (int)dbsq->n;
+        }
         info->pli->exact_host_survivor_orchestration += hmmsearch_WallTime() - t0;
         {
           GPU_PREVIT_RESULT previt;

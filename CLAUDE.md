@@ -38,16 +38,13 @@ make -j$(nproc)
 # Build GPU-capable target database
 src/hmmseqdb target.fa target.gpudb
 
-# Run GPU search (protein-only, opt-in)
+# Run GPU search (protein-only, opt-in; uses SSV kernel by default)
 src/hmmsearch --gpu query.hmm target.gpudb
 
 # With later-stage GPU acceleration (experimental, default-off)
 src/hmmsearch --gpu --gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser query.hmm target.gpudb
 
-# With standalone SSV kernel (experimental, parity-verified)
-src/hmmsearch --gpu --gpu-ssv query.hmm target.gpudb
-
-# Debug: compare SSV+fallback scores to monolithic MSV (prints mismatches to stderr)
+# Debug: compare SSV scores to monolithic MSV (prints mismatches to stderr)
 src/hmmsearch --gpu --gpu-ssv-compare query.hmm target.gpudb
 ```
 
@@ -101,18 +98,38 @@ agents_docs/       Detailed architecture documentation (see index below)
 
 ## GPU Architecture Summary
 
-The GPU path accelerates MSV + biased-composition filter in CUDA batches. Current state:
+The GPU path accelerates SSV/MSV + biased-composition filter + Viterbi + Forward in CUDA batches. Current state:
 
-- Default path: CUDA MSV + bias with CPU-compatible F1 boundary checks
-- Opt-in standalone SSV: `--gpu-ssv` (register-optimized kernel: SSV fast-path with in-kernel MSV fallback, 1.36x faster than monolithic MSV)
-- Opt-in later stages: `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-fb-parser`
-- Latest all-13 profmark (with later stages): 1.53x speedup (CPU 10.44s → GPU 6.83s), zero parity errors
-- GPU vs CPU-4 (4-thread): currently 0.72x cold (slower due to 260ms/query CUDA init), 1.29x warm
-- Dominant overhead: CUDA context initialization (260ms per query, 49.5% of GPU wall); amortizable by reusing engine across queries
-- Remaining bottleneck: host sync/blocking (32.8%), CPU survivor continuation (8.0%)
+- Default MSV path: SSV kernel (register-optimized, 1.36x faster than monolithic MSV, with in-kernel MSV fallback for ~0.3% of sequences needing J-state). Supports both resident-database and chunk-based paths.
+- Opt-in later stages: `--gpu-vit-prefilter` (M≤2048 default), `--gpu-fwd-prefilter` (M≤1024 default), `--gpu-fb-parser`
+- Latest all-13 profmark (with later stages): 1.48x aggregate speedup (CPU 9.58s → GPU 6.49s), 1.51x median, zero parity errors
+- Survivor loop: sorted by sequence length with ReconfigLength caching; CPU MSV fallback eliminated (double-precision GPU bias is authoritative)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
 - Sequence packing uses bulk `smem` copy (single memcpy of dsqdata's contiguous buffer) with L+1 offset spacing
-- SSV kernel status: parity-verified, 1.36x faster than monolithic MSV (register-based DP, precomputed q/z lookups, warp shuffle); strong candidate for default GPU MSV path
+
+## GPU Timing Instrumentation
+
+The GPU output reports three timing layers (see `agents_docs/gpu-timing-analysis.md` for full semantics):
+
+- **"CUDA *" lines**: device-side event timings per stage (can overlap with host work)
+- **"Stage *" lines**: CPU pipeline stage wall-clock (overlap with CUDA timings by construction)
+- **"Exact *" lines**: exclusive wall-clock buckets that sum to `exact_wall`
+
+Key gotcha: `survivor_loop_other` is the **total wall time** of the survivor loop, not "unaccounted residual". In Mode 2 (with `--gpu-vit-prefilter`), `vit_fwd_dispatch` **overlaps** with `gpu_kernel` — the Exact buckets are not fully exclusive in that mode.
+
+## GPU Expert Flags (hidden, docgroup 99)
+
+These flags are not shown in `hmmsearch -h` output but are defined in `src/hmmsearch.c`:
+
+```
+--gpu-vit-prefilter    GPU Viterbi score prefilter (requires --gpu, M≤2048 default)
+--gpu-fwd-prefilter    GPU Forward score prefilter (requires --gpu, M≤1024 default)
+--gpu-fb-parser        GPU Forward/Backward parser state handoff (requires --gpu)
+--gpu-vit-largem       Allow GPU Viterbi on large models M>2048 (requires --gpu-vit-prefilter)
+--gpu-fwd-largem       Allow GPU Forward on large models M>1024 (requires --gpu-fwd-prefilter)
+--gpu-ssv              No-op (SSV is now the default GPU MSV kernel)
+--gpu-ssv-compare      Debug: compare SSV scores to monolithic MSV
+```
 
 ## Verification Checklist
 
@@ -141,6 +158,7 @@ Detailed architecture documentation lives in `agents_docs/`. Read in this order 
 | [gpu-support-progress.md](agents_docs/gpu-support-progress.md) | Current GPU state, benchmark results, open risks |
 | [gpu-support-todo.md](agents_docs/gpu-support-todo.md) | GPU open work, validation checklist, deferred scope |
 | [gpu-support-history.md](agents_docs/gpu-support-history.md) | Failed/reverted GPU attempts and lessons learned |
+| [gpu-timing-analysis.md](agents_docs/gpu-timing-analysis.md) | GPU timing instrumentation semantics, profiling results, optimization opportunities |
 | [cuda-hmm-reference.md](agents_docs/cuda-hmm-reference.md) | External cuda-hmm reference (design cues only, no code/build import) |
 
 ## Code Navigation

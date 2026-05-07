@@ -131,6 +131,9 @@ extern int  p7_cuda_BiasFilterSurvivors(P7_CUDA_ENGINE *engine, const P7_BG *bg,
 extern int  p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                           ESL_DSQDATA_CHUNK *chu, float *scores, int *statuses,
                                           char *errbuf, int errbuf_size);
+extern int  p7_cuda_SSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                       int64_t seq0, int nseq, float *scores, int *statuses,
+                                       char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, int64_t dsq_size,
                                            const int64_t *offsets, const int32_t *lengths, int64_t nseq,
