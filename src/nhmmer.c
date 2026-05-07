@@ -26,6 +26,10 @@
 #endif /*HMMER_THREADS*/
 
 #include "hmmer.h"
+#ifdef HMMER_CUDA
+#include "nhmmer_internal.h"
+#include "cuda/p7_cuda.h"
+#endif
 
 /* set the max residue count to 1/4 meg when reading a block */
 #define NHMMER_MAX_RESIDUE_COUNT (1024 * 256)  /* 1/4 Mb */
@@ -174,8 +178,13 @@ static ESL_OPTIONS options[] = {
 
 
 
-#ifdef HMMER_THREADS 
+#ifdef HMMER_THREADS
   { "--cpu",        eslARG_INT, p7_NCPU,"HMMER_NCPU","n>=0",NULL,  NULL,  CPUOPTS,         "number of parallel CPU workers to use for multithreads",      12 },
+#endif
+#ifdef HMMER_CUDA
+  { "--gpu",        eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, NULL,          "use CUDA GPU for the SSV filter stage",                        12 },
+  { "--gpu-device", eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,        "CUDA device id for --gpu",                                     99 },
+  { "--gpu-chunk-size", eslARG_INT, "65536", NULL, "n>0", NULL, "--gpu", NULL,       "chunk size (residues) for GPU SSV longtarget scan",             99 },
 #endif
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
@@ -220,6 +229,14 @@ static void pipeline_thread_FM(void *arg);
 #endif
 
 #endif /*HMMER_THREADS*/
+
+#ifdef HMMER_CUDA
+static int
+gpu_idlen_cb(void *data, int id, int64_t L)
+{
+  return add_id_length((ID_LENGTH_LIST *)data, id, (int)L);
+}
+#endif
 
 
 static int
@@ -894,6 +911,13 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     if (status != eslOK) p7_Fail("Failed to set single query seq score system:\n%s\n", builder->errbuf);
   }
 
+#ifdef HMMER_CUDA
+  P7_CUDA_ENGINE *cuda_engine = NULL;
+  if (esl_opt_GetBoolean(go, "--gpu")) {
+    status = p7_cuda_engine_Create(esl_opt_GetInteger(go, "--gpu-device"), &cuda_engine, errbuf, sizeof(errbuf));
+    if (status != eslOK) p7_Fail("--gpu requested, but CUDA initialization failed: %s\n", errbuf);
+  }
+#endif
 
   /* Outer loop: over each query HMM or alignment in <query file>. */
   while (qhstatus == eslOK) {
@@ -1049,7 +1073,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
           info[i].scoredata = p7_hmm_ScoreDataClone(scoredata, om->abc->Kp);
 
 #ifdef HMMER_THREADS
-          if (ncpus > 0)
+          if (ncpus > 0
+#ifdef HMMER_CUDA
+              && !esl_opt_GetBoolean(go, "--gpu")
+#endif
+             )
             esl_threads_AddThread(threadObj, &info[i]);
 #endif
       }
@@ -1057,6 +1085,40 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       /* establish the id_lengths data structutre */
       id_length_list = init_id_length(1000);
 
+#ifdef HMMER_CUDA
+      if (esl_opt_GetBoolean(go, "--gpu"))
+      {
+        NHMMER_GPU_INFO gpu_info;
+        P7_CUDA_MSVPROFILE *cuda_msv    = NULL;
+        int     gpu_nseqs = 0;
+        int64_t gpu_nres  = 0;
+
+        status = p7_cuda_msvprofile_Create(info[0].om, &cuda_msv, errbuf, sizeof(errbuf));
+        if (status != eslOK) p7_Fail("--gpu requested, but CUDA MSV profile creation failed: %s\n", errbuf);
+
+        gpu_info.bg             = info[0].bg;
+        gpu_info.pli            = info[0].pli;
+        gpu_info.th             = info[0].th;
+        gpu_info.om             = info[0].om;
+        gpu_info.scoredata      = info[0].scoredata;
+        gpu_info.cuda_engine    = cuda_engine;
+        gpu_info.cuda_msv       = cuda_msv;
+        gpu_info.go             = go;
+        gpu_info.gpu_chunk_size = esl_opt_GetInteger(go, "--gpu-chunk-size");
+        gpu_info.ncpus          = ncpus;
+
+        sstatus = nhmmer_gpu_serial_loop(&gpu_info, dbfp, info[0].pli->strands,
+                                         gpu_idlen_cb, id_length_list,
+                                         &gpu_nseqs, &gpu_nres);
+
+        info[0].pli->nres  = gpu_nres;
+        info[0].pli->nseqs = gpu_nseqs;
+
+        p7_cuda_msvprofile_Destroy(cuda_msv);
+      }
+      else
+#endif
+      {
 #ifdef HMMER_THREADS
 #if defined (eslENABLE_SSE)
       if (dbformat == eslSQFILE_FMINDEX) {
@@ -1081,6 +1143,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 #endif // defined (eslENABLE_SSE)
         sstatus = serial_loop    (info, id_length_list, dbfp, cfg->firstseq_key, cfg->n_targetseq);
 #endif //HMMER_THREADS
+      }
 
 
       switch(sstatus) {
@@ -1171,7 +1234,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       if (afp) {
           ESL_MSA *msa = NULL;
 
-          if (p7_tophits_Alignment(info->th, abc, NULL, NULL, 0, p7_DEFAULT, &msa) == eslOK) 
+          if (p7_tophits_Alignment(info->th, abc, NULL, NULL, 0, p7_DEFAULT, &msa) == eslOK)
 	    {
 	      esl_msa_SetName     (msa, hmm->name, -1);
 	      esl_msa_SetAccession(msa, hmm->acc,  -1);
@@ -1182,8 +1245,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	      else           esl_msafile_Write(afp, msa, eslMSAFILE_PFAM);
 
 	      if (fprintf(ofp, "# Alignment of %d hits satisfying inclusion thresholds saved to: %s\n", msa->nseq, esl_opt_GetString(go, "-A")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
-	    }  
-	  else 
+	    }
+	  else
 	    {
 	      if (fprintf(ofp, "# No hits satisfy inclusion thresholds; no alignment saved\n") < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 	    }
@@ -1218,6 +1281,10 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
   } /* end outer loop over queries */
 
+#ifdef HMMER_CUDA
+  if (cuda_engine) p7_cuda_engine_Destroy(cuda_engine);
+#endif
+
   if (hfp != NULL) {
     switch(qhstatus) {
       case eslEOD:        p7_Fail("read failed, HMM file %s may be truncated?", cfg->queryfile);      break;
@@ -1247,7 +1314,6 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
    */
   for (i = 0; i < infocnt; ++i)
     p7_bg_Destroy(info[i].bg);
-
 #ifdef HMMER_THREADS
   if (ncpus > 0) {
       esl_workqueue_Reset(queue);

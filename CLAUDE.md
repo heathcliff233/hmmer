@@ -45,6 +45,16 @@ src/hmmsearch --gpu query.hmm target.gpudb
 src/hmmsearch --gpu --gpu-ssv-compare query.hmm target.gpudb
 ```
 
+### Running GPU nhmmer
+
+```sh
+# GPU SSV + threaded CPU downstream (works on plain FASTA)
+src/nhmmer --gpu --cpu 4 --noali query.hmm target.fa
+
+# Tune chunk size (default 64K)
+src/nhmmer --gpu --cpu 4 --gpu-chunk-size 32768 query.hmm target.fa
+```
+
 ### Running profmark Benchmarks
 
 ```sh
@@ -87,11 +97,25 @@ agents_docs/       Detailed architecture documentation (see index below)
 
 - **Easel submodule**: Do not edit `easel/` directly for GPU work. The `dsqdata` chunk-sizing change comes from `patches/easel-dsqdata-open-sized.patch` applied at build time.
 - **No CMake**: Keep CUDA in the existing autotools build. Do not add CMake for any reason.
-- **GPU scope**: `hmmsearch --gpu` is protein-only. `hmmscan`, `phmmer`, `jackhmmer`, daemon, and nucleotide programs remain CPU-only.
+- **GPU scope**: `hmmsearch --gpu` is protein-only (requires `.gpudb`). `nhmmer --gpu` accelerates the SSV longtarget stage on GPU with threaded CPU downstream (works on plain FASTA). `hmmscan`, `phmmer`, `jackhmmer`, and daemon remain CPU-only.
 - **Hit parity**: GPU path must preserve exact hit parity with CPU on profmark datasets (`cpu_only=0`, `gpu_only=0`).
 - **Pressed HMM files**: Do not change `.h3m/.h3i/.h3f/.h3p` format as part of GPU work.
 - **Configure requires Easel**: `configure.ac` includes macros from `easel/m4`; Easel must be present before `autoconf`.
 - **Benchmark data**: Use `benchmark-data/` (gitignored) for datasets and run logs, not `tutorial/` inputs for speed claims.
+
+## Nucleotide Benchmark
+
+Target: human chr22 (hg38, 50MB FASTA, ~101.6M residues both strands). FM-index also available.
+
+```sh
+# Quick baseline
+time src/nhmmer --cpu 1 --noali benchmark-data/nucleotide-bench/work/MADE1.hmm benchmark-data/nucleotide-bench/work/chr22.fa
+
+# FM-index accelerated
+time src/nhmmer --cpu 1 --noali benchmark-data/nucleotide-bench/work/MADE1.hmm benchmark-data/nucleotide-bench/work/chr22.fmdb
+```
+
+Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.4s), query_long (M=2001, stress only). See `agents_docs/nucleotide-benchmark.md` for full setup and rebuild instructions.
 
 ## GPU Architecture Summary
 
@@ -157,6 +181,9 @@ Detailed architecture documentation lives in `agents_docs/`. Read in this order 
 | [gpu-support-history.md](agents_docs/gpu-support-history.md) | Failed/reverted GPU attempts and lessons learned |
 | [gpu-timing-analysis.md](agents_docs/gpu-timing-analysis.md) | GPU timing instrumentation semantics, profiling results, optimization opportunities |
 | [cuda-hmm-reference.md](agents_docs/cuda-hmm-reference.md) | External cuda-hmm reference (design cues only, no code/build import) |
+| [nucleotide-benchmark.md](agents_docs/nucleotide-benchmark.md) | Nucleotide benchmark setup: chr22 target, query HMMs, baseline timings |
+| [nhmmer-gpu-progress.md](agents_docs/nhmmer-gpu-progress.md) | GPU nhmmer architecture, benchmark results, performance analysis |
+| [nhmmer-gpu-todo.md](agents_docs/nhmmer-gpu-todo.md) | GPU nhmmer phase checklist (all phases complete) |
 
 ## Code Navigation
 
