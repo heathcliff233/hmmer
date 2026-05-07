@@ -18,6 +18,8 @@ extern "C" {
 }
 
 #define P7_CUDA_MSV_BLOCK_THREADS 32
+#define VIT_OPT_MAX_STRIDE_SMALL  24   /* register-based Viterbi for M <= 768 */
+#define VIT_OPT_MAX_STRIDE_LARGE  64   /* register-based Viterbi for M <= 2048 */
 
 struct p7_cuda_msv_engine_s {
   int                 device_id;

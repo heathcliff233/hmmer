@@ -43,6 +43,178 @@ vit_twv_idx(int t, int q, int lane, int Q)
   return (t == p7O_DD) ? (((7 * Q) + q) * 8 + lane) : (((q * 7) + t) * 8 + lane);
 }
 
+/* =========================================================================
+ * Register-based warp-shuffle Viterbi kernel (optimized).
+ * One warp (32 threads) per sequence. Each thread owns a contiguous stripe
+ * of model nodes in registers. Cross-thread boundary via __shfl_up_sync.
+ * ========================================================================= */
+
+#define VIT_OPT_KERNEL_BODY(MAX_STRIDE)                                              \
+{                                                                                    \
+  extern __shared__ uint8_t vit_opt_mem[];                                           \
+  int tid = threadIdx.x;                                                             \
+  int seq = blockIdx.x;                                                              \
+  if (seq >= nidx) return;                                                           \
+                                                                                     \
+  int si = seqidx ? seqidx[seq] : seq;                                              \
+  int L = lengths[si];                                                               \
+  const uint8_t *s = dsq + offsets[si];                                              \
+                                                                                     \
+  int stride = (M + 31) / 32;                                                       \
+  int my_start = tid * stride;                                                       \
+  int my_count = stride;                                                             \
+  if (my_start + my_count > M) my_count = M - my_start;                             \
+  if (my_count < 0) my_count = 0;                                                   \
+                                                                                     \
+  uint8_t *s_q = vit_opt_mem;                                                        \
+  uint8_t *s_z = vit_opt_mem + M;                                                    \
+  for (int k = tid; k < M; k += 32) {                                               \
+    s_q[k] = (uint8_t)(k % Q);                                                      \
+    s_z[k] = (uint8_t)(k / Q);                                                      \
+  }                                                                                  \
+  __syncthreads();                                                                   \
+                                                                                     \
+  int16_t reg_M[MAX_STRIDE];                                                         \
+  int16_t reg_D[MAX_STRIDE];                                                         \
+  int16_t reg_I[MAX_STRIDE];                                                         \
+  for (int j = 0; j < my_count; j++) reg_M[j] = reg_D[j] = reg_I[j] = -32768;      \
+                                                                                     \
+  float pmove = (2.0f + nj) / ((float) L + 2.0f + nj);                              \
+  int16_t xw_move = i16_wordify(scale_w, logf(pmove));                               \
+  int16_t xN = base_w;                                                               \
+  int16_t xB = i16_add_sat(xN, xw_move);                                            \
+  int16_t xJ = -32768;                                                               \
+  int16_t xC = -32768;                                                               \
+  int vit_overflow = 0;                                                              \
+                                                                                     \
+  for (int i = 1; i <= L; i++) {                                                     \
+    uint8_t x = s[i];                                                                \
+    xB = (int16_t) __shfl_sync(0xffffffff, (int) xB, 0);                            \
+                                                                                     \
+    int16_t last_M = (my_count > 0) ? reg_M[my_count-1] : (int16_t)-32768;          \
+    int16_t last_D = (my_count > 0) ? reg_D[my_count-1] : (int16_t)-32768;          \
+    int16_t last_I = (my_count > 0) ? reg_I[my_count-1] : (int16_t)-32768;          \
+    int16_t km1_M = (int16_t) __shfl_up_sync(0xffffffff, (int) last_M, 1);          \
+    int16_t km1_D = (int16_t) __shfl_up_sync(0xffffffff, (int) last_D, 1);          \
+    int16_t km1_I = (int16_t) __shfl_up_sync(0xffffffff, (int) last_I, 1);          \
+    if (tid == 0) { km1_M = -32768; km1_D = -32768; km1_I = -32768; }               \
+                                                                                     \
+    int16_t dcv = -32768;                                                            \
+    int16_t xE_local = -32768;                                                       \
+    int16_t dmax_local = -32768;                                                     \
+                                                                                     \
+    for (int j = 0; j < my_count; j++) {                                             \
+      int k = my_start + j;                                                          \
+      int q_k = (int) s_q[k];                                                       \
+      int z_k = (int) s_z[k];                                                       \
+      int16_t old_M = reg_M[j], old_D = reg_D[j], old_I = reg_I[j];                 \
+                                                                                     \
+      int16_t sv = i16_add_sat(xB, twv[(q_k*7 + p7O_BM)*8 + z_k]);                  \
+      int16_t c;                                                                     \
+      c = i16_add_sat(km1_M, twv[(q_k*7 + p7O_MM)*8 + z_k]); if (c > sv) sv = c;   \
+      c = i16_add_sat(km1_I, twv[(q_k*7 + p7O_IM)*8 + z_k]); if (c > sv) sv = c;   \
+      c = i16_add_sat(km1_D, twv[(q_k*7 + p7O_DM)*8 + z_k]); if (c > sv) sv = c;   \
+      sv = i16_add_sat(sv, rwv[((int)x * Q + q_k) * 8 + z_k]);                      \
+      if (sv > xE_local) xE_local = sv;                                              \
+                                                                                     \
+      int16_t sv_i = i16_add_sat(old_M, twv[(q_k*7 + p7O_MI)*8 + z_k]);             \
+      c = i16_add_sat(old_I, twv[(q_k*7 + p7O_II)*8 + z_k]);                        \
+      if (c > sv_i) sv_i = c;                                                        \
+                                                                                     \
+      int16_t sv_d = dcv;                                                            \
+      dcv = i16_add_sat(sv, twv[(q_k*7 + p7O_MD)*8 + z_k]);                          \
+      if (dcv > dmax_local) dmax_local = dcv;                                        \
+                                                                                     \
+      reg_M[j] = sv;                                                                 \
+      reg_I[j] = sv_i;                                                               \
+      reg_D[j] = sv_d;                                                               \
+      km1_M = old_M; km1_D = old_D; km1_I = old_I;                                  \
+    }                                                                                \
+                                                                                     \
+    int xEi = (int) xE_local, dmaxi = (int) dmax_local;                             \
+    for (int off = 16; off > 0; off >>= 1) {                                        \
+      int o;                                                                         \
+      o = __shfl_down_sync(0xffffffff, xEi, off);   if (o > xEi) xEi = o;           \
+      o = __shfl_down_sync(0xffffffff, dmaxi, off); if (o > dmaxi) dmaxi = o;       \
+    }                                                                                \
+                                                                                     \
+    if (tid == 0) {                                                                  \
+      int16_t xE = (int16_t) xEi;                                                   \
+      if (xE >= 32767) vit_overflow = 1;                                             \
+      xN = i16_add_sat(xN, xw_n_loop);                                              \
+      int16_t c1 = i16_add_sat(xC, xw_c_loop);                                      \
+      int16_t c2 = i16_add_sat(xE, xw_e_move);                                      \
+      xC = (c1 > c2) ? c1 : c2;                                                     \
+      int16_t j1 = i16_add_sat(xJ, xw_j_loop);                                      \
+      int16_t j2 = i16_add_sat(xE, xw_e_loop);                                      \
+      xJ = (j1 > j2) ? j1 : j2;                                                     \
+      int16_t b1 = i16_add_sat(xJ, xw_move);                                        \
+      int16_t b2 = i16_add_sat(xN, xw_move);                                        \
+      xB = (b1 > b2) ? b1 : b2;                                                     \
+    }                                                                                \
+                                                                                     \
+    int dmax_all = __shfl_sync(0xffffffff, dmaxi, 0);                                \
+    int xB_bcast = __shfl_sync(0xffffffff, (int) xB, 0);                             \
+    if (dmax_all + (int) ddbound_w > xB_bcast) {                                     \
+      int16_t from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) dcv, 1);         \
+      if (tid == 0) from_dcv = -32768;                                               \
+      for (int j = 0; j < my_count; j++) {                                           \
+        int k = my_start + j;                                                        \
+        int q_k = (int) s_q[k], z_k = (int) s_z[k];                                 \
+        if (from_dcv > reg_D[j]) reg_D[j] = from_dcv;                               \
+        from_dcv = i16_add_sat(reg_D[j], twv[(7*Q + q_k)*8 + z_k]);                  \
+      }                                                                              \
+      int any_improved;                                                              \
+      do {                                                                           \
+        from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) from_dcv, 1);          \
+        if (tid == 0) from_dcv = -32768;                                             \
+        int improved = 0;                                                            \
+        for (int j = 0; j < my_count; j++) {                                         \
+          int k = my_start + j;                                                      \
+          int q_k = (int) s_q[k], z_k = (int) s_z[k];                               \
+          if (from_dcv > reg_D[j]) { reg_D[j] = from_dcv; improved = 1; }            \
+          from_dcv = i16_add_sat(reg_D[j], twv[(7*Q + q_k)*8 + z_k]);                \
+        }                                                                            \
+        any_improved = __any_sync(0xffffffff, improved);                              \
+      } while (any_improved);                                                        \
+    } else {                                                                         \
+      int16_t from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) dcv, 1);         \
+      if (tid == 0) from_dcv = -32768;                                               \
+      if (my_count > 0 && from_dcv > reg_D[0]) reg_D[0] = from_dcv;                  \
+    }                                                                                \
+  }                                                                                  \
+                                                                                     \
+  if (tid == 0) {                                                                    \
+    if (vit_overflow) {                                                              \
+      scores[seq] = eslINFINITY;                                                     \
+      statuses[seq] = eslERANGE;                                                     \
+    } else {                                                                         \
+      scores[seq] = ((float) xC + (float) xw_move - (float) base_w) / scale_w - 3.0f; \
+      statuses[seq] = eslOK;                                                         \
+    }                                                                                \
+  }                                                                                  \
+}
+
+__global__ static void
+cuda_viterbi_opt_small_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
+                              const int *seqidx, int nidx,
+                              const int16_t *rwv, const int16_t *twv, int M, int Q, int Kp,
+                              int16_t xw_n_loop, int16_t xw_n_move, int16_t xw_c_loop, int16_t xw_c_move,
+                              int16_t xw_j_loop, int16_t xw_j_move, int16_t xw_e_loop, int16_t xw_e_move,
+                              float scale_w, int16_t base_w, int16_t ddbound_w, float nj,
+                              float *scores, int *statuses)
+VIT_OPT_KERNEL_BODY(VIT_OPT_MAX_STRIDE_SMALL)
+
+__global__ static void
+cuda_viterbi_opt_large_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
+                              const int *seqidx, int nidx,
+                              const int16_t *rwv, const int16_t *twv, int M, int Q, int Kp,
+                              int16_t xw_n_loop, int16_t xw_n_move, int16_t xw_c_loop, int16_t xw_c_move,
+                              int16_t xw_j_loop, int16_t xw_j_move, int16_t xw_e_loop, int16_t xw_e_move,
+                              float scale_w, int16_t base_w, int16_t ddbound_w, float nj,
+                              float *scores, int *statuses)
+VIT_OPT_KERNEL_BODY(VIT_OPT_MAX_STRIDE_LARGE)
+
 __global__ static void
 cuda_viterbi_score_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
                           const int *seqidx, int nidx,
@@ -242,6 +414,8 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   int *h_lengths = NULL;
   int reuse_batch = FALSE;
   int use_resident = FALSE;
+  int use_opt_small = 0;
+  int use_opt_large = 0;
   int threads = 32;
   int groups_per_block = 1;
   size_t group_shmem;
@@ -330,18 +504,23 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   if (passed && engine->d_vit_passed == NULL) {
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_vit_passed, sizeof(int) * engine->vit_result_alloc), errbuf, errbuf_size, "cudaMalloc(vit passed)")) != eslOK) goto ERROR;
   }
-  group_shmem = sizeof(int16_t) * (size_t) cuom->Qw * 8 * 3 * 2;
-  if (group_shmem == 0 || group_shmem > (48u * 1024u)) {
-    if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA Viterbi shared-memory requirement exceeds v1 limit");
-    status = eslERANGE;
-    goto ERROR;
+  use_opt_small = (cuom->M <= VIT_OPT_MAX_STRIDE_SMALL * 32);
+  use_opt_large = !use_opt_small && (cuom->M <= VIT_OPT_MAX_STRIDE_LARGE * 32);
+
+  if (!use_opt_small && !use_opt_large) {
+    group_shmem = sizeof(int16_t) * (size_t) cuom->Qw * 8 * 3 * 2;
+    if (group_shmem == 0 || group_shmem > (48u * 1024u)) {
+      if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA Viterbi shared-memory requirement exceeds v1 limit");
+      status = eslERANGE;
+      goto ERROR;
+    }
+    while (groups_per_block < 4 && (size_t) (groups_per_block + 1) * group_shmem <= (48u * 1024u))
+      groups_per_block++;
+    if (groups_per_block > nidx) groups_per_block = nidx;
+    if (groups_per_block < 1) groups_per_block = 1;
+    threads = groups_per_block * 32;
+    shmem = group_shmem * (size_t) groups_per_block;
   }
-  while (groups_per_block < 4 && (size_t) (groups_per_block + 1) * group_shmem <= (48u * 1024u))
-    groups_per_block++;
-  if (groups_per_block > nidx) groups_per_block = nidx;
-  if (groups_per_block < 1) groups_per_block = 1;
-  threads = groups_per_block * 32;
-  shmem = group_shmem * (size_t) groups_per_block;
 
   h2d0 = engine->evt_h2d0;
   h2d1 = engine->evt_h2d1;
@@ -374,19 +553,45 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
 
   cudaEventRecord(k0);
   {
-    int blocks = (nidx + groups_per_block - 1) / groups_per_block;
     uint8_t *d_dsq_ptr = use_resident ? engine->d_resident_dsq : engine->d_dsq;
     int     *d_off_ptr = use_resident ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
     int     *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
-    cuda_viterbi_score_kernel<<<blocks, threads, shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
-                                                           seqidx ? engine->d_vit_seqidx : NULL, nidx,
-                                                           cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,
-                                                           cuom->xw_n_loop, cuom->xw_n_move,
-                                                           cuom->xw_c_loop, cuom->xw_c_move,
-                                                           cuom->xw_j_loop, cuom->xw_j_move,
-                                                           cuom->xw_e_loop, cuom->xw_e_move,
-                                                           cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,
-                                                           engine->d_vit_scores, engine->d_vit_statuses);
+    int     *d_idx_ptr = seqidx ? engine->d_vit_seqidx : NULL;
+
+    if (use_opt_small) {
+      size_t opt_shmem = (size_t) cuom->M * 2;
+      cuda_viterbi_opt_small_kernel<<<nidx, 32, opt_shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
+                                                              d_idx_ptr, nidx,
+                                                              cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,
+                                                              cuom->xw_n_loop, cuom->xw_n_move,
+                                                              cuom->xw_c_loop, cuom->xw_c_move,
+                                                              cuom->xw_j_loop, cuom->xw_j_move,
+                                                              cuom->xw_e_loop, cuom->xw_e_move,
+                                                              cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,
+                                                              engine->d_vit_scores, engine->d_vit_statuses);
+    } else if (use_opt_large) {
+      size_t opt_shmem = (size_t) cuom->M * 2;
+      cuda_viterbi_opt_large_kernel<<<nidx, 32, opt_shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
+                                                              d_idx_ptr, nidx,
+                                                              cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,
+                                                              cuom->xw_n_loop, cuom->xw_n_move,
+                                                              cuom->xw_c_loop, cuom->xw_c_move,
+                                                              cuom->xw_j_loop, cuom->xw_j_move,
+                                                              cuom->xw_e_loop, cuom->xw_e_move,
+                                                              cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,
+                                                              engine->d_vit_scores, engine->d_vit_statuses);
+    } else {
+      int blocks = (nidx + groups_per_block - 1) / groups_per_block;
+      cuda_viterbi_score_kernel<<<blocks, threads, shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
+                                                             d_idx_ptr, nidx,
+                                                             cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,
+                                                             cuom->xw_n_loop, cuom->xw_n_move,
+                                                             cuom->xw_c_loop, cuom->xw_c_move,
+                                                             cuom->xw_j_loop, cuom->xw_j_move,
+                                                             cuom->xw_e_loop, cuom->xw_e_move,
+                                                             cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,
+                                                             engine->d_vit_scores, engine->d_vit_statuses);
+    }
   }
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_score_kernel launch")) != eslOK) goto CUDA_ERROR;
   if (passed) {
