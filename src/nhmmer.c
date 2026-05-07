@@ -190,7 +190,6 @@ static ESL_OPTIONS options[] = {
   { "--gpu-vit-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Viterbi as pre-filter before scanning Viterbi",         99 },
   { "--gpu-vit-longtarget",eslARG_NONE, FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU scanning Viterbi for longtarget sub-window detection",   99 },
   { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Forward as pre-filter for sub-windows",                 12 },
-  { "--gpu-compare",      eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "run both GPU and CPU paths, report mismatches",                 12 },
 #endif
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
@@ -1139,7 +1138,6 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.do_gpu_vit     = TRUE;
         gpu_info.do_gpu_vit_lt  = TRUE;
         gpu_info.do_gpu_fwd     = esl_opt_GetBoolean(go, "--gpu-fwd-prefilter");
-        gpu_info.do_gpu_compare = esl_opt_GetBoolean(go, "--gpu-compare");
         gpu_info.h_ssv_scores   = NULL;
         gpu_info.h_ssv_status   = NULL;
         gpu_info.h_null_scores  = NULL;

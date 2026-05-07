@@ -42,7 +42,6 @@ typedef struct {
   int               do_gpu_vit;         /* --gpu-vit-prefilter */
   int               do_gpu_vit_lt;      /* --gpu-vit-longtarget: scanning Viterbi on GPU */
   int               do_gpu_fwd;         /* --gpu-fwd-prefilter */
-  int               do_gpu_compare;     /* --gpu-compare */
   /* Persistent scratch arrays (grow-only, freed at end) */
   float            *h_ssv_scores;
   int              *h_ssv_status;

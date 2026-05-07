@@ -38,7 +38,7 @@
 - [x] GPU batch MSV + null + bias + F1 gating (`--gpu-batch`)
 - [x] Handle eslERANGE (overflow) as pass in batch filter
 - [x] GPU Viterbi single-score pre-filter (`--gpu-vit-prefilter`)
-- [x] CLI flags: `--gpu-batch`, `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`, `--gpu-compare`
+- [x] CLI flags: `--gpu-batch`, `--gpu-vit-prefilter`, `--gpu-fwd-prefilter`
 - [x] Hit parity verified: MADE1 154=154, query_short 120=120, query_medium 217=217 (batch only)
 - [x] Viterbi pre-filter: query_medium 215 (removes 2 boundary hits, matches CPU count)
 - [x] Speed: query_medium GPU-4+batch+vit 2.15s vs GPU-4 baseline 3.23s (1.5x improvement)
@@ -58,11 +58,24 @@
 - [x] Hit parity: MADE1 462 (vs 465 CPU, 3-hit discrepancy from fixed xw_*), query_short 363=363, query_medium 648=648
 - [x] Update `configure.ac` CUDA_OBJ to include `cuda/p7_cuda_viterbi_longtarget.o`
 
+## Phase 6: Rebase + Optimizations + Nucdb — COMPLETE
+
+- [x] Rebased onto h3-gpu (engine reuse, bias kernels, pre-allocated events, SSV default-on, resident database)
+- [x] Default-on GPU stages: `--gpu-batch`, `--gpu-vit-prefilter`, `--gpu-vit-longtarget` auto-enabled with `--gpu`
+- [x] GPU bias filter replaces CPU `p7_bg_FilterScore` in Viterbi pre-filter
+- [x] Persistent scratch arrays in NHMMER_GPU_INFO (grow-only, no per-batch malloc/free)
+- [x] Engine reset between queries (`p7_cuda_engine_Reset`)
+- [x] Nucleotide GPU database format (`p7_nucdb`): pre-chunked, mmap'd, both strands
+- [x] `hmmnucdb` CLI tool to build .nucdb from FASTA
+- [x] `nhmmer_gpu_nucdb_loop()` processes nucdb directly (eliminates FASTA parsing)
+- [x] Removed `--gpu-compare` debug flag
+- [x] Hit parity verified: 465=465 (GPU FASTA), 465=465 (GPU nucdb) vs CPU on MADE1
+
 ## Future Work (Not Planned)
 
 - GPU Forward pre-filter for sub-windows (requires splitting p7_pli_postSSV_LongTarget)
 - GPU-side ForwardParser/domain definition to eliminate CPU post-Viterbi bottleneck
-- Memory-mapped sequence I/O to reduce sys time (~0.4s overhead)
 - FM-index GPU path (FM-index remains CPU-only)
 - Per-window profile reconfiguration on GPU (would fix MADE1 3-hit discrepancy)
-- `--gpu-compare` mode implementation (score-level comparison)
+- GPU-resident nucdb: `p7_cuda_SSVLongtargetResident()` to skip H2D transfer
+- Use pre-stored RC strand from nucdb directly (skip runtime `esl_sq_ReverseComplement`)

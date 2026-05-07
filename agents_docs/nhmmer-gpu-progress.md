@@ -36,21 +36,20 @@ GPU nhmmer uses a **GPU SSV + threaded CPU downstream** approach:
 | File | Purpose |
 |------|---------|
 | `src/nhmmer_internal.h` | `NHMMER_GPU_INFO` struct, `NHMMER_GPU_WINDOW_BATCH` struct, serial loop API |
-| `src/nhmmer_gpu.c` | Worker struct, batch filter, Viterbi pre-filter, scanning Viterbi orchestration, thread functions, `nhmmer_gpu_process_strand`, `nhmmer_gpu_serial_loop` |
+| `src/nhmmer_gpu.c` | Worker struct, batch filter, Viterbi pre-filter, scanning Viterbi orchestration, thread functions, `nhmmer_gpu_process_strand`, `nhmmer_gpu_serial_loop`, `nhmmer_gpu_nucdb_loop` |
 | `src/cuda/p7_cuda_ssv_longtarget.cu` | GPU SSV longtarget kernel + host wrapper |
 | `src/cuda/p7_cuda_viterbi_longtarget.cu` | GPU scanning Viterbi kernel + threshold kernel + host wrapper |
-| `src/nhmmer.c` | `--gpu` option, engine lifecycle, GPU path integration |
+| `src/nhmmer.c` | `--gpu` option, engine lifecycle, GPU path integration, nucdb detection |
+| `src/p7_nucdb.c` | Nucleotide GPU database: mmap'd pre-chunked format (Write/Open/Close) |
+| `src/p7_nucdb.h` | Nucdb structs and API declarations |
+| `src/hmmnucdb.c` | CLI tool to build .nucdb from FASTA |
 
 ## CLI Flags
 
 | Flag | Purpose |
 |------|---------|
-| `--gpu` | Enable GPU SSV longtarget scan |
-| `--gpu-batch` | GPU batch MSV/bias/F1 filtering on merged windows |
-| `--gpu-vit-prefilter` | GPU Viterbi single-score pre-filter before scanning Viterbi |
-| `--gpu-vit-longtarget` | GPU scanning Viterbi with GPU threshold computation |
+| `--gpu` | Enable GPU acceleration (SSV + batch filter + Viterbi all default-on) |
 | `--gpu-fwd-prefilter` | GPU Forward pre-filter for sub-windows (wired, not yet implemented) |
-| `--gpu-compare` | Compare mode (wired, not yet implemented) |
 | `--gpu-device N` | CUDA device selection |
 | `--gpu-chunk-size N` | Chunk size for longtarget scan (default 64K) |
 
@@ -97,4 +96,5 @@ Note: GPU+batch+vit counts differ because batch+vit uses --noali output at F2 th
 - **Phase 3**: Complete — engine reuse, chunk_size tuning
 - **Phase 4**: Complete — batch MSV/bias/F1 filter + Viterbi pre-filter (opt-in)
 - **Phase 5**: Complete — GPU scanning Viterbi with GPU threshold computation (opt-in)
-- **Phase 6**: Deferred — GPU Forward pre-filter (requires splitting p7_pli_postSSV_LongTarget)
+- **Phase 6**: Complete — Rebased onto h3-gpu, ported optimizations (default-on stages, GPU bias, persistent scratch, engine reset), nucleotide GPU database format (nucdb)
+- **Deferred**: GPU Forward pre-filter (requires splitting p7_pli_postSSV_LongTarget), GPU-resident nucdb
