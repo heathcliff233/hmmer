@@ -128,17 +128,19 @@ The fused SSV+null+bias+gate kernel is the default GPU MSV path:
 - Record CPU/GPU wall time, CUDA H2D/kernel/D2H time, batch sizes, CUDA batch counts, pass counts for MSV/bias/Viterbi/Forward, and final hit deltas.
 - Compare each proposed GPU stage against the last accepted GPU baseline, not only against CPU.
 
-## GPU nhmmer (Nucleotide Search) — 2026-05-07
+## GPU nhmmer (Nucleotide Search) — 2026-05-08
 
 A GPU-accelerated path for `nhmmer` is available via `--gpu`:
-- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + optional batch MSV/bias/F1 filter + optional GPU Viterbi pre-filter + threaded CPU downstream (scanning Viterbi + Forward + domain).
-- **Batch filter** (`--gpu-batch`): Packs merged windows as synthetic ESL_DSQDATA_CHUNK (zero-copy), runs GPU MSV + null + bias batch scoring, applies F1 gating. Removes ~1-2% of windows for short models.
-- **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors. Windows below F2 threshold skipped before expensive CPU scanning Viterbi. 1.5x speedup on query_medium.
-- **Threading**: Merged windows distributed across N CPU threads with deep-copied per-thread state. 2.4x speedup with 4 threads on medium models.
+- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + batch MSV/bias/F1 filter + GPU Viterbi pre-filter + GPU scanning Viterbi + GPU Forward pre-filter + GPU FB parser + threaded CPU downstream (domaindef).
+- **GPU FB parser** (`nhmmer_gpu_run_fb_parser_batch`): Batch Forward+Backward parser on GPU for all post-Forward-prefilter survivors. Returns xmx arrays for domaindef. Replaces CPU `p7_ForwardParser` + `p7_BackwardParser`. 8-30% CPU worker savings.
+- **Forward pre-filter** (`nhmmer_gpu_forward_prefilter`): GPU Forward score-only with F3*2.0 relaxed gate. Removes 45-60% of sub-windows before FB parser.
+- **Batch filter** (`--gpu-batch`): Packs merged windows as synthetic ESL_DSQDATA_CHUNK (zero-copy), runs GPU MSV + null + bias batch scoring, applies F1 gating.
+- **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors. Windows below F2 threshold skipped before scanning Viterbi.
+- **Threading**: Post-vit workers distributed across N CPU threads with deep-copied per-thread state.
 - **Engine reuse**: CUDA engine created once before query loop, saves ~250ms per additional query.
-- **Hit parity**: Exact match on MADE1/query_short; 2-hit boundary difference on query_medium (consistent, not threading-related). Viterbi pre-filter removes those 2 boundary hits (matches CPU count).
-- **Performance**: GPU-4+batch+vit: query_medium 2.15s (vs CPU-4 1.79s, GPU-4 baseline 3.23s). 1.5x improvement over GPU baseline.
-- **Files**: `src/nhmmer_gpu.c`, `src/nhmmer_internal.h`, `src/cuda/p7_cuda_ssv_longtarget.cu`
+- **Hit parity**: MADE1 153/154 (1-hit FP diff), query_short 120=120, query_medium 226/215 (extra GPU hits from fixed xw_* in scanning Vit).
+- **Performance**: GPU-4 FASTA: MADE1 1.49s, query_short 2.22s, query_medium 7.96s. CPU-4: 0.30s, 0.45s, 1.80s. GPU bottleneck: `rescore_isolated_domain` in domaindef (67-91% of pipeline).
+- **Files**: `src/nhmmer_gpu.c`, `src/nhmmer_internal.h`, `src/cuda/p7_cuda_ssv_longtarget.cu`, `src/cuda/p7_cuda_viterbi_longtarget.cu`
 - **Detailed docs**: See `nhmmer-gpu-progress.md` and `nhmmer-gpu-todo.md`.
 
 ## History

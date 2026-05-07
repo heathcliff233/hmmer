@@ -1147,6 +1147,13 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.n_vit_lt_windows_in  = 0;
         gpu_info.n_vit_lt_windows_out = 0;
         gpu_info.n_post_vit_windows   = 0;
+        gpu_info.t_ssv           = 0;
+        gpu_info.t_merge         = 0;
+        gpu_info.t_batch_filter  = 0;
+        gpu_info.t_vit_lt        = 0;
+        gpu_info.t_fwd_prefilter = 0;
+        gpu_info.t_gpu_fb_parser = 0;
+        gpu_info.t_cpu_workers   = 0;
 
         /* Detect nucdb format: check for .nucdb extension or .nucdb file alongside target */
         {
@@ -1172,6 +1179,26 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
                   gpu_info.n_vit_lt_windows_in, gpu_info.n_vit_lt_windows_out,
                   gpu_info.n_post_vit_windows, (int64_t)info[0].th->N,
                   100.0 * (double)info[0].th->N / (double)gpu_info.n_post_vit_windows);
+
+        {
+          double t_total = gpu_info.t_ssv + gpu_info.t_merge + gpu_info.t_batch_filter
+                         + gpu_info.t_vit_lt + gpu_info.t_fwd_prefilter
+                         + gpu_info.t_gpu_fb_parser + gpu_info.t_cpu_workers;
+          if (t_total > 0.0) {
+            fprintf(stderr, "GPU timing breakdown (%.3fs total):\n", t_total);
+            fprintf(stderr, "  SSV longtarget:    %7.3fs  (%4.1f%%)\n", gpu_info.t_ssv, 100.0*gpu_info.t_ssv/t_total);
+            fprintf(stderr, "  extend+merge:      %7.3fs  (%4.1f%%)\n", gpu_info.t_merge, 100.0*gpu_info.t_merge/t_total);
+            fprintf(stderr, "  batch filter:      %7.3fs  (%4.1f%%)\n", gpu_info.t_batch_filter, 100.0*gpu_info.t_batch_filter/t_total);
+            fprintf(stderr, "  scanning Viterbi:  %7.3fs  (%4.1f%%)\n", gpu_info.t_vit_lt, 100.0*gpu_info.t_vit_lt/t_total);
+            fprintf(stderr, "  Forward prefilter: %7.3fs  (%4.1f%%)\n", gpu_info.t_fwd_prefilter, 100.0*gpu_info.t_fwd_prefilter/t_total);
+            fprintf(stderr, "  GPU FB parser:     %7.3fs  (%4.1f%%)\n", gpu_info.t_gpu_fb_parser, 100.0*gpu_info.t_gpu_fb_parser/t_total);
+            fprintf(stderr, "  CPU workers:       %7.3fs  (%4.1f%%)\n", gpu_info.t_cpu_workers, 100.0*gpu_info.t_cpu_workers/t_total);
+          } else {
+            fprintf(stderr, "GPU timing: all zeros (t_ssv=%.6f t_merge=%.6f t_batch=%.6f t_vit=%.6f t_fwd=%.6f t_cpu=%.6f)\n",
+                    gpu_info.t_ssv, gpu_info.t_merge, gpu_info.t_batch_filter,
+                    gpu_info.t_vit_lt, gpu_info.t_fwd_prefilter, gpu_info.t_cpu_workers);
+          }
+        }
 
         p7_cuda_msvprofile_Destroy(cuda_msv);
         free(gpu_info.h_ssv_scores);

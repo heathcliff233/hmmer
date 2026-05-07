@@ -52,6 +52,14 @@ typedef struct {
   int64_t           n_vit_lt_windows_in;   /* windows entering scanning Viterbi */
   int64_t           n_vit_lt_windows_out;  /* sub-windows from scanning Viterbi */
   int64_t           n_post_vit_windows;    /* windows sent to CPU ForwardParser */
+  /* Timing breakdown (seconds, accumulated across strands) */
+  double            t_ssv;           /* GPU SSV longtarget kernel */
+  double            t_merge;         /* window extend + merge */
+  double            t_batch_filter;  /* GPU batch SSV/bias/F1 + Viterbi pre-filter */
+  double            t_vit_lt;        /* GPU scanning Viterbi longtarget */
+  double            t_fwd_prefilter; /* GPU Forward pre-filter */
+  double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
+  double            t_cpu_workers;   /* CPU domaindef + hit reporting */
 } NHMMER_GPU_INFO;
 
 int nhmmer_gpu_serial_loop(NHMMER_GPU_INFO *info, ESL_SQFILE *dbfp,

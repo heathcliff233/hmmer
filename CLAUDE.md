@@ -115,8 +115,8 @@ agents_docs/       Detailed architecture documentation (see index below)
 
 - **Easel submodule**: Do not edit `easel/` directly for GPU work. The `dsqdata` chunk-sizing change comes from `patches/easel-dsqdata-open-sized.patch` applied at build time.
 - **No CMake**: Keep CUDA in the existing autotools build. Do not add CMake for any reason.
-- **GPU scope**: `hmmsearch --gpu` is protein-only (requires `.gpudb`). `nhmmer --gpu` runs full GPU pipeline (SSV + batch filter + Viterbi + scanning Viterbi) with threaded CPU downstream (works on plain FASTA or `.nucdb`). `hmmscan`, `phmmer`, `jackhmmer`, and daemon remain CPU-only.
-- **Hit parity**: GPU path must preserve exact hit parity with CPU for MADE1 (M=80). query_short/medium show +5-10% extra GPU hits (known: fixed `xw_*` parameters in scanning Viterbi kernel).
+- **GPU scope**: `hmmsearch --gpu` is protein-only (requires `.gpudb`). `nhmmer --gpu` runs full GPU pipeline (SSV + batch filter + Viterbi + scanning Viterbi + Forward prefilter + FB parser) with threaded CPU downstream (works on plain FASTA or `.nucdb`). `hmmscan`, `phmmer`, `jackhmmer`, and daemon remain CPU-only.
+- **Hit parity**: GPU nhmmer path preserves exact or near-exact hit parity with CPU. MADE1: 153 vs 154 (1-hit FP difference). query_short: 120=120. query_medium: 226 vs 215 (extra GPU hits from fixed `xw_*` parameters in scanning Viterbi kernel).
 - **Pressed HMM files**: Do not change `.h3m/.h3i/.h3f/.h3p` format as part of GPU work.
 - **Configure requires Easel**: `configure.ac` includes macros from `easel/m4`; Easel must be present before `autoconf`.
 - **Benchmark data**: Use `benchmark-data/` (gitignored) for datasets and run logs, not `tutorial/` inputs for speed claims.
@@ -139,11 +139,10 @@ Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-4 | 0.36s / 465 | 0.46s / 363 | 1.87s / 648 |
-| GPU-4 FASTA | 2.87s / 465 | 6.47s / 372 | 46.5s / 693 |
-| GPU-4 nucdb | 2.31s / 465 | 5.6s / 372 | 47.3s / 693 |
+| CPU-4 | 0.30s / 154 | 0.45s / 120 | 1.80s / 215 |
+| GPU-4 FASTA | 1.49s / 153 | 2.22s / 120 | 7.96s / 226 |
 
-GPU is currently slower than CPU-4. Bottleneck: CPU ForwardParser/domain on surviving windows (90%+ of time for M≥150). See `agents_docs/nhmmer-gpu-perf-gap.md`.
+GPU is currently slower than CPU-4. Bottleneck: `rescore_isolated_domain` (full Forward+Backward+OptimalAccuracy per domain) in CPU domaindef (67-91% of pipeline time). GPU FB parser replaces the initial parser-level Forward/Backward (~19% improvement for M=501) but `rescore_isolated_domain` dominates the remaining time. See `agents_docs/nhmmer-gpu-perf-gap.md`.
 
 ## GPU Architecture Summary
 
@@ -151,7 +150,7 @@ The GPU path accelerates SSV/MSV + biased-composition filter + Viterbi + Forward
 
 - Default MSV path: **fused SSV+null+bias+F1 gate kernel** (`cuda_ssv_null_bias_gate_kernel<STRIDE, WARPS>`) computes all pre-filter stages in a single kernel launch. Templated on STRIDE and WARPS-per-block (one sequence per warp) with linear rbv layout for coalesced access. Survivors compacted via atomicAdd with in-kernel float score output (D2H only ~32KB/batch vs 1.8MB). Supports both resident-database and chunk-based paths.
 - GPU Viterbi opt path: `cuda_viterbi_opt_kernel<STRIDE, WARPS>`, same multi-warp-per-block layout (one sequence per warp). W is auto-tuned at runtime from `cudaGetDeviceProperties` (typically W=4 on sm_89), overridable via `--gpu-ssv-warps` / `--gpu-vit-warps`.
-- All GPU stages enabled by default with `--gpu`: fused SSV+null+bias+gate → Viterbi prefilter (M≤2048) → Forward prefilter (M≤2044) → FB parser
+- All GPU stages enabled by default with `--gpu`: fused SSV+null+bias+gate → Viterbi prefilter (M≤2048) → Forward prefilter (M≤2044) → FB parser (hmmsearch), Forward prefilter → FB parser (nhmmer)
 - Latest all-13 profmark (multi-query single-process): **~7.3x vs CPU-1**, exact hit parity (`cpu_only=0`, `gpu_only=0`)
 - Survivor loop: sorted by sequence length (co-sorting scores/statuses) with ReconfigLength caching; CPU MSV fallback eliminated (double-precision GPU bias is authoritative)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
