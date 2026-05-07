@@ -112,3 +112,16 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - Solution: rewrote the profmark runner to concatenate all HMMs into one file, `hmmpress` it, and run hmmsearch once for CPU and once for GPU. Per-query hit parity parsed from tblout (column 3 = query name). Per-query GPU timing parsed from output blocks between `Query:` and `//` delimiters.
 - Outcome: benchmark now correctly reports GPU 1.92x vs CPU-4 and 4.19x vs CPU-1.
 - Files: `test-speed/x-hmmsearch-gpu-profmark`.
+
+### 10) gpudb v2 embedded metadata — zero-I/O resident path (2026-05-07)
+- Problem: 10.5% of GPU wall time (0.258s/2.45s) spent reading dsqdata metadata (names, acc, desc) for all 229K sequences every query, even though only ~15 reach the hit stage.
+- Solution: extended `.gpudb` format to v2 with embedded metadata section (name\0 acc\0 desc\0 taxid per seq). When gpudb v2 has metadata, `hmmsearch --gpu` skips `esl_dsqdata_OpenSized` entirely. Added `madvise` hints (SEQUENTIAL for upload, RANDOM for metadata) and `cudaHostRegister` for DMA-accelerated GPU upload.
+- Outcome: `io_read_unpack` dropped from 0.258s to 0.000s. GPU wall 2.45s → 1.54s (5.86x vs CPU-1).
+- Files: `src/p7_gpudb.h`, `src/p7_gpudb.c`, `src/hmmsearch.c`, `src/hmmsearch_gpu.c`, `src/cuda/p7_cuda_runtime.cu`.
+
+### 11) Register-based warp-shuffle Viterbi kernel (2026-05-07)
+- Problem: Viterbi kernel was dominant GPU cost (0.918s, 59.6% of wall). Old kernel used 8 threads per sequence (75% warp waste) with shared-memory DP rows.
+- Solution: rewrote as 32-thread/warp register-based kernel matching SSV design. Each thread owns contiguous model-node stripe; cross-thread boundaries via `__shfl_up_sync`. Two variants: small (M≤768, stride≤24) and large (M≤2048, stride≤64).
+- Outcome: Zero parity errors. Architecture cleaner (no wasted threads, less shmem), but Viterbi kernel time flat — compiler places register arrays in local memory (L1 cache) rather than true registers, making access patterns similar to shared memory. Bottleneck identified as global memory bandwidth (scattered profile accesses), not thread utilization. GPU wall 1.51s (6.27x vs CPU-1).
+- Lesson: for Viterbi's 3-state DP (3 arrays × stride × int16), the register array approach that worked for SSV (1 array × stride × uint8) doesn't translate to true register residence. Future improvement requires profile layout changes or shared-memory preloading.
+- Files: `src/cuda/p7_cuda_viterbi.cu`, `src/cuda/p7_cuda_internal.h`.

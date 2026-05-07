@@ -21,7 +21,10 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 ### High-impact optimizations (ranked by current benchmark impact)
 
-- **GPU Viterbi kernel optimization** (0.475s, 19.4% of wall): Dominant single GPU cost. Average 544 candidates/launch, ~217K residues/launch. Approaches: occupancy tuning (shmem vs register pressure), warp-level shuffle-based DP (as done for SSV), profile tiling for large M to reduce shmem footprint.
+- **GPU Viterbi kernel optimization** ~~(0.475s, 19.4% of wall)~~: Register-based warp-shuffle kernel implemented (32 threads/seq, contiguous node ownership, `__shfl_up_sync` boundaries). Architecture is cleaner but kernel time is flat for typical profmark workloads (~544 candidates/launch) because the compiler places register arrays in local memory (L1 cache) rather than true registers. The bottleneck is now **global memory bandwidth** (scattered profile accesses). Remaining approaches:
+  - Node-contiguous profile layout (`rwv_node[k * Kp + x]`) for coalesced cross-warp access
+  - Preload transition/emission scores into shared memory per residue
+  - Kernel fusion (MSV → bias → Vit in single kernel to avoid re-reading profile)
 
 - **Reduce unaccounted residual** (0.334s, 13.6% of wall): The `exact_other` bucket captures inter-stage sync, host-side score conversion, F1 gating logic, and survivor list construction between kernel launches. Approaches:
   - Fuse MSV + null + bias into a single kernel (eliminates 2 sync points per batch)
@@ -59,6 +62,7 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV 
 - All GPU stages (Viterbi prefilter, Forward prefilter, FB parser) default-on with `--gpu`
 - gpudb v2 embedded metadata — eliminates dsqdata I/O entirely on resident path (0.258s → 0.000s)
 - madvise hints + cudaHostRegister for GPU upload DMA acceleration
+- Viterbi register-based warp-shuffle kernel (32 threads/seq, cleaner architecture, parity-verified)
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.
