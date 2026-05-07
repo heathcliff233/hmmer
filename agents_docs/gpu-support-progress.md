@@ -22,7 +22,7 @@ Last updated: 2026-05-07 (benchmark refreshed after default-on flag cleanup)
 
 The CUDA engine is now created once before the query loop in `hmmsearch.c` and reused across all queries. Only the per-query profile (`P7_CUDA_MSVPROFILE`) is rebuilt inside the loop. A `p7_cuda_engine_Reset()` clears per-query stats without destroying device allocations. This eliminates the ~260ms CUDA context init that was previously paid per query.
 
-### GPU-Native Database Format (Phase 2)
+### GPU-Native Database Format (Phase 2, v2)
 
 A `.gpudb` file format stores sequences pre-unpacked in GPU-ready layout:
 - Memory-mappable, page-aligned data region with contiguous uint8_t residues
@@ -30,6 +30,18 @@ A `.gpudb` file format stores sequences pre-unpacked in GPU-ready layout:
 - Written by `hmmseqdb` alongside dsqdata files
 - Reader in `src/p7_gpudb.c` uses mmap for zero-copy host access
 - `hmmsearch --gpu` auto-detects `.gpudb` sidecar; user can also pass `foo.gpudb` directly as the database argument (the `.gpudb` suffix is stripped for dsqdata open)
+- **v2 (current)**: Embedded metadata section (name, accession, description, taxid per sequence) enables zero-I/O survivor materialization. When gpudb v2 metadata is present, `hmmsearch --gpu` skips `esl_dsqdata_OpenSized` entirely — no per-query fread/thread overhead.
+
+Layout:
+```
+[P7_GPUDB_HEADER 80B]
+[index: int64 offsets × nseq | int32 lengths × nseq]
+[page-aligned padding]
+[sequence data: sentinel + residues per seq, trailing sentinel]
+[page-aligned padding]
+[metadata index: int64 × nseq (byte offset into blob)]
+[metadata blob: name\0 acc\0 desc\0 taxid(4B) per seq]
+```
 
 ### Resident Database (Phase 4)
 
@@ -59,10 +71,10 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 |--------|-----------|----------|----------|
 | CPU 1-thread | 10.68s | 1.00x | — |
 | CPU 4-thread | 4.79s | — | 1.00x |
-| GPU (all stages) | 2.45s | **4.36x** | **1.96x** |
+| GPU (all stages) | 1.54s | **5.86x** | **3.11x** |
 
 - Flags: `--gpu` (all stages now default-on)
-- Database: resident on GPU (229,290 seqs, 92.8 MB)
+- Database: resident on GPU (229,290 seqs, 92.8 MB), gpudb v2 with embedded metadata
 - Hit parity: `cpu_only=0`, `gpu_only=0` across all 13 queries
 - Benchmark: `test-speed/x-hmmsearch-gpu-profmark` (multi-query single-process mode)
 - Key optimizations reaching current state:
@@ -71,8 +83,11 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
   - Pre-allocated CUDA events reused across all kernels
   - Bias model parameter caching (uploaded once per query, not per batch)
   - Viterbi/Forward ReconfigLength caching in post-processing loops
+  - gpudb v2 embedded metadata eliminates dsqdata I/O entirely (~0.26s/query saved)
+  - `madvise` hints (SEQUENTIAL for upload, RANDOM for metadata) on mmap'd gpudb
+  - `cudaHostRegister` for DMA-accelerated initial GPU upload
 
-**Benchmark run**: `benchmark-data/profmark-current/gpu-audit/default-on-run/`
+**Benchmark run**: `benchmark-data/profmark-current/gpu-audit/io-opt/`
 
 ## GPU SSV Kernel (Default MSV Path, 2026-05-07)
 

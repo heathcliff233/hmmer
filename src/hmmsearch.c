@@ -603,23 +603,26 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       p7_oprofile_Convert(gm, om);                  /* <om> is now p7_LOCAL, multihit */
 
       if (do_gpu) {
-        int chunk_maxseq    = esl_opt_GetInteger(go, "--gpu-load-seqs");
-        int chunk_maxpacket = ESL_MAX(eslDSQDATA_CHUNK_MAXPACKET, (esl_opt_GetInteger(go, "--gpu-load-res") + 5) / 6);
-        const char *dsqdata_base = cfg->dbfile;
-        char *dsqdata_base_stripped = NULL;
-        size_t dblen = strlen(cfg->dbfile);
-        if (dblen > 6 && strcmp(cfg->dbfile + dblen - 6, ".gpudb") == 0) {
-          dsqdata_base_stripped = (char *) malloc(dblen - 5);
-          memcpy(dsqdata_base_stripped, cfg->dbfile, dblen - 6);
-          dsqdata_base_stripped[dblen - 6] = '\0';
-          dsqdata_base = dsqdata_base_stripped;
+        int gpudb_has_meta = (infocnt > 0 && info[0].gpudb && info[0].gpudb->has_metadata);
+        if (!gpudb_has_meta) {
+          int chunk_maxseq    = esl_opt_GetInteger(go, "--gpu-load-seqs");
+          int chunk_maxpacket = ESL_MAX(eslDSQDATA_CHUNK_MAXPACKET, (esl_opt_GetInteger(go, "--gpu-load-res") + 5) / 6);
+          const char *dsqdata_base = cfg->dbfile;
+          char *dsqdata_base_stripped = NULL;
+          size_t dblen = strlen(cfg->dbfile);
+          if (dblen > 6 && strcmp(cfg->dbfile + dblen - 6, ".gpudb") == 0) {
+            dsqdata_base_stripped = (char *) malloc(dblen - 5);
+            memcpy(dsqdata_base_stripped, cfg->dbfile, dblen - 6);
+            dsqdata_base_stripped[dblen - 6] = '\0';
+            dsqdata_base = dsqdata_base_stripped;
+          }
+          status = esl_dsqdata_OpenSized(&abc, dsqdata_base, 1, chunk_maxseq, chunk_maxpacket, &dd);
+          free(dsqdata_base_stripped);
+          if      (status == eslENOTFOUND) p7_Fail("--gpu requires an hmmseqdb/dsqdata target database; failed to open %s: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
+          else if (status == eslEFORMAT)   p7_Fail("--gpu target database %s is not compatible protein dsqdata: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
+          else if (status != eslOK)        p7_Fail("Unexpected error %d opening dsqdata target database %s\n", status, cfg->dbfile);
+          if (abc->type != eslAMINO)       p7_Fail("--gpu requires a protein hmmseqdb/dsqdata target database\n");
         }
-        status = esl_dsqdata_OpenSized(&abc, dsqdata_base, 1, chunk_maxseq, chunk_maxpacket, &dd);
-        free(dsqdata_base_stripped);
-        if      (status == eslENOTFOUND) p7_Fail("--gpu requires an hmmseqdb/dsqdata target database; failed to open %s: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
-        else if (status == eslEFORMAT)   p7_Fail("--gpu target database %s is not compatible protein dsqdata: %s\n", cfg->dbfile, dd ? dd->errbuf : "");
-        else if (status != eslOK)        p7_Fail("Unexpected error %d opening dsqdata target database %s\n", status, cfg->dbfile);
-        if (abc->type != eslAMINO)       p7_Fail("--gpu requires a protein hmmseqdb/dsqdata target database\n");
       }
 
       for (i = 0; i < infocnt; ++i)

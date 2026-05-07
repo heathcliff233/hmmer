@@ -235,6 +235,9 @@ p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, i
 
   p7_cuda_engine_ReleaseDatabase(engine);
 
+  /* Pin the host memory for faster DMA transfer */
+  cudaHostRegister((void *) seq_data, dsq_size, cudaHostRegisterReadOnly);
+
   if ((status = cuda_status(cudaMalloc((void **) &engine->d_resident_dsq, dsq_size), errbuf, errbuf_size, "cudaMalloc(resident dsq)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMalloc((void **) &engine->d_resident_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(resident offsets)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMalloc((void **) &engine->d_resident_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(resident lengths)")) != eslOK) goto ERROR;
@@ -256,6 +259,8 @@ p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, i
   engine->resident_nseq     = nseq;
   engine->resident_dsq_size = dsq_size;
   engine->resident_active   = 1;
+
+  cudaHostUnregister((void *) seq_data);
 
   free(h_offsets_int);
   free(h_lengths_int);

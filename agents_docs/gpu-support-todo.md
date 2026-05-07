@@ -28,10 +28,7 @@ This is the live TODO for future GPU work. For detailed dated implementation his
   - Move score conversion and F1 gating to GPU
   - Overlap survivor loop CPU work with next batch's kernel via CUDA streams
 
-- **Reduce I/O overhead** (0.258s, 10.5% of wall): dsqdata metadata loading (names, accessions) for potential hit reporting, even though only ~15 sequences/query reach the hit stage. Approaches:
-  - Lazy-load metadata only for sequences that reach the hit stage
-  - Overlap I/O with GPU kernel via double-buffering
-  - Eliminate dsqdata read entirely when using gpudb resident path (store metadata in gpudb index)
+- **Reduce I/O overhead** ~~(0.258s, 10.5% of wall)~~: **DONE** — gpudb v2 embeds metadata; dsqdata is skipped entirely on the resident path. `io_read_unpack` dropped from 0.258s to 0.000s.
 
 - **GPU Forward kernel optimization** (0.243s, 9.9% of wall): Same strategies as Viterbi. Additional opportunity: kernel fusion with Backward (both traverse the same sequence), async overlap with CPU post-Fwd work.
 
@@ -60,6 +57,8 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV 
 - Pre-allocated CUDA events, bias parameter caching, redundant sync removal
 - Multi-query single-process profmark benchmark
 - All GPU stages (Viterbi prefilter, Forward prefilter, FB parser) default-on with `--gpu`
+- gpudb v2 embedded metadata — eliminates dsqdata I/O entirely on resident path (0.258s → 0.000s)
+- madvise hints + cudaHostRegister for GPU upload DMA acceleration
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.

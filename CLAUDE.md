@@ -99,10 +99,11 @@ The GPU path accelerates SSV/MSV + biased-composition filter + Viterbi + Forward
 
 - Default MSV path: SSV kernel (register-optimized, 1.36x faster than monolithic MSV, with in-kernel MSV fallback for ~0.3% of sequences needing J-state). Supports both resident-database and chunk-based paths.
 - All GPU stages enabled by default with `--gpu`: SSV/MSV → Viterbi prefilter (M≤2048) → Forward prefilter (M≤1024) → FB parser
-- Latest all-13 profmark (multi-query single-process): **4.36x vs CPU-1** (10.68s → 2.45s), **1.96x vs CPU-4** (4.79s → 2.45s), zero parity errors
+- Latest all-13 profmark (multi-query single-process): **5.86x vs CPU-1** (10.68s → 1.54s), **3.11x vs CPU-4** (4.79s → 1.54s), zero parity errors
 - Survivor loop: sorted by sequence length with ReconfigLength caching; CPU MSV fallback eliminated (double-precision GPU bias is authoritative)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
 - Sequence packing uses bulk `smem` copy (single memcpy of dsqdata's contiguous buffer) with L+1 offset spacing
+- `.gpudb` v2 format embeds sequence metadata (name, acc, desc, taxid); when present, `hmmsearch --gpu` skips dsqdata entirely (zero per-query I/O)
 
 ## GPU Timing Instrumentation
 
