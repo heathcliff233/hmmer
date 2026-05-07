@@ -82,6 +82,34 @@ struct p7_cuda_msv_engine_s {
   float              *d_bias_surv_filtersc;
   int                 bias_surv_alloc;
   int                 bias_params_uploaded;
+  /* SSV longtarget persistent buffers */
+  uint8_t            *d_lt_dsq;
+  int                 lt_dsq_alloc;
+  int                *d_lt_offsets;
+  int                *d_lt_lengths;
+  int                 lt_meta_alloc;
+  uint8_t            *d_lt_ssv_scores;
+  int                 lt_ssv_alloc;
+  P7_CUDA_LT_WINDOW *d_lt_windows;
+  int                *d_lt_win_count;
+  int                 lt_win_alloc;
+  uint8_t            *h_lt_dsq;
+  int                 h_lt_dsq_alloc;
+
+  /* Viterbi longtarget persistent buffers */
+  uint8_t            *d_vlt_dsq;
+  int                 vlt_dsq_alloc;
+  int                *d_vlt_offsets;
+  int                *d_vlt_lengths;
+  int                 vlt_meta_alloc;
+  int16_t            *d_vlt_thresholds;
+  int                 vlt_thresh_alloc;
+  P7_CUDA_VIT_LT_WINDOW *d_vlt_windows;
+  int                *d_vlt_win_count;
+  int                 vlt_win_alloc;
+  uint8_t            *h_vlt_dsq;
+  int                 h_vlt_dsq_alloc;
+
   const struct p7_cuda_msv_profile_s *last_cuom;
   P7_CUDA_MSV_STATS   stats;
 

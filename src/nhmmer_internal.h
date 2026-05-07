@@ -39,6 +39,7 @@ typedef struct {
   int               ncpus;
   int               do_gpu_batch;       /* --gpu-batch: batch SSV/bias on GPU */
   int               do_gpu_vit;         /* --gpu-vit-prefilter */
+  int               do_gpu_vit_lt;      /* --gpu-vit-longtarget: scanning Viterbi on GPU */
   int               do_gpu_fwd;         /* --gpu-fwd-prefilter */
   int               do_gpu_compare;     /* --gpu-compare */
 } NHMMER_GPU_INFO;

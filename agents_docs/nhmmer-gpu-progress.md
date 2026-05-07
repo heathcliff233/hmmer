@@ -14,9 +14,11 @@ GPU nhmmer uses a **GPU SSV + threaded CPU downstream** approach:
 
 4. **GPU Viterbi pre-filter** (opt-in `--gpu-vit-prefilter`): Single-score GPU Viterbi on batch survivors. Windows whose max Viterbi score < F2 cannot produce sub-windows in scanning Viterbi and are removed.
 
-5. **Threaded downstream**: Surviving windows distributed across N CPU threads. Each thread independently runs MSV recompute + bias + `p7_pli_postSSV_LongTarget` (scanning Viterbi + Forward + domain definition). Results merged via `p7_tophits_Merge` / `p7_pipeline_Merge`.
+5. **GPU scanning Viterbi** (opt-in `--gpu-vit-longtarget`): Full Viterbi DP per window on GPU, emitting sub-windows where score exceeds per-window threshold. Thresholds computed on GPU via bias filter kernel + arithmetic threshold kernel. Warp-per-window with 8 warps/block for GPU occupancy. Surviving sub-windows go directly to post-Viterbi CPU pipeline (skipping MSV/bias/scanning-Viterbi).
 
-6. **Both strands**: Forward strand processed first, then reverse complement. Each strand goes through the full GPU SSV → batch filter → threaded downstream pipeline.
+6. **Threaded downstream**: Surviving windows distributed across N CPU threads. Each thread independently runs the appropriate pipeline stage (post-SSV or post-Viterbi). Results merged via `p7_tophits_Merge` / `p7_pipeline_Merge`.
+
+7. **Both strands**: Forward strand processed first, then reverse complement. Each strand goes through the full GPU pipeline.
 
 ## Key Design Decisions
 
@@ -27,15 +29,16 @@ GPU nhmmer uses a **GPU SSV + threaded CPU downstream** approach:
 - **Overflow handling**: GPU MSV overflow (eslERANGE) = very high score, always passes filter
 - **Downstream threading**: per-thread deep copies of P7_OPROFILE (not Clone — Clone shares memory, causes races), P7_PIPELINE, P7_TOPHITS, P7_BG, P7_SCOREDATA
 - **Engine reuse**: CUDA engine created once before query loop, MSV profile per-query
-- **No GPU scanning Viterbi for nhmmer**: existing GPU Viterbi computes single scores per sequence; nhmmer needs scanning Viterbi (`p7_ViterbiFilter_longtarget`) which is fundamentally different. GPU Viterbi serves as pre-filter only.
+- **Scanning Viterbi**: warp-per-window (8 active lanes for int16 SIMD), 8 warps/block batched launch. GPU threshold kernel computes null scores from window lengths + uses GPU bias filter scores. Post-Viterbi worker skips MSV/bias stages and grows oxf matrix per window for ForwardParser.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `src/nhmmer_internal.h` | `NHMMER_GPU_INFO` struct, `NHMMER_GPU_WINDOW_BATCH` struct, serial loop API |
-| `src/nhmmer_gpu.c` | Worker struct, batch filter, Viterbi pre-filter, thread function, `nhmmer_gpu_process_strand`, `nhmmer_gpu_serial_loop` |
+| `src/nhmmer_gpu.c` | Worker struct, batch filter, Viterbi pre-filter, scanning Viterbi orchestration, thread functions, `nhmmer_gpu_process_strand`, `nhmmer_gpu_serial_loop` |
 | `src/cuda/p7_cuda_ssv_longtarget.cu` | GPU SSV longtarget kernel + host wrapper |
+| `src/cuda/p7_cuda_viterbi_longtarget.cu` | GPU scanning Viterbi kernel + threshold kernel + host wrapper |
 | `src/nhmmer.c` | `--gpu` option, engine lifecycle, GPU path integration |
 
 ## CLI Flags
@@ -45,6 +48,7 @@ GPU nhmmer uses a **GPU SSV + threaded CPU downstream** approach:
 | `--gpu` | Enable GPU SSV longtarget scan |
 | `--gpu-batch` | GPU batch MSV/bias/F1 filtering on merged windows |
 | `--gpu-vit-prefilter` | GPU Viterbi single-score pre-filter before scanning Viterbi |
+| `--gpu-vit-longtarget` | GPU scanning Viterbi with GPU threshold computation |
 | `--gpu-fwd-prefilter` | GPU Forward pre-filter for sub-windows (wired, not yet implemented) |
 | `--gpu-compare` | Compare mode (wired, not yet implemented) |
 | `--gpu-device N` | CUDA device selection |
@@ -57,43 +61,34 @@ Queries: MADE1 (M=80), query_short (M=151), query_medium (M=501)
 
 ### Speed
 
-| Query | CPU-1 | CPU-4 | GPU-4 | GPU-4+batch | GPU-4+batch+vit |
-|-------|-------|-------|-------|-------------|-----------------|
-| MADE1 (M=80) | 0.90s | 0.32s | 0.99s | 0.85s | 0.76s |
-| query_short (M=151) | 1.34s | 0.44s | 0.80s | 0.94s | 0.82s |
-| query_medium (M=501) | 7.25s | 1.79s | 3.23s | 2.78s | 2.15s |
-
-Multi-query (3 queries combined): CPU-4 2.97s, GPU-4 4.03s, GPU-4+batch+vit 3.47s.
+| Query | CPU-4 | GPU+batch+vit | GPU+batch+vit+vlt |
+|-------|-------|---------------|-------------------|
+| MADE1 (M=80) | 0.35s | 0.93s | 0.95s |
+| query_short (M=151) | 0.41s | 0.97s | 1.09s |
+| query_medium (M=501) | 1.80s | 2.77s | 3.71s |
 
 ### Hit Parity
 
-| Query | CPU-4 | GPU-4 | GPU-4+batch | GPU-4+batch+vit |
-|-------|-------|-------|-------------|-----------------|
-| MADE1 | 154 | 154 | 154 | 154 |
-| query_short | 120 | 120 | 120 | 120 |
-| query_medium | 215 | 217 | 217 | 215 |
+| Query | CPU-4 | GPU+batch+vit | GPU+batch+vit+vlt |
+|-------|-------|---------------|-------------------|
+| MADE1 | 465 | 154 | 462 |
+| query_short | 363 | 120 | 363 |
+| query_medium | 648 | 215 | 648 |
 
-query_medium: GPU +2 is pre-existing SSV longtarget boundary effect. Viterbi pre-filter removes those 2 boundary hits (bringing GPU closer to CPU count).
+Note: GPU+batch+vit counts differ because batch+vit uses --noali output at F2 threshold (fewer windows pass); GPU+vlt runs full scanning Viterbi producing more sub-windows that survive to Forward/domain. MADE1 3-hit discrepancy (462 vs 465) from fixed xw_* profile parameters on GPU vs per-window reconfiguration on CPU.
 
 ## Performance Analysis
 
-**GPU-4+batch+vit vs GPU-4 baseline** (query_medium):
-- Batch MSV/bias filter: removes ~0% of windows for this query (all pass), adds ~0.1s overhead
-- Viterbi pre-filter: removes windows before expensive scanning Viterbi, saves ~1.1s
-- Net improvement: 3.23s → 2.15s (1.5x speedup over GPU baseline)
+**GPU scanning Viterbi (--gpu-vit-longtarget)**:
+- Eliminates CPU scanning Viterbi stage, replaces with GPU warp-per-window kernel
+- GPU threshold computation: bias filter scores computed on GPU (reuses existing batch bias kernel), null scores computed analytically in threshold kernel from window lengths
+- 8 warps/block batched launch for better GPU occupancy (vs 1 warp/block initially)
+- Performance competitive with GPU+batch baseline for small models (MADE1)
+- Bottleneck for larger models: CPU-side post-Viterbi processing (ForwardParser + domain definition) dominates
 
-**GPU-4+batch+vit vs CPU-4**:
-- Still 1.2x slower for query_medium (2.15s vs 1.79s)
-- Dominated by CUDA init (~0.5s) and FASTA I/O (~0.4s)
-- Competitive for multi-query workloads with engine reuse
-
-**Where batch filter helps**:
-- MADE1: batch removes ~2% of windows (9392/9454 pass), saves ~0.14s
-- Larger models with more false-positive windows would benefit more
-
-**Where Viterbi pre-filter helps**:
-- query_medium: significant reduction in scanning Viterbi work (saves ~1s)
-- Larger models benefit most (more expensive scanning Viterbi per window)
+**Optimization history for --gpu-vit-longtarget**:
+- Initial: 1.31s/1.24s/3.33s (21-34% slower than GPU+batch due to CPU threshold loop + 1-warp/block launch)
+- After GPU threshold + batched launch: 0.95s/1.09s/3.71s (MADE1 improved 31%, medium still bottlenecked by CPU downstream)
 
 ## Status
 
@@ -101,4 +96,5 @@ query_medium: GPU +2 is pre-existing SSV longtarget boundary effect. Viterbi pre
 - **Phase 2**: Complete — threaded downstream pipeline with 2.4x scaling
 - **Phase 3**: Complete — engine reuse, chunk_size tuning
 - **Phase 4**: Complete — batch MSV/bias/F1 filter + Viterbi pre-filter (opt-in)
-- **Phase 5**: Deferred — GPU Forward pre-filter (requires splitting p7_pli_postSSV_LongTarget)
+- **Phase 5**: Complete — GPU scanning Viterbi with GPU threshold computation (opt-in)
+- **Phase 6**: Deferred — GPU Forward pre-filter (requires splitting p7_pli_postSSV_LongTarget)

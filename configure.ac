@@ -463,7 +463,7 @@ if test "$enable_cuda" = "yes" || test "$enable_cuda" = "check"; then
     CUDA_CFLAGS="-arch=${CUDA_ARCH}"
     CUDA_LDFLAGS="-L/usr/local/cuda/lib64"
     CUDA_LIBS="-lcudart"
-    CUDA_OBJ='cuda/p7_cuda_runtime.o cuda/p7_cuda_msv.o cuda/p7_cuda_ssv.o cuda/p7_cuda_bias.o cuda/p7_cuda_viterbi.o cuda/p7_cuda_forward.o cuda/p7_cuda_fb_parser.o'
+    CUDA_OBJ='cuda/p7_cuda_runtime.o cuda/p7_cuda_msv.o cuda/p7_cuda_ssv.o cuda/p7_cuda_bias.o cuda/p7_cuda_viterbi.o cuda/p7_cuda_forward.o cuda/p7_cuda_fb_parser.o cuda/p7_cuda_ssv_longtarget.o cuda/p7_cuda_viterbi_longtarget.o'
     enable_cuda=yes
     ],[
     if test "$enable_cuda" = "yes"; then

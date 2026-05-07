@@ -1302,6 +1302,14 @@ typedef struct p7_pipeline_s {
   char          errbuf[eslERRBUFSIZE];
 } P7_PIPELINE;
 
+typedef struct {
+  ESL_SQ           *tmpseq;
+  P7_BG            *bg;
+  P7_OPROFILE      *om;
+  float            *scores;
+  float            *fwd_emissions_arr;
+} P7_PIPELINE_LONGTARGET_OBJS;
+
 
 
 /*****************************************************************
@@ -1710,6 +1718,15 @@ extern int p7_Pipeline_LongTarget   (P7_PIPELINE *pli, P7_OPROFILE *om, P7_SCORE
                                      const ESL_SQ *sq, int complementarity,
                                      const FM_DATA *fmf, const FM_DATA *fmb, FM_CFG *fm_cfg
                                      );
+extern int p7_pli_postSSV_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS *hitlist, const P7_SCOREDATA *data,
+                                     int64_t seqidx, uint64_t window_start, int window_len, ESL_DSQ *subseq,
+                                     uint64_t seq_start, char *seq_name, char *seq_source, char *seq_acc, char *seq_desc, int seq_len,
+                                     float nullsc, float usc, int complementarity, P7_HMM_WINDOWLIST *vit_windowlist,
+                                     P7_PIPELINE_LONGTARGET_OBJS *pli_tmp);
+extern int p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS *hitlist, const P7_SCOREDATA *data,
+                                     int64_t seqidx, int window_start, int window_len, ESL_DSQ *subseq,
+                                     int64_t seq_start, char *seq_name, char *seq_source, char *seq_acc, char *seq_desc, int seq_len,
+                                     int complementarity, int *overlap, P7_PIPELINE_LONGTARGET_OBJS *pli_tmp);
 
 
 

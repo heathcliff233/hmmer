@@ -100,6 +100,20 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_resident_dsq)     cudaFree(engine->d_resident_dsq);
   if (engine->d_resident_offsets) cudaFree(engine->d_resident_offsets);
   if (engine->d_resident_lengths) cudaFree(engine->d_resident_lengths);
+  if (engine->d_lt_dsq)        cudaFree(engine->d_lt_dsq);
+  if (engine->h_lt_dsq)        cudaFreeHost(engine->h_lt_dsq);
+  if (engine->d_lt_offsets)    cudaFree(engine->d_lt_offsets);
+  if (engine->d_lt_lengths)    cudaFree(engine->d_lt_lengths);
+  if (engine->d_lt_ssv_scores) cudaFree(engine->d_lt_ssv_scores);
+  if (engine->d_lt_windows)    cudaFree(engine->d_lt_windows);
+  if (engine->d_lt_win_count)  cudaFree(engine->d_lt_win_count);
+  if (engine->d_vlt_dsq)       cudaFree(engine->d_vlt_dsq);
+  if (engine->h_vlt_dsq)       cudaFreeHost(engine->h_vlt_dsq);
+  if (engine->d_vlt_offsets)   cudaFree(engine->d_vlt_offsets);
+  if (engine->d_vlt_lengths)   cudaFree(engine->d_vlt_lengths);
+  if (engine->d_vlt_thresholds) cudaFree(engine->d_vlt_thresholds);
+  if (engine->d_vlt_windows)   cudaFree(engine->d_vlt_windows);
+  if (engine->d_vlt_win_count) cudaFree(engine->d_vlt_win_count);
   free(engine);
 }
 

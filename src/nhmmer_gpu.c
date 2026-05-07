@@ -417,6 +417,45 @@ nhmmer_gpu_worker_process(NHMMER_GPU_WORKER *w)
   }
 }
 
+/* Post-Viterbi worker: processes sub-windows that already passed GPU scanning Viterbi.
+ * Only runs Forward/Backward and domain definition (skips MSV and scanning Viterbi). */
+static void
+nhmmer_gpu_worker_process_post_vit(NHMMER_GPU_WORKER *w)
+{
+  int          i;
+  int          overlap = 0;
+  P7_HMM_WINDOW *window;
+
+  for (i = 0; i < w->nwindows; i++) {
+    window = w->windows + i;
+    ESL_DSQ *subseq = w->sq->dsq + window->n - 1;
+
+    w->pli->pos_past_msv += window->length;
+    w->pli->pos_past_bias += window->length;
+    w->pli->pos_past_vit += window->length;
+    if (i > 0)
+      w->pli->pos_past_vit -= ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n);
+
+    p7_omx_GrowTo(w->pli->oxf, w->om->M, 0, window->length);
+    p7_oprofile_ReconfigRestLength(w->om, ESL_MIN((int)window->length, w->om->max_length));
+
+    w->status = p7_pli_postViterbi_LongTarget(w->pli, w->om, w->bg, w->th, w->scoredata,
+                                              w->seq_id, (int)window->n, window->length, subseq,
+                                              (int64_t)w->sq->start, w->sq->name, w->sq->source,
+                                              w->sq->acc, w->sq->desc,
+                                              -1, w->complementarity, &overlap, w->pli_tmp);
+    if (w->status != eslOK) return;
+
+    if (overlap == -1 && i < w->nwindows - 1) {
+      overlap = ESL_MAX(0, (int)(window->n + window->length) - (int)w->windows[i+1].n);
+    } else {
+      overlap = 0;
+    }
+
+    w->pli->ddef->ndom = 0;
+  }
+}
+
 #ifdef HMMER_THREADS
 static void *
 nhmmer_gpu_thread_func(void *arg)
@@ -425,7 +464,115 @@ nhmmer_gpu_thread_func(void *arg)
   nhmmer_gpu_worker_process(w);
   return NULL;
 }
+
+static void *
+nhmmer_gpu_thread_func_post_vit(void *arg)
+{
+  NHMMER_GPU_WORKER *w = (NHMMER_GPU_WORKER *)arg;
+  nhmmer_gpu_worker_process_post_vit(w);
+  return NULL;
+}
 #endif
+
+/* GPU scanning Viterbi longtarget: replaces CPU p7_ViterbiFilter_longtarget.
+ * Computes per-window thresholds, runs GPU kernel, converts output to window list.
+ * Returns sub-windows in *ret_vit_wl (caller must free windows). */
+static int
+nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
+                              P7_HMM_WINDOWLIST *input_wl,
+                              P7_HMM_WINDOWLIST *ret_vit_wl,
+                              char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int N = input_wl->count;
+  P7_OPROFILE *om = info->om;
+  P7_PIPELINE *pli = info->pli;
+  float       *bias_scores = NULL;
+  P7_CUDA_VIT_LT_WINDOW *gpu_windows = NULL;
+  int          gpu_nwindows = 0;
+  int          i;
+  int          max_window_len = 80000;
+  int          overlap_len = ESL_MIN(40000, om->max_length);
+
+  p7_hmmwindow_init(ret_vit_wl);
+
+  if (N == 0) return eslOK;
+
+  /* GPU bias filter scores (if enabled) — reuse batch infrastructure */
+  if (pli->do_biasfilter) {
+    NHMMER_GPU_WINDOW_BATCH wb;
+    memset(&wb, 0, sizeof(wb));
+    status = nhmmer_gpu_window_batch_init(&wb, N);
+    if (status != eslOK) goto ERROR;
+    status = nhmmer_gpu_window_batch_pack(&wb, sq, input_wl);
+    if (status != eslOK) { nhmmer_gpu_window_batch_free(&wb); goto ERROR; }
+
+    ESL_ALLOC(bias_scores, sizeof(float) * N);
+    status = p7_cuda_BiasFilterDsqdataChunk(info->cuda_engine, info->bg, &wb.chu, bias_scores,
+                                             errbuf, errbuf_size);
+    nhmmer_gpu_window_batch_free(&wb);
+    if (status != eslOK) goto ERROR;
+  }
+
+  status = p7_cuda_ViterbiLongtarget(info->cuda_engine, info->cuda_msv,
+                                     sq->dsq, sq->n,
+                                     input_wl->windows, N,
+                                     bias_scores, pli->do_biasfilter,
+                                     pli->B2, pli->F2,
+                                     om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
+                                     om->scale_w,
+                                     (float)om->xw[p7O_E][p7O_MOVE],
+                                     (float)om->xw[p7O_C][p7O_MOVE],
+                                     (float)om->base_w, om->max_length,
+                                     &gpu_windows, &gpu_nwindows,
+                                     errbuf, errbuf_size);
+  if (bias_scores) { free(bias_scores); bias_scores = NULL; }
+  if (status != eslOK) goto ERROR;
+
+  if (gpu_nwindows == 0) {
+    return eslOK;
+  }
+
+  for (i = 0; i < gpu_nwindows; i++) {
+    int win_id = gpu_windows[i].window_id;
+    int64_t base_n = input_wl->windows[win_id].n;
+    int pos = gpu_windows[i].position;
+    int k = gpu_windows[i].model_k;
+
+    p7_hmmwindow_new(ret_vit_wl, 0,
+                     (uint32_t)(base_n + pos - 1),
+                     0, (uint16_t)k, 1, 0.0f,
+                     p7_NOCOMPLEMENT,
+                     (uint32_t)sq->n);
+  }
+  free(gpu_windows);
+  gpu_windows = NULL;
+
+  p7_pli_ExtendAndMergeWindows(om, info->scoredata, ret_vit_wl, 0.5);
+
+  for (i = 0; i < ret_vit_wl->count; i++) {
+    if ((int)ret_vit_wl->windows[i].length > max_window_len) {
+      uint64_t new_n   = ret_vit_wl->windows[i].n;
+      uint32_t new_len = ret_vit_wl->windows[i].length;
+      ret_vit_wl->windows[i].length = max_window_len;
+      do {
+        int shift = max_window_len - overlap_len;
+        new_n   += shift;
+        new_len -= shift;
+        p7_hmmwindow_new(ret_vit_wl, 0, new_n, 0, 0,
+                         ESL_MIN(max_window_len, new_len), 0.0f,
+                         p7_NOCOMPLEMENT, new_len);
+      } while ((int)new_len > max_window_len);
+    }
+  }
+
+  return eslOK;
+
+ERROR:
+  if (bias_scores) free(bias_scores);
+  free(gpu_windows);
+  return status;
+}
 
 static int
 nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complementarity,
@@ -522,6 +669,113 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     }
 
     nhmmer_gpu_window_batch_free(&wb);
+  }
+
+  /* GPU scanning Viterbi longtarget: replaces CPU scanning Viterbi in workers */
+  if (info->do_gpu_vit_lt && msv_windowlist.count > 0) {
+    P7_HMM_WINDOWLIST vit_wl;
+    vit_wl.windows = NULL;
+
+    status = nhmmer_gpu_viterbi_longtarget(info, sq, &msv_windowlist, &vit_wl,
+                                           errbuf, errbuf_size);
+    if (status != eslOK) {
+      fprintf(stderr, "GPU scanning Viterbi failed: %s\n", errbuf);
+      if (vit_wl.windows) free(vit_wl.windows);
+      goto ERROR;
+    }
+
+    free(msv_windowlist.windows);
+    msv_windowlist.windows = NULL;
+
+    if (vit_wl.count == 0) {
+      if (vit_wl.windows) free(vit_wl.windows);
+      return eslOK;
+    }
+
+    /* Dispatch sub-windows to post-Viterbi workers (Forward/Backward only) */
+    int ncpus_vlt = info->ncpus;
+    if (ncpus_vlt < 1) ncpus_vlt = 1;
+    if (ncpus_vlt > vit_wl.count) ncpus_vlt = vit_wl.count;
+
+#ifdef HMMER_THREADS
+    if (ncpus_vlt > 1) {
+      NHMMER_GPU_WORKER *workers = NULL;
+      pthread_t         *threads = NULL;
+      int                nworkers = ncpus_vlt;
+      int                windows_per_thread = vit_wl.count / nworkers;
+      int                remainder = vit_wl.count % nworkers;
+      int                offset = 0;
+
+      ESL_ALLOC(workers, sizeof(NHMMER_GPU_WORKER) * nworkers);
+      ESL_ALLOC(threads, sizeof(pthread_t) * nworkers);
+      memset(workers, 0, sizeof(NHMMER_GPU_WORKER) * nworkers);
+
+      for (i = 0; i < nworkers; i++) {
+        status = nhmmer_gpu_worker_init(&workers[i], info);
+        if (status != eslOK) { nworkers = i; goto VLT_THREAD_ERROR; }
+
+        workers[i].sq              = sq;
+        workers[i].seq_id          = seq_id;
+        workers[i].complementarity = complementarity;
+        workers[i].nwindows        = windows_per_thread + (i < remainder ? 1 : 0);
+        workers[i].windows         = vit_wl.windows + offset;
+        offset += workers[i].nwindows;
+      }
+
+      for (i = 1; i < nworkers; i++)
+        pthread_create(&threads[i], NULL, nhmmer_gpu_thread_func_post_vit, &workers[i]);
+
+      nhmmer_gpu_worker_process_post_vit(&workers[0]);
+
+      for (i = 1; i < nworkers; i++)
+        pthread_join(threads[i], NULL);
+
+      status = workers[0].status;
+      for (i = 1; i < nworkers && status == eslOK; i++)
+        status = workers[i].status;
+
+      for (i = 1; i < nworkers && status == eslOK; i++) {
+        p7_tophits_Merge(info->th, workers[i].th);
+        p7_pipeline_Merge(info->pli, workers[i].pli);
+      }
+      p7_tophits_Merge(info->th, workers[0].th);
+      p7_pipeline_Merge(info->pli, workers[0].pli);
+
+    VLT_THREAD_ERROR:
+      for (i = 0; i < nworkers; i++)
+        nhmmer_gpu_worker_destroy(&workers[i]);
+      free(workers);
+      free(threads);
+      free(vit_wl.windows);
+      return status;
+    }
+#endif /* HMMER_THREADS */
+
+    /* Single-threaded fallback for post-Viterbi */
+    {
+      NHMMER_GPU_WORKER w;
+      memset(&w, 0, sizeof(w));
+      status = nhmmer_gpu_worker_init(&w, info);
+      if (status != eslOK) { free(vit_wl.windows); return status; }
+
+      w.sq              = sq;
+      w.seq_id          = seq_id;
+      w.complementarity = complementarity;
+      w.nwindows        = vit_wl.count;
+      w.windows         = vit_wl.windows;
+
+      nhmmer_gpu_worker_process_post_vit(&w);
+      status = w.status;
+
+      if (status == eslOK) {
+        p7_tophits_Merge(info->th, w.th);
+        p7_pipeline_Merge(info->pli, w.pli);
+      }
+
+      nhmmer_gpu_worker_destroy(&w);
+      free(vit_wl.windows);
+      return status;
+    }
   }
 
   int ncpus = info->ncpus;

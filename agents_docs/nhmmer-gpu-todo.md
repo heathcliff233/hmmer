@@ -43,11 +43,26 @@
 - [x] Viterbi pre-filter: query_medium 215 (removes 2 boundary hits, matches CPU count)
 - [x] Speed: query_medium GPU-4+batch+vit 2.15s vs GPU-4 baseline 3.23s (1.5x improvement)
 
+## Phase 5: GPU Scanning Viterbi — COMPLETE
+
+- [x] Create `src/cuda/p7_cuda_viterbi_longtarget.cu` with warp-per-window scanning Viterbi kernel
+- [x] Warp-based DP: 8 active lanes for int16 SIMD, `__shfl_up_sync` for cross-lane communication
+- [x] In-kernel window emission via atomicAdd when xE >= threshold, with DP state reset
+- [x] Lazy-F D-state propagation for DD transitions
+- [x] Host wrapper: pack windows into pinned buffer, grow-on-demand engine-persistent device buffers
+- [x] `--gpu-vit-longtarget` CLI flag in `src/nhmmer.c`
+- [x] Post-Viterbi worker thread that skips MSV/bias stages, grows oxf matrix per window
+- [x] Made `p7_pli_postViterbi_LongTarget` public for direct post-Viterbi entry
+- [x] GPU threshold computation: null scores computed analytically, bias via existing GPU kernel
+- [x] Batched kernel launch: 8 warps/block for better GPU occupancy
+- [x] Hit parity: MADE1 462 (vs 465 CPU, 3-hit discrepancy from fixed xw_*), query_short 363=363, query_medium 648=648
+- [x] Update `configure.ac` CUDA_OBJ to include `cuda/p7_cuda_viterbi_longtarget.o`
+
 ## Future Work (Not Planned)
 
 - GPU Forward pre-filter for sub-windows (requires splitting p7_pli_postSSV_LongTarget)
-- GPU scanning Viterbi kernel (`p7_ViterbiFilter_longtarget` equivalent)
+- GPU-side ForwardParser/domain definition to eliminate CPU post-Viterbi bottleneck
 - Memory-mapped sequence I/O to reduce sys time (~0.4s overhead)
 - FM-index GPU path (FM-index remains CPU-only)
-- GPU-side bias filter for nhmmer windows
+- Per-window profile reconfiguration on GPU (would fix MADE1 3-hit discrepancy)
 - `--gpu-compare` mode implementation (score-level comparison)

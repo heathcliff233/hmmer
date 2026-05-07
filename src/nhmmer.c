@@ -187,6 +187,7 @@ static ESL_OPTIONS options[] = {
   { "--gpu-chunk-size",   eslARG_INT, "65536", NULL, "n>0", NULL, "--gpu", NULL,       "chunk size (residues) for GPU SSV longtarget scan",             99 },
   { "--gpu-batch",        eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU batch SSV/bias filtering on merged windows",            12 },
   { "--gpu-vit-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Viterbi as pre-filter before scanning Viterbi",         12 },
+  { "--gpu-vit-longtarget",eslARG_NONE, FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU scanning Viterbi for longtarget sub-window detection",   12 },
   { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Forward as pre-filter for sub-windows",                 12 },
   { "--gpu-compare",      eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "run both GPU and CPU paths, report mismatches",                 12 },
 #endif
@@ -1112,6 +1113,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.ncpus          = ncpus;
         gpu_info.do_gpu_batch   = esl_opt_GetBoolean(go, "--gpu-batch");
         gpu_info.do_gpu_vit     = esl_opt_GetBoolean(go, "--gpu-vit-prefilter");
+        gpu_info.do_gpu_vit_lt  = esl_opt_GetBoolean(go, "--gpu-vit-longtarget");
         gpu_info.do_gpu_fwd     = esl_opt_GetBoolean(go, "--gpu-fwd-prefilter");
         gpu_info.do_gpu_compare = esl_opt_GetBoolean(go, "--gpu-compare");
 

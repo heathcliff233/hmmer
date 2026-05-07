@@ -108,6 +108,7 @@ HDRS =  hmmer.h \
 		cuda/p7_cuda_internal.h \
 		cachedb.h \
 		hmmsearch_internal.h \
+		nhmmer_internal.h \
 		p7_gbands.h \
 		p7_gpudb.h \
 	p7_gmxb.h \
@@ -143,6 +144,7 @@ OBJS =  build.o\
 	hmmdutils.o\
 		hmmer.o\
 		hmmsearch_gpu.o\
+		nhmmer_gpu.o\
 		logsum.o\
 	modelconfig.o\
 	modelstats.o\

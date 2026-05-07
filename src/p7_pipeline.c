@@ -25,17 +25,6 @@
 
 #include "esl_sqio.h" //!!!!DEBUG
 
-/* Struct used to pass a collection of useful temporary objects around
- * within the LongTarget functions
- *  */
-typedef struct {
-  ESL_SQ           *tmpseq; // - a new or reused digital sequence object used for p7_alidisplay_Create() call
-  P7_BG            *bg;
-  P7_OPROFILE      *om;
-  float            *scores;
-  float            *fwd_emissions_arr;
-} P7_PIPELINE_LONGTARGET_OBJS;
-
 static double
 p7_pipeline_WallTime(void)
 {
@@ -1247,7 +1236,7 @@ ERROR:
  * Throws:    <eslEMEM> on allocation failure.
  *
  */
-static int
+int
 p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS *hitlist, const P7_SCOREDATA *data,
     int64_t seqidx, int window_start, int window_len, ESL_DSQ *subseq,
     int64_t seq_start, char *seq_name, char *seq_source, char* seq_acc, char* seq_desc, int seq_len,
@@ -1513,7 +1502,7 @@ ERROR:
  * Throws:    <eslEMEM> on allocation failure.
  *
  */
-static int
+int
 p7_pli_postSSV_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS *hitlist, const P7_SCOREDATA *data,
     int64_t seqidx, uint64_t window_start, int window_len, ESL_DSQ *subseq,
     uint64_t seq_start, char *seq_name, char *seq_source, char* seq_acc, char* seq_desc, int seq_len,

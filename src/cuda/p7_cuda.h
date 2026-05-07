@@ -174,4 +174,40 @@ extern int  p7_cuda_MSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVP
 extern int  p7_cuda_DefaultWarpsPerBlock(int device_id, int kernel_id,
                                           const P7_CUDA_MSVPROFILE *cuom, int user_w);
 
+/* SSV longtarget for nhmmer: scans a long nucleotide sequence for high-scoring windows */
+typedef struct {
+  int32_t  chunk_id;
+  int32_t  target_start;
+  int32_t  target_end;
+  int16_t  model_start;
+  int16_t  model_end;
+  float    score;
+} P7_CUDA_LT_WINDOW;
+
+/* Viterbi longtarget for nhmmer: scanning Viterbi emits sub-windows within merged windows */
+typedef struct {
+  int32_t  window_id;
+  int32_t  position;
+  int16_t  model_k;
+  int16_t  pad;
+} P7_CUDA_VIT_LT_WINDOW;
+
+extern int  p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                  const ESL_DSQ *dsq, int L,
+                                  const uint8_t *ssv_scores_host, int Kp,
+                                  uint8_t sc_thresh, float scale_b,
+                                  int chunk_size, int overlap,
+                                  P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
+                                  char *errbuf, int errbuf_size);
+
+extern int  p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                      const ESL_DSQ *dsq, int L,
+                                      const P7_HMM_WINDOW *windows, int nwindows,
+                                      const float *bias_scores, int do_biasfilter,
+                                      int B2, float F2, float vmu, float vlambda,
+                                      float scale_w, float xw_e_move, float xw_c_move,
+                                      float base_w, int max_length,
+                                      P7_CUDA_VIT_LT_WINDOW **ret_windows, int *ret_nwindows,
+                                      char *errbuf, int errbuf_size);
+
 #endif /*P7_CUDA_INCLUDED*/

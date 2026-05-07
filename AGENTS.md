@@ -101,6 +101,7 @@ Use `agents_docs/` only for files relevant to the task:
 - `agents_docs/gpu-support-todo.md`: planned CUDA GPU support, `hmmsearch --gpu`, GPU-capable sequence database construction, and open validation/tuning work.
 - `agents_docs/gpu-support-progress.md`: current GPU implementation status, benchmark results, and remaining gaps.
 - `agents_docs/cuda-hmm-reference.md`: reference notes for the external `divinrkz/cuda-hmm` Viterbi/Forward/Backward implementation, including which high-level CUDA DP ideas are useful and why its code/build system should not be copied into HMMER.
+- `agents_docs/nucleotide-benchmark.md`: nucleotide benchmark setup (chr22 target, query HMMs, FM-index, baseline timings, rebuild instructions).
 
 ## Code Navigation
 
