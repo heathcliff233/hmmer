@@ -19,22 +19,25 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 ## Open Work
 
-### High-impact optimizations
+### High-impact optimizations (ranked by current benchmark impact)
 
-- ~~**Eliminate redundant CPU bias in survivor loop**~~: Done (2026-05-07). Double-precision GPU survivor kernel (`cuda_bias_filter_survivors_kernel`) recomputes filtersc with `log()` for ~4000 F1 survivors, achieving bit-identical parity with CPU `p7_bg_FilterScore`. CPU bias computation completely eliminated from GPU path. Result: 2.86s → 2.59s, GPU utilization 54% → 62%.
+- **GPU Viterbi kernel optimization** (0.475s, 19.4% of wall): Dominant single GPU cost. Average 544 candidates/launch, ~217K residues/launch. Approaches: occupancy tuning (shmem vs register pressure), warp-level shuffle-based DP (as done for SSV), profile tiling for large M to reduce shmem footprint.
 
-- ~~**Make SSV the default GPU MSV kernel**~~: Done (2026-05-07). SSV kernel is now always used (both resident and chunk paths). `p7_cuda_SSVFilterResident()` added for resident-database path. Monolithic MSV retained only for `--gpu-ssv-compare` debug mode. Result: 1.36x faster MSV kernel, contributing to 1.32x → 1.48x aggregate speedup.
-
-- ~~**Raise Viterbi/Forward M-limits**~~: Done (2026-05-07). Viterbi default gate raised from M≤512 to M≤2048 (shmem fits in 48KB). Forward default gate raised from M≤256 to M≤1024. Added M>2048 tiling tier. `--gpu-vit-largem`/`--gpu-fwd-largem` flags now gate at the new thresholds.
-
-- ~~**Reduce per-survivor overhead in survivor loop**~~: Done (2026-05-07). Removed dead CPU MSV fallback (double-precision GPU bias is authoritative). Added sort-by-length + ReconfigLength caching to skip redundant `p7_bg_SetLength`/`p7_oprofile_ReconfigLength` calls. Survivor loop time reduced from ~0.01s to ~0.003s.
-
-- **Reduce inter-kernel GPU idle time** (~0.22s savings): Between kernel launches, the host does score conversion, F1 gating, and survivor list construction. During this time the GPU is idle. Potential approaches:
-  - Fuse MSV + null + bias into a single kernel launch (eliminates 2 sync points per batch)
+- **Reduce unaccounted residual** (0.334s, 13.6% of wall): The `exact_other` bucket captures inter-stage sync, host-side score conversion, F1 gating logic, and survivor list construction between kernel launches. Approaches:
+  - Fuse MSV + null + bias into a single kernel (eliminates 2 sync points per batch)
+  - Move score conversion and F1 gating to GPU
   - Overlap survivor loop CPU work with next batch's kernel via CUDA streams
-  - Move score conversion to GPU (currently `host_score_convert_seconds = 0.019s`)
 
-- **Reduce I/O overhead** (0.19s, ~3% of search): `io_read_unpack` is 0.19s even with resident DB. This is dsqdata chunk reading for metadata (names, accessions). With gpudb resident, the only reason to read dsqdata is for hit reporting metadata. Consider lazy-loading metadata only for sequences that reach the hit stage.
+- **Reduce I/O overhead** (0.258s, 10.5% of wall): dsqdata metadata loading (names, accessions) for potential hit reporting, even though only ~15 sequences/query reach the hit stage. Approaches:
+  - Lazy-load metadata only for sequences that reach the hit stage
+  - Overlap I/O with GPU kernel via double-buffering
+  - Eliminate dsqdata read entirely when using gpudb resident path (store metadata in gpudb index)
+
+- **GPU Forward kernel optimization** (0.243s, 9.9% of wall): Same strategies as Viterbi. Additional opportunity: kernel fusion with Backward (both traverse the same sequence), async overlap with CPU post-Fwd work.
+
+- **CPU domain definition** (0.162s, 6.6% of wall): `p7_domaindef_ByPosteriorHeuristics()` on ~15 sequences/query that pass Forward. Approaches: parallelize across survivors with thread pool, or eventually move posterior decoding to GPU (high complexity, deferred).
+
+- **Kernel fusion (MSV → bias)**: MSV and bias are separate launches with host-side sync between them. A single kernel that runs SSV → null → bias → F1 gating would eliminate one round-trip and produce the compact survivor list directly.
 
 ### SSV kernel — future optimizations
 The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV path. Remaining kernel-level optimization opportunities:
@@ -43,26 +46,20 @@ The optimized SSV kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV 
 - **rbv access pattern optimization**: with contiguous node ownership, explore whether L1 cache prefetching or texture memory for the rbv profile improves memory-bound queries.
 
 ### Medium-priority work
-- ~~Decide default policy for later-stage flags~~: Done. All GPU stages (Viterbi prefilter, Forward prefilter, FB parser) are now default-on with `--gpu`.
 - Consider larger batch sizes (>32K seqs) to reduce per-batch CUDA API call count.
 - Profile/candidate-shape auto-gating for short queries where CUDA launches regress wall time.
 
-### Completed (2026-05-07)
-- ~~CUDA engine reuse across queries~~: engine created once before query loop, ~3.1s saved.
-- ~~GPU-native database format (.gpudb)~~: `src/p7_gpudb.c` + `src/p7_gpudb.h`, mmap-based reader, written by `hmmseqdb`.
-- ~~Resident database (whole-DB GPU upload)~~: `p7_cuda_engine_UploadDatabase()`, all kernels resident-aware, H2D reduced to ~0.02s.
-- ~~Eliminate multi-chunk view fallback path~~: with gpudb + resident DB, batch upload is eliminated entirely.
-- ~~Batched CPU bias pre-computation~~: superseded by double-precision GPU survivor kernel. CPU `p7_bg_FilterScore` completely eliminated from GPU path.
-- ~~SSV as default GPU MSV kernel~~: `p7_cuda_SSVFilterResident()` + `p7_cuda_SSVFilterDsqdataChunk()` always used. 1.36x faster than monolithic MSV.
-- ~~Viterbi/Forward M-limit expansion~~: Viterbi M≤2048, Forward M≤1024, M>2048 tiling tier added.
-- ~~Survivor loop optimization~~: CPU MSV fallback removed, sort-by-length + ReconfigLength caching.
-- ~~GPU pipeline overlap and efficiency refinements (2026-05-07)~~:
-  - Pre-allocated CUDA events: engine events (`evt_h2d0/1`, `evt_k0/1`, `evt_d2h0/1`) reused by all SSV/bias functions instead of per-call create/destroy (~126 event create/destroy pairs eliminated per query).
-  - Removed redundant `cudaEventSynchronize` after synchronous `cudaMemcpy` in SSV and bias functions.
-  - Bias model parameter caching: `engine->bias_params_uploaded` flag skips re-upload of constant pi/t/eo arrays across batches within a query.
-  - Viterbi/Forward ReconfigLength caching in post-processing loops.
-  - Rejected: CPU null score computation broke parity (x86 vs CUDA `logf` divergence). GPU null kernel retained.
-- ~~Multi-query profmark benchmark (2026-05-07)~~: `test-speed/x-hmmsearch-gpu-profmark` rewritten to run all queries in a single hmmsearch process (CPU and GPU), amortizing CUDA init once. Fixed benchmark artifact that made GPU appear 0.6x vs CPU-4 when it is actually 1.92x vs CPU-4, 4.19x vs CPU-1.
+### Completed
+- CUDA engine reuse across queries (~3.1s saved)
+- GPU-native database format (.gpudb) with mmap-based reader
+- Resident database (whole-DB GPU upload, H2D reduced to ~0.02s)
+- Batched CPU bias pre-computation → superseded by double-precision GPU survivor kernel
+- SSV as default GPU MSV kernel (1.36x faster than monolithic MSV)
+- Viterbi M≤2048, Forward M≤1024, M>2048 tiling tier
+- Survivor loop optimization (sort-by-length, ReconfigLength caching, CPU MSV fallback removed)
+- Pre-allocated CUDA events, bias parameter caching, redundant sync removal
+- Multi-query single-process profmark benchmark
+- All GPU stages (Viterbi prefilter, Forward prefilter, FB parser) default-on with `--gpu`
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.

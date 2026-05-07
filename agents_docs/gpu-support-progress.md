@@ -1,6 +1,6 @@
 # GPU Support Progress
 
-Last updated: 2026-05-07
+Last updated: 2026-05-07 (benchmark refreshed after default-on flag cleanup)
 
 ## Current State
 
@@ -57,29 +57,22 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 
 | Config | Wall time | vs CPU-1 | vs CPU-4 |
 |--------|-----------|----------|----------|
-| CPU 1-thread | 8.93s | 1.00x | — |
+| CPU 1-thread | 10.68s | 1.00x | — |
 | CPU 4-thread | 4.79s | — | 1.00x |
-| GPU (all stages) | 2.50s | **4.19x** | **1.92x** |
+| GPU (all stages) | 2.45s | **4.36x** | **1.96x** |
 
 - Flags: `--gpu` (all stages now default-on)
 - Database: resident on GPU (229,290 seqs, 92.8 MB)
 - Hit parity: `cpu_only=0`, `gpu_only=0` across all 13 queries
 - Benchmark: `test-speed/x-hmmsearch-gpu-profmark` (multi-query single-process mode)
-- Key optimizations from prior baseline (1.48x vs CPU-1 → 4.19x vs CPU-1):
-  - **Multi-query benchmark**: old profmark runner invoked hmmsearch 13× separately, paying ~0.35s CUDA init each time (4.55s pure overhead). New runner uses single-process multi-query, paying CUDA init once.
-  - Pre-allocated CUDA events: engine events reused across all kernels (eliminated ~126 event create/destroy per query)
-  - Removed redundant cudaEventSynchronize after synchronous cudaMemcpy
+- Key optimizations reaching current state:
+  - All GPU stages default-on (no separate opt-in flags)
+  - Multi-query single-process benchmark (CUDA init paid once)
+  - Pre-allocated CUDA events reused across all kernels
   - Bias model parameter caching (uploaded once per query, not per batch)
   - Viterbi/Forward ReconfigLength caching in post-processing loops
 
-**Per-query profmark results** (in `benchmark-data/profmark-current/gpu-audit/multi-query-cpu1/`):
-- GPU vs 1-thread: every query faster, 0.96x–2.49x range per-query
-- GPU vs 4-thread: every query faster in aggregate; per-query varies
-
-**Key historical milestones (superseded runs in `benchmark-data/profmark-current/gpu-audit/`):**
-- overlap-final-cpu4 (2026-05-07): CPU-4 4.79s, GPU 2.50s, 1.92x (multi-query single-process)
-- overlap-final-cpu1 (2026-05-07): CPU-1 8.93s, GPU 2.13s, 4.19x (multi-query single-process)
-- ssv-default-full (2026-05-07, per-query invocation): CPU 9.58s, GPU 6.49s, 1.48x (inflated by per-process CUDA init)
+**Benchmark run**: `benchmark-data/profmark-current/gpu-audit/default-on-run/`
 
 ## GPU SSV Kernel (Default MSV Path, 2026-05-07)
 
@@ -102,7 +95,6 @@ The SSV kernel is the default GPU MSV path:
 
 ## Open Risks
 
-- Later-stage prefilters (Viterbi, Forward, FB parser) are parity-clean on checked samples but need broader validation before becoming default.
 - FB parser raw `p7X_SCALE` row diagnostics remain open (bounded posterior inputs are acceptable).
 
 ## Verification Guidance

@@ -96,11 +96,11 @@ parser.add_argument("--gpu-batch-res", default="8000000")
 parser.add_argument("--gpu-load-seqs", default="32768")
 parser.add_argument("--gpu-load-res", default="8000000")
 parser.add_argument("--gpu-msv-slack", default="0")
-parser.add_argument("--gpu-vit-prefilter", action="store_true")
+
 parser.add_argument("--gpu-vit-compare", action="store_true")
-parser.add_argument("--gpu-fwd-prefilter", action="store_true")
+
 parser.add_argument("--gpu-fwd-compare", action="store_true")
-parser.add_argument("--gpu-fb-parser", action="store_true")
+
 parser.add_argument("--gpu-fb-compare", action="store_true")
 parser.add_argument("--gpu-previt-compare", action="store_true")
 parser.add_argument("--gpu-vit-min-seqs", default="1")
@@ -177,18 +177,12 @@ gpu_cmd = [str(hmmsearch), "--gpu", "--cpu", "0",
            "--gpu-fwd-collect-seqs", args.gpu_fwd_collect_seqs,
            "--gpu-vit-collect-res", args.gpu_vit_collect_res,
            "--gpu-fwd-collect-res", args.gpu_fwd_collect_res]
-if args.gpu_fwd_prefilter:
-    gpu_cmd.append("--gpu-fwd-prefilter")
 if args.gpu_fwd_compare:
     gpu_cmd.append("--gpu-fwd-compare")
-if args.gpu_fb_parser:
-    gpu_cmd.append("--gpu-fb-parser")
 if args.gpu_fb_compare:
     gpu_cmd.append("--gpu-fb-compare")
 if args.gpu_previt_compare:
     gpu_cmd.append("--gpu-previt-compare")
-if args.gpu_vit_prefilter:
-    gpu_cmd.append("--gpu-vit-prefilter")
 if args.gpu_vit_compare:
     gpu_cmd.append("--gpu-vit-compare")
 if args.gpu_vit_largem:
