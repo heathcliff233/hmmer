@@ -1,6 +1,6 @@
 # GPU Support Progress
 
-Last updated: 2026-05-07 (fused SSV+null+bias+gate kernel with survivor-indexed D2H)
+Last updated: 2026-05-08 (survivor sort parity fix)
 
 ## Current State
 
@@ -65,20 +65,19 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 
 ## Benchmark Snapshot
 
-**Current best (2026-05-07):** Multi-query single-process benchmark (13 HMMs, 229K seqs, 97M residues)
+**Current best (2026-05-08):** Multi-query single-process benchmark (13 HMMs, 229K seqs, 97M residues)
 
 | Config | Wall time | vs CPU-1 | vs CPU-4 |
 |--------|-----------|----------|----------|
-| CPU 1-thread | 10.68s | 1.00x | — |
-| CPU 4-thread | 4.79s | — | 1.00x |
-| GPU (fused, all stages) | 1.23s | **8.68x** | **3.89x** |
-| GPU (legacy pipeline) | 1.49s | 7.17x | 3.21x |
+| CPU 1-thread | ~9.1s | 1.00x | — |
+| CPU 4-thread | ~4.8s | — | 1.00x |
+| GPU (fused, all stages) | ~1.34s | **~6.7x** | **~2.8x** |
 
 - Flags: `--gpu` (fused SSV+null+bias+gate kernel, all stages default-on)
 - Database: resident on GPU (229,290 seqs, 92.8 MB), gpudb v2 with embedded metadata
-- Hit parity: fused path agrees with legacy GPU path (zero diff); legacy vs CPU: `cpu_only=0`, `gpu_only=0`
+- Hit parity: **`cpu_only=0`, `gpu_only=0`** (exact GPU-vs-CPU parity, all 13 queries)
 - Benchmark: `test-speed/x-hmmsearch-gpu-profmark` (multi-query single-process mode)
-- GPU utilization: **87%** SM utilization during kernel execution (`nvidia-smi` sampled)
+- Note: wall times vary ±0.2s between runs due to CUDA init jitter; speedup range 6.2x–6.7x vs CPU-1
 - Key optimizations reaching current state:
   - **Fused SSV+null+bias+F1 kernel** — single launch replaces 5 separate kernels, eliminates inter-stage sync (246ms → 115ms `exact_other`)
   - **Survivor-indexed D2H** — transfers only nsurv×8 bytes (~32KB) instead of nseq×8 bytes (1.8MB); D2H: 28ms → 2.6ms

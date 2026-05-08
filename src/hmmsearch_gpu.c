@@ -1031,18 +1031,25 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
         }
       }
 
-      /* Sort survivors by sequence length to maximize ReconfigLength cache hits */
+      /* Sort survivors by sequence length to maximize ReconfigLength cache hits.
+       * Co-sort scores/statuses so survivor_idx[si] stays paired with surv_scores[si]. */
       {
         const int64_t *surv_L = search_chu->L;
         for (int a = 1; a < gpu_f1_nsurv; a++) {
-          int key = gpu_f1_survivor_idx[a];
-          int64_t keyL = surv_L[key];
+          int   key_idx    = gpu_f1_survivor_idx[a];
+          float key_score  = gpu_surv_scores[a];
+          int   key_status = gpu_surv_statuses[a];
+          int64_t keyL = surv_L[key_idx];
           int b = a - 1;
           while (b >= 0 && surv_L[gpu_f1_survivor_idx[b]] > keyL) {
             gpu_f1_survivor_idx[b+1] = gpu_f1_survivor_idx[b];
+            gpu_surv_scores[b+1]     = gpu_surv_scores[b];
+            gpu_surv_statuses[b+1]   = gpu_surv_statuses[b];
             b--;
           }
-          gpu_f1_survivor_idx[b+1] = key;
+          gpu_f1_survivor_idx[b+1] = key_idx;
+          gpu_surv_scores[b+1]     = key_score;
+          gpu_surv_statuses[b+1]   = key_status;
         }
       }
 

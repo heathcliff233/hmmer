@@ -1,6 +1,6 @@
 # GPU Timing Analysis
 
-Last updated: 2026-05-07 (fused SSV+null+bias+gate kernel with survivor-indexed D2H)
+Last updated: 2026-05-08 (survivor sort parity fix)
 
 ## Test Configuration
 
@@ -97,14 +97,13 @@ The dispatch block overlaps with GPU kernel time. Reducing dispatch overhead or 
 
 ## Comparison: GPU vs CPU
 
-Current benchmark (13 queries, 229K seqs, single-process, fused kernel, all GPU stages default-on):
+Current benchmark (13 queries, 229K seqs, single-process, fused kernel, all GPU stages default-on, **exact hit parity** cpu_only=0 gpu_only=0):
 
 | Config | Wall time | Speedup |
 |--------|-----------|---------|
-| CPU 1-thread | 10.68s | 1.00x |
-| CPU 4-thread | 4.79s | 2.23x |
-| GPU (fused, all stages) | 1.23s | **8.68x** vs CPU-1, **3.89x** vs CPU-4 |
-| GPU (legacy pipeline) | 1.49s | 7.17x vs CPU-1, 3.21x vs CPU-4 |
+| CPU 1-thread | ~9.1s | 1.00x |
+| CPU 4-thread | ~4.8s | ~1.9x |
+| GPU (fused, all stages) | ~1.34s | **~6.7x** vs CPU-1 |
 
-**Critical benchmark note**: The profmark runner was previously invoking hmmsearch once per query (13 separate processes), paying ~0.35s CUDA init each time = 4.55s pure overhead. This made GPU appear 0.6x vs CPU-4. The fix: `test-speed/x-hmmsearch-gpu-profmark` now concatenates all HMMs and runs a single hmmsearch process for CPU and GPU respectively, matching real multi-query usage.
+Note: wall times vary ±0.2s between runs due to CUDA init jitter. Per-query kernel sum is stable at ~0.75–0.80s.
 

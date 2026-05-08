@@ -1,6 +1,6 @@
 # GPU Support History (Condensed)
 
-Last updated: 2026-05-07
+Last updated: 2026-05-08
 
 Purpose: keep a compact record of major GPU attempts, outcomes, and rejected directions. Detailed “daybook” logs are intentionally removed.
 
@@ -151,3 +151,12 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
   - Hit parity: fused path agrees with legacy GPU path (zero diff). Known precision difference in in-kernel bias gate vs host-side bias causes ±3 survivor count difference per query (accepted: fused bias is length-correct, more accurate).
 - API change: `p7_cuda_SSVNullBiasGateResident()` and `p7_cuda_SSVNullBiasGateDsqdataChunk()` now output survivor-indexed `float *survivor_scores` and `int *survivor_statuses` instead of full-array `float *scores` and `int *statuses`.
 - Files: `src/cuda/p7_cuda_ssv.cu`, `src/cuda/p7_cuda_internal.h`, `src/cuda/p7_cuda_runtime.cu`, `src/cuda/p7_cuda.h`, `src/hmmsearch_gpu.c`.
+
+### 14) Survivor sort parity fix (2026-05-08)
+- Problem: `cpu_only=44` on profmark — 44 hits found by CPU but missed by GPU, including slam-dunk true positives (E=1.5e-39). The bug was introduced by commit ce86e5ac (fused SSV+null+bias+gate kernel with survivor-indexed D2H).
+- Root cause: the survivor length-sort in `hmmsearch_gpu.c` (insertion sort for ReconfigLength cache optimization) rearranged `gpu_f1_survivor_idx[]` but did NOT co-sort the parallel `gpu_surv_scores[]` and `gpu_surv_statuses[]` arrays. After sorting, survivor `si`'s index pointed to the correct sequence, but its score/status came from a different survivor. This caused correct-scoring hits to receive wrong (lower) scores and get filtered out at the pre-Viterbi boundary.
+- Why not caught earlier: the previous commit's parity comparison was "fused vs legacy GPU" (which uses per-sequence indexed scores, unaffected by the sort). The GPU-vs-CPU comparison was not checked at the same time.
+- Solution: 7-line fix — the insertion sort now co-moves all three parallel arrays (`idx`, `scores`, `statuses`) in lockstep.
+- Outcome: `cpu_only=0`, `gpu_only=0` on all 13 profmark queries. No speed regression (kernel time unchanged; slight increase in domain-def time from correctly processing 44 more hits).
+- Lesson: when parallel arrays are indexed by a compacted survivor position (not by sequence index), any reordering must co-sort all parallel arrays together.
+- Files: `src/hmmsearch_gpu.c` (survivor sort block).
