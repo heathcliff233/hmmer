@@ -33,7 +33,7 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 - **Reduce I/O overhead** ~~(0.258s, 10.5% of wall)~~: **DONE** — gpudb v2 embeds metadata; dsqdata is skipped entirely on the resident path. `io_read_unpack` dropped from 0.258s to 0.000s.
 
-- **GPU Forward kernel optimization** (0.243s, 9.9% of wall): Same strategies as Viterbi. Additional opportunity: kernel fusion with Backward (both traverse the same sequence), async overlap with CPU post-Fwd work.
+- **GPU Forward kernel optimization** ~~(0.243s, 9.9% of wall)~~: The prefix kernel (parallel prefix scan for DD recurrence) was extended from T≤512 to T≤1024, covering models up to M≈2044. Models with M≥1024 previously fell back to a 4-lane serial kernel (4/32 threads active); now they use the efficient prefix kernel with full warp utilization. For M=1500: 525ms → 42ms (**12.5x speedup**). For profmark models (M≤313), already used prefix kernel — no change. Remaining: kernel fusion with Backward, async overlap with CPU post-Fwd work.
 
 - **CPU domain definition** (0.162s, 6.6% of wall): `p7_domaindef_ByPosteriorHeuristics()` on ~15 sequences/query that pass Forward. Approaches: parallelize across survivors with thread pool, or eventually move posterior decoding to GPU (high complexity, deferred).
 
@@ -56,7 +56,7 @@ The fused SSV+null+bias+gate kernel (`src/cuda/p7_cuda_ssv.cu`) is now the defau
 - Resident database (whole-DB GPU upload, H2D reduced to ~0.02s)
 - Batched CPU bias pre-computation → superseded by double-precision GPU survivor kernel
 - SSV as default GPU MSV kernel (1.36x faster than monolithic MSV)
-- Viterbi M≤2048, Forward M≤1024, M>2048 tiling tier
+- Viterbi M≤2048, Forward M≤2044, M>2048 tiling tier
 - Survivor loop optimization (sort-by-length, ReconfigLength caching, CPU MSV fallback removed)
 - Pre-allocated CUDA events, bias parameter caching, redundant sync removal
 - Multi-query single-process profmark benchmark
@@ -69,6 +69,7 @@ The fused SSV+null+bias+gate kernel (`src/cuda/p7_cuda_ssv.cu`) is now the defau
 - Fused SSV+null+bias+F1 gate kernel (`cuda_ssv_null_bias_gate_kernel<STRIDE>`) — single launch replaces 5 kernels, inter-stage overhead −53%
 - Linear rbv layout (`d_rbv_lin[x * M + k]`) for coalesced fused-kernel inner-loop access
 - Survivor-indexed D2H — transfers only nsurv entries (~32KB) instead of full nseq arrays (1.8MB); D2H 28ms → 2.6ms
+- Forward prefix kernel extended to T≤1024 (M≤2044) with dynamic shared memory — large-model Forward 12.5x faster (525ms → 42ms for M=1500)
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.

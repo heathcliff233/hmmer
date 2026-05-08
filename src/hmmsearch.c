@@ -106,7 +106,7 @@ static ESL_OPTIONS options[] = {
   { "--gpu-load-res",   eslARG_INT, "8000000", NULL, "n>0", NULL, "--gpu", NULL,        "approximate target residues per dsqdata load chunk",           99 },
   { "--gpu-msv-slack", eslARG_REAL,  "0.0", NULL, "x>=0", NULL, "--gpu", NULL,           "experimental extra nats added to GPU MSV scores",              99 },
   { "--gpu-vit-largem", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,              "allow CUDA Viterbi prefilter on large models (M>2048)",        99 },
-  { "--gpu-fwd-largem", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,              "allow CUDA Forward prefilter on large models (M>1024)",        99 },
+  { "--gpu-fwd-largem", eslARG_NONE, FALSE, NULL, NULL, NULL, "--gpu", NULL,              "allow CUDA Forward prefilter on large models (M>2044)",        99 },
   { "--gpu-vit-min-seqs", eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Viterbi prefilter (0=auto)",   99 },
   { "--gpu-fwd-min-seqs", eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidates needed to launch CUDA Forward prefilter (0=auto)",   99 },
   { "--gpu-vit-min-res",  eslARG_INT, "0", NULL, "n>=0", NULL, "--gpu", NULL,              "minimum candidate residues needed for CUDA Viterbi prefilter (0=auto)", 99 },
@@ -551,6 +551,14 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
             if (esl_opt_GetBoolean(go, "--notextw") == FALSE)
               fprintf(ofp, "Database resident on GPU (%lld seqs, %.1f MB)\n",
                       (long long) gpudb->hdr.nseq, (double) dsq_size / (1024.0 * 1024.0));
+            /* Pre-allocate FB parser buffers to avoid first-use cudaMalloc latency */
+            {
+              int32_t max_L = 0;
+              int64_t si;
+              for (si = 0; si < (int64_t) gpudb->hdr.nseq; si++)
+                if (gpudb->lengths[si] > max_L) max_L = gpudb->lengths[si];
+              p7_cuda_engine_PreallocParser(info[0].cuda_engine, 64, (int) max_L, errbuf, sizeof(errbuf));
+            }
           }
         } else {
           for (i = 0; i < infocnt; ++i) info[i].gpudb = NULL;

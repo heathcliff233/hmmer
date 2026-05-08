@@ -542,9 +542,9 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   if (passed && engine->d_fwd_passed == NULL) {
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_fwd_passed, sizeof(int) * engine->fwd_result_alloc), errbuf, errbuf_size, "cudaMalloc(fwd passed)")) != eslOK) goto ERROR;
   }
-  if (cuom->Qf * 4 <= 1024) {
+  if (cuom->Qf * 4 <= 2048) {
     prefix_threads = next_pow2_at_least((cuom->Qf * 4 + 1) / 2, 32);
-    if (prefix_threads <= 512) use_prefix = TRUE;
+    if (prefix_threads <= 1024) use_prefix = TRUE;
   }
   shmem = use_prefix ? (sizeof(float) * ((size_t) cuom->Qf * 4 * 3 * 2 + (size_t) cuom->Qf * 4 + (size_t) prefix_threads * 2))
                      : (sizeof(float) * (size_t) cuom->Qf * 4 * 3 * 2);
@@ -584,6 +584,9 @@ p7_cuda_ForwardSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     int     *d_off_ptr = use_resident ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
     int     *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
     if (use_prefix) {
+      if (shmem > 49152) {
+        cudaFuncSetAttribute(cuda_forward_score_prefix_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem);
+      }
       cuda_forward_score_prefix_kernel<<<nidx, prefix_threads, shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
                                                       seqidx ? engine->d_fwd_seqidx : NULL, nidx,
                                                       cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,

@@ -1,6 +1,6 @@
 # GPU Support Progress
 
-Last updated: 2026-05-08 (survivor sort parity fix)
+Last updated: 2026-05-08 (Forward prefix kernel extended to M≤2044)
 
 ## Current State
 
@@ -15,7 +15,7 @@ Last updated: 2026-05-08 (survivor sort parity fix)
 - For post-Viterbi Forward prefilter in normal mode, F3 gating is now pure GPU decision; CPU Forward rerun at the F3 gray zone is retained only in compare/debug paths, not production gating.
 - GPU Viterbi uses a **templated** register-based warp-shuffle kernel (32 threads/sequence, one warp per block). Each thread owns a contiguous stripe of model nodes; cross-thread boundaries use `__shfl_up_sync`. The kernel is a C++ template parameterized on stride (compile-time constant), enabling `nvcc` to place `reg_M/D/I` arrays in true registers for stride≤24 (M≤768). For stride>24 (M>768, ≤2048), a non-templated large-stride fallback is used. Legacy shared-memory kernel retained as M>2048 fallback. Tiling strategy 4x larger than original (up to 4096 candidates/tile for small M) for better GPU occupancy.
 - The stats report now includes exact exclusive timing buckets (`Exact io_read_unpack`, `Exact gpu_h2d`, `Exact gpu_kernel`, `Exact gpu_d2h`, `Exact host_survivor_orchestration`, `Exact cpu_postfwd_domain_null2_output`, `Exact other`) plus `Exact delta_vs_wall`. Legacy `Stage *` and `CUDA *` lines are retained for continuity but can overlap by construction.
-- All GPU stages (SSV/MSV, Viterbi prefilter, Forward prefilter, FB parser) are enabled by default with `--gpu`. Debug compare flags and largem overrides remain available.
+- All GPU stages (SSV/MSV, Viterbi prefilter, Forward prefilter, FB parser) are enabled by default with `--gpu`. The Forward prefix kernel now supports models up to M≈2044 (T≤1024 threads) with `cudaFuncSetAttribute` for dynamic shared memory >48KB. Previously, models with M≥1024 fell back to a 4-lane kernel (only 4/32 threads active). The extension provides **12.5x Forward kernel speedup** for large models (M=1500: 525ms → 42ms). Debug compare flags and largem overrides remain available.
 - The Easel `dsqdata` chunk-sizing change is applied at build time from `patches/easel-dsqdata-open-sized.patch`; do not edit the Easel submodule in place for this work.
 
 ### Engine Reuse (Phase 1)
@@ -69,15 +69,15 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
 
 | Config | Wall time | vs CPU-1 | vs CPU-4 |
 |--------|-----------|----------|----------|
-| CPU 1-thread | ~9.1s | 1.00x | — |
+| CPU 1-thread | ~9.3s | 1.00x | — |
 | CPU 4-thread | ~4.8s | — | 1.00x |
-| GPU (fused, all stages) | ~1.34s | **~6.7x** | **~2.8x** |
+| GPU (fused, all stages) | ~1.27s | **~7.3x** | **~2.8x** |
 
 - Flags: `--gpu` (fused SSV+null+bias+gate kernel, all stages default-on)
 - Database: resident on GPU (229,290 seqs, 92.8 MB), gpudb v2 with embedded metadata
 - Hit parity: **`cpu_only=0`, `gpu_only=0`** (exact GPU-vs-CPU parity, all 13 queries)
 - Benchmark: `test-speed/x-hmmsearch-gpu-profmark` (multi-query single-process mode)
-- Note: wall times vary ±0.2s between runs due to CUDA init jitter; speedup range 6.2x–6.7x vs CPU-1
+- Note: wall times vary ±0.2s between runs due to CUDA init jitter; speedup range 6.6x–7.3x vs CPU-1
 - Key optimizations reaching current state:
   - **Fused SSV+null+bias+F1 kernel** — single launch replaces 5 separate kernels, eliminates inter-stage sync (246ms → 115ms `exact_other`)
   - **Survivor-indexed D2H** — transfers only nsurv×8 bytes (~32KB) instead of nseq×8 bytes (1.8MB); D2H: 28ms → 2.6ms
@@ -91,8 +91,9 @@ These remain intentionally CPU-side in the current Resident Survivor Core scope:
   - gpudb v2 embedded metadata eliminates dsqdata I/O entirely (~0.26s/query saved)
   - `madvise` hints (SEQUENTIAL for upload, RANDOM for metadata) on mmap'd gpudb
   - `cudaHostRegister` for DMA-accelerated initial GPU upload
+  - **Forward prefix kernel extended** to T≤1024 (M≤2044) — large-model Forward 12.5x faster (525ms → 42ms for M=1500)
 
-**Benchmark run**: `benchmark-data/profmark-current/gpu-audit/io-opt/`
+**Benchmark run**: `benchmark-data/profmark-current/gpu-audit/forward-prefix-opt-run2/`
 
 ## GPU SSV/Fused Kernel (Default MSV Path, 2026-05-07)
 

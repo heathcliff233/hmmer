@@ -98,8 +98,8 @@ agents_docs/       Detailed architecture documentation (see index below)
 The GPU path accelerates SSV/MSV + biased-composition filter + Viterbi + Forward in CUDA batches. Current state:
 
 - Default MSV path: **fused SSV+null+bias+F1 gate kernel** (`cuda_ssv_null_bias_gate_kernel<STRIDE>`) computes all pre-filter stages in a single kernel launch. Templated on STRIDE with linear rbv layout for coalesced access. Survivors compacted via atomicAdd with in-kernel float score output (D2H only ~32KB/batch vs 1.8MB). Supports both resident-database and chunk-based paths.
-- All GPU stages enabled by default with `--gpu`: fused SSV+null+bias+gate → Viterbi prefilter (M≤2048) → Forward prefilter (M≤1024) → FB parser
-- Latest all-13 profmark (multi-query single-process): **~6.7x vs CPU-1**, exact hit parity (`cpu_only=0`, `gpu_only=0`)
+- All GPU stages enabled by default with `--gpu`: fused SSV+null+bias+gate → Viterbi prefilter (M≤2048) → Forward prefilter (M≤2044) → FB parser
+- Latest all-13 profmark (multi-query single-process): **~7.3x vs CPU-1**, exact hit parity (`cpu_only=0`, `gpu_only=0`)
 - Survivor loop: sorted by sequence length (co-sorting scores/statuses) with ReconfigLength caching; CPU MSV fallback eliminated (double-precision GPU bias is authoritative)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
 - Sequence packing uses bulk `smem` copy (single memcpy of dsqdata's contiguous buffer) with L+1 offset spacing
@@ -121,7 +121,7 @@ These flags are not shown in `hmmsearch -h` output but are defined in `src/hmmse
 
 ```
 --gpu-vit-largem       Allow GPU Viterbi on large models M>2048 (requires --gpu)
---gpu-fwd-largem       Allow GPU Forward on large models M>1024 (requires --gpu)
+--gpu-fwd-largem       Allow GPU Forward on large models M>2044 (requires --gpu)
 --gpu-ssv-compare      Debug: compare SSV scores to monolithic MSV
 ```
 

@@ -823,7 +823,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
   int64_t  batch_res_cap = 0;
   double   t0;
   int      gpu_vit_active = info->gpu_vit_prefilter && (info->gpu_vit_largem || info->om->M <= 2048);
-  int      gpu_fwd_active = info->gpu_fwd_prefilter && (info->gpu_fwd_largem || info->om->M <= 1024);
+  int      gpu_fwd_active = info->gpu_fwd_prefilter && (info->gpu_fwd_largem || info->om->M <= 2044);
   int      gpu_strict_mode = !(info->gpu_vit_compare || info->gpu_fwd_compare || info->gpu_fb_compare || info->gpu_previt_compare || info->gpu_ssv_compare);
   int      vit_cmp_status_mismatch = 0;
   int      vit_cmp_pass_mismatch = 0;
