@@ -41,10 +41,12 @@ This is the live TODO for future GPU work. For detailed dated implementation his
 
 ### SSV/Fused kernel — future optimizations
 The fused SSV+null+bias+gate kernel (`src/cuda/p7_cuda_ssv.cu`) is now the default GPU MSV path. Remaining kernel-level optimization opportunities:
-- **Adaptive thread count**: current kernel uses 32 threads/block regardless of M. For small M (< 64), a single warp is sufficient; for large M (> 512), multiple warps with shared-memory partitioning could improve occupancy.
 - **Early termination**: since ~99.7% of sequences complete in the SSV fast-path, explore whether the SSV section can be further optimized (e.g., skip the warp reduction when the local max is clearly below threshold).
 - **Double-precision bias fusion**: integrate the survivor double-precision bias recompute directly into the fused kernel, eliminating the separate `cuda_bias_filter_survivors_kernel` launch.
 - **In-kernel null/bias precision**: current in-kernel bias uses float32 `expf`/`logf` which diverges slightly from the double-precision survivor recompute. Explore whether the survivor bias kernel can be eliminated entirely by computing exact-enough bias in the fused kernel.
+
+### Forward prefix kernel multi-group packing
+`cuda_forward_score_prefix_kernel` (`src/cuda/p7_cuda_forward.cu`) currently launches one sequence per block with `prefix_threads = next_pow2(Qf*4/2, 32)` (≤1024) cooperating on a block-wide parallel prefix scan. For short-M queries (M≈100–300, prefix_threads = 128–512), each block holds only 4–16 warps — well below the sm_89 48-warp/SM budget. Pack G sequences per block, each handled by its own group of T threads, with named-barrier (`bar.sync b, n`) group-scoped synchronization. Template the kernel on `GROUPS ∈ {1,2,4,8}`; auto-tune G from `cudaGetDeviceProperties` with shmem and thread-budget clamps; hidden flag `--gpu-fwd-groups` for override. Honest expectation: gain not guaranteed (the SSV/Viterbi packing was kernel-time neutral). Keep only if kernel time drops by ≥5% on the 13-query profmark; otherwise revert.
 
 ### Medium-priority work
 - Consider larger batch sizes (>32K seqs) to reduce per-batch CUDA API call count.
@@ -70,6 +72,7 @@ The fused SSV+null+bias+gate kernel (`src/cuda/p7_cuda_ssv.cu`) is now the defau
 - Linear rbv layout (`d_rbv_lin[x * M + k]`) for coalesced fused-kernel inner-loop access
 - Survivor-indexed D2H — transfers only nsurv entries (~32KB) instead of full nseq arrays (1.8MB); D2H 28ms → 2.6ms
 - Forward prefix kernel extended to T≤1024 (M≤2044) with dynamic shared memory — large-model Forward 12.5x faster (525ms → 42ms for M=1500)
+- Multi-warp-per-block for fused SSV and Viterbi opt kernels (templated on `(STRIDE, WARPS)`, one sequence per warp; W auto-tuned from `cudaGetDeviceProperties` with tie-break toward W=4 on sm_89; hidden `--gpu-ssv-warps` / `--gpu-vit-warps` for override). Infrastructure change — kernel time within noise of W=1 baseline on the current 13-query profmark because the warp-shuffle DP is already compute-saturated at W=1.
 
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.

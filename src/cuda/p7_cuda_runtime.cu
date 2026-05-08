@@ -311,3 +311,146 @@ p7_cuda_engine_IsResident(const P7_CUDA_ENGINE *engine)
 {
   return (engine && engine->resident_active) ? 1 : 0;
 }
+
+extern "C" int
+p7_cuda_engine_PreallocParser(P7_CUDA_ENGINE *engine, int max_nseq, int max_L,
+                               char *errbuf, int errbuf_size)
+{
+  size_t total_xcells;
+  int    status;
+
+  if (!engine || max_nseq <= 0 || max_L <= 0) return eslEINVAL;
+
+  cudaSetDevice(engine->device_id);
+
+  if (engine->parser_result_alloc < max_nseq) {
+    if (engine->d_parser_scores)    cudaFree(engine->d_parser_scores);
+    if (engine->d_parser_statuses)  cudaFree(engine->d_parser_statuses);
+    if (engine->d_parser_seqidx)    cudaFree(engine->d_parser_seqidx);
+    if (engine->d_parser_x_offsets) cudaFree(engine->d_parser_x_offsets);
+    engine->d_parser_scores    = NULL;
+    engine->d_parser_statuses  = NULL;
+    engine->d_parser_seqidx    = NULL;
+    engine->d_parser_x_offsets = NULL;
+    engine->parser_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_scores, sizeof(float) * 2 * max_nseq), errbuf, errbuf_size, "cudaMalloc(prealloc parser scores)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_statuses, sizeof(int) * 2 * max_nseq), errbuf, errbuf_size, "cudaMalloc(prealloc parser statuses)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_seqidx, sizeof(int) * max_nseq), errbuf, errbuf_size, "cudaMalloc(prealloc parser seqidx)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_x_offsets, sizeof(size_t) * max_nseq), errbuf, errbuf_size, "cudaMalloc(prealloc parser x_offsets)")) != eslOK) return status;
+    engine->parser_result_alloc = max_nseq;
+  }
+
+  total_xcells = (size_t) max_nseq * (size_t) (max_L + 1) * p7X_NXCELLS;
+  if (engine->parser_cell_alloc < total_xcells) {
+    if (engine->d_parser_xf) cudaFree(engine->d_parser_xf);
+    if (engine->d_parser_xb) cudaFree(engine->d_parser_xb);
+    engine->d_parser_xf = NULL;
+    engine->d_parser_xb = NULL;
+    engine->parser_allocL   = 0;
+    engine->parser_cell_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_xf, sizeof(float) * total_xcells), errbuf, errbuf_size, "cudaMalloc(prealloc parser xf)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_parser_xb, sizeof(float) * total_xcells), errbuf, errbuf_size, "cudaMalloc(prealloc parser xb)")) != eslOK) return status;
+    engine->parser_cell_alloc = total_xcells;
+  }
+
+  return eslOK;
+}
+
+/* ------------------------------------------------------------------
+ * Warps-per-block auto-tuner.
+ *
+ * Multi-warp-per-block kernels: each warp handles one sequence; blocks
+ * pack W warps. Block dim = 32*W. Per-block shmem = base + W*per_warp.
+ *
+ *   kernel_id = 0 : fused SSV+null+bias+gate
+ *                   base = 2*M (s_q/s_z lookup, shared across warps)
+ *                   per_warp = 0 (per-warp scratch is in registers / a few
+ *                                 padded shared bytes accounted in the
+ *                                 launch-site shmem calc; treat as 64B here)
+ *   kernel_id = 1 : Viterbi opt
+ *                   base = 2*M (s_q/s_z lookup)
+ *                   per_warp = 0 (state lives in registers)
+ *
+ * Picks the W in {1,2,3,4,6,8} that maximizes W * blocks_per_sm where
+ * blocks_per_sm = min(maxBlocksPerSM, maxThreadsPerSM/(32*W),
+ *                     sharedMemPerSM/per_block_shmem).
+ *
+ * If user_w > 0, returns user_w clamped to the supported set.
+ * ------------------------------------------------------------------ */
+extern "C" int
+p7_cuda_DefaultWarpsPerBlock(int device_id, int kernel_id,
+                             const P7_CUDA_MSVPROFILE *cuom, int user_w)
+{
+  static const int W_CHOICES[] = {1, 2, 3, 4, 6, 8};
+  static const int N_CHOICES   = (int) (sizeof(W_CHOICES) / sizeof(W_CHOICES[0]));
+
+  /* User override: clamp to supported set (round up to nearest). */
+  if (user_w > 0) {
+    int chosen = W_CHOICES[N_CHOICES - 1];
+    for (int i = 0; i < N_CHOICES; i++) {
+      if (W_CHOICES[i] >= user_w) { chosen = W_CHOICES[i]; break; }
+    }
+    return chosen;
+  }
+
+  if (!cuom) return 4;
+  int M = cuom->M;
+
+  /* Cache device props per device id. */
+  static int           cached_dev = -1;
+  static cudaDeviceProp cached_prop;
+  if (cached_dev != device_id) {
+    if (cudaGetDeviceProperties(&cached_prop, device_id) != cudaSuccess) {
+      /* Fall back to a sensible default if we can't query. */
+      return 4;
+    }
+    cached_dev = device_id;
+  }
+
+  size_t shmem_per_sm  = cached_prop.sharedMemPerMultiprocessor;
+  int    threads_per_sm = cached_prop.maxThreadsPerMultiProcessor;
+  int    max_blocks_sm  = cached_prop.maxBlocksPerMultiProcessor;
+  if (max_blocks_sm <= 0) max_blocks_sm = 32;  /* sm_89 reports 24; fallback */
+
+  /* Per-block shmem accounting differs by kernel:
+   *   SSV fused     : 2*M (s_q/s_z) + W*2*(M+1) (per-warp prev/curr fallback).
+   *   Viterbi opt   : 2*M (s_q/s_z), no per-warp shmem (state in registers).
+   * For more aggressive packing on Viterbi we ignore the prev/curr term. */
+  size_t base_bytes = (size_t) (2 * M);
+  size_t per_warp_bytes;
+  switch (kernel_id) {
+    case 0: per_warp_bytes = (size_t) 2 * (M + 1); break;
+    case 1: per_warp_bytes = 0; break;
+    default: per_warp_bytes = (size_t) 2 * (M + 1); break;
+  }
+
+  int best_w = 1;
+  int best_warps_resident = 0;
+  /* Empirically W=4 is the sweet spot on sm_89: bigger W reduces per-block
+   * launch overhead, but past 4 the per-block work gets too coarse and
+   * register pressure costs occupancy. Bias the tie-break toward W=4. */
+  const int W_PREFERRED = 4;
+  int best_distance = 1 << 20;
+
+  for (int i = 0; i < N_CHOICES; i++) {
+    int W = W_CHOICES[i];
+    size_t block_shmem = base_bytes + (size_t) W * per_warp_bytes;
+    if (block_shmem > shmem_per_sm) continue;
+    int by_blocks  = max_blocks_sm;
+    int by_threads = threads_per_sm / (32 * W);
+    int by_shmem   = (int) (shmem_per_sm / block_shmem);
+    int blocks_per_sm = by_blocks;
+    if (by_threads < blocks_per_sm) blocks_per_sm = by_threads;
+    if (by_shmem   < blocks_per_sm) blocks_per_sm = by_shmem;
+    if (blocks_per_sm <= 0) continue;
+    int warps_resident = blocks_per_sm * W;
+    int distance = (W >= W_PREFERRED) ? (W - W_PREFERRED) : (W_PREFERRED - W);
+    if (warps_resident > best_warps_resident ||
+        (warps_resident == best_warps_resident && distance < best_distance)) {
+      best_warps_resident = warps_resident;
+      best_distance = distance;
+      best_w = W;
+    }
+  }
+  return best_w;
+}

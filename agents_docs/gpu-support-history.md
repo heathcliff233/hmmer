@@ -1,6 +1,6 @@
 # GPU Support History (Condensed)
 
-Last updated: 2026-05-08
+Last updated: 2026-05-09
 
 Purpose: keep a compact record of major GPU attempts, outcomes, and rejected directions. Detailed “daybook” logs are intentionally removed.
 
@@ -160,3 +160,12 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - Outcome: `cpu_only=0`, `gpu_only=0` on all 13 profmark queries. No speed regression (kernel time unchanged; slight increase in domain-def time from correctly processing 44 more hits).
 - Lesson: when parallel arrays are indexed by a compacted survivor position (not by sequence index), any reordering must co-sort all parallel arrays together.
 - Files: `src/hmmsearch_gpu.c` (survivor sort block).
+
+### 15) Multi-warp-per-block for SSV + Viterbi opt kernels (2026-05-09)
+- Problem: every DP kernel launched as `<<<nseq, 32>>>` — one warp per block, one sequence per block. On sm_89 (RTX 4090, 48 warps/SM max) this caps at theoretical occupancy of 16 blocks/SM × 1 warp/block = 16 warps/SM = 33% of the 48-warp budget.
+- Solution: templatize `cuda_ssv_null_bias_gate_kernel` and `cuda_viterbi_opt_kernel` on `(STRIDE, WARPS)`. Each block packs `WARPS` warps of 32 threads, one sequence per warp. Block-shared `s_q`/`s_z` lookup table (read-only, depends only on the profile); per-warp `__shared__` arrays for `use_full_msv[WARPS]`; `__syncthreads()` retained only for the lookup-table prefill, all other barriers are `__syncwarp()` (warp-scoped). `__shfl_*_sync(0xffffffff, ...)` already warp-scoped — unchanged. `__launch_bounds__` clamped to ≤24 blocks/SM for sm_89.
+- Auto-tuner: `p7_cuda_DefaultWarpsPerBlock()` queries `cudaGetDeviceProperties` once, picks the W ∈ {1,2,3,4,6,8} maximizing resident warps per SM (with tie-break toward W=4, the empirical sweet spot on sm_89). Hidden flags `--gpu-ssv-warps` / `--gpu-vit-warps` for manual override.
+- Verification: `cpu_only=0 gpu_only=0` on the 13-query profmark; no `SSV_COMPARE_MISMATCH` lines at any W; `Exact delta_vs_wall [OK]`.
+- Outcome: aggregate speedup on the 13-query profmark held at ~7.3× vs CPU-1 — within run-to-run noise of the W=1 (old shape) baseline. Per-W wall-time medians (one query, 3 trials each): W=1 1.29s, W=2 1.29s, W=3 1.26s, W=4 1.24s, W=6 1.25s, W=8 1.39s. Per-kernel time totals across 13 queries are essentially flat between W=1 and W=4 (SSV ~0.355s, Viterbi ~0.20s, Forward ~0.18s).
+- Honest read: the warp-shuffle DP already saturates SM compute pipes at W=1 despite low theoretical occupancy. Multi-warp packing did not produce a measurable kernel-time win on this workload. Infrastructure retained because (a) it costs nothing on this workload (parity preserved, no slowdown), (b) it should help when M is large or batches are small enough that the SM is genuinely empty, and (c) the dispatch pattern is shared with future kernels.
+- Files: `src/cuda/p7_cuda_ssv.cu`, `src/cuda/p7_cuda_viterbi.cu`, `src/cuda/p7_cuda_runtime.cu`, `src/cuda/p7_cuda.h`, `src/cuda/p7_cuda_stub.c`, `src/hmmsearch.c`, `src/hmmsearch_internal.h`, `src/hmmsearch_gpu.c`.

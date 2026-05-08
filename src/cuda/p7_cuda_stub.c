@@ -183,6 +183,7 @@ int
 p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                   ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                   float *scores, int *statuses,
+                                  int warps_per_block,
                                   char *errbuf, int errbuf_size)
 {
   if (errbuf && errbuf_size > 0)
@@ -195,6 +196,7 @@ p7_cuda_ViterbiFilterDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROF
                                    ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                    const float *filtersc, double ev_mu, double ev_lambda, double F2,
                                    float *scores, int *statuses, int *passed,
+                                   int warps_per_block,
                                    char *errbuf, int errbuf_size)
 {
   if (errbuf && errbuf_size > 0)
@@ -257,4 +259,42 @@ p7_cuda_SSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   if (errbuf && errbuf_size > 0)
     snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
   return eslENOTFOUND;
+}
+
+int
+p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, int64_t dsq_size,
+                               const int64_t *offsets, const int32_t *lengths, int64_t nseq,
+                               char *errbuf, int errbuf_size)
+{
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+void
+p7_cuda_engine_ReleaseDatabase(P7_CUDA_ENGINE *engine)
+{
+  return;
+}
+
+int
+p7_cuda_engine_IsResident(const P7_CUDA_ENGINE *engine)
+{
+  return 0;
+}
+
+int
+p7_cuda_engine_PreallocParser(P7_CUDA_ENGINE *engine, int max_nseq, int max_L,
+                               char *errbuf, int errbuf_size)
+{
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
+p7_cuda_DefaultWarpsPerBlock(int device_id, int kernel_id,
+                             const P7_CUDA_MSVPROFILE *cuom, int user_w)
+{
+  return user_w > 0 ? user_w : 1;
 }

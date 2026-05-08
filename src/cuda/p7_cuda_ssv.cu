@@ -319,8 +319,8 @@ cuda_ssv_fused_kernel(const uint8_t *dsq, const int *offsets, const int *lengths
 
 #define SSV_FUSED_MAX_STRIDE 20  /* register-based fast path for M <= 640 */
 
-template <int STRIDE>
-__global__ __launch_bounds__(32, 16)
+template <int STRIDE, int WARPS>
+__global__ __launch_bounds__(32 * WARPS, ((1536) / (32 * WARPS) < 24 ? (1536) / (32 * WARPS) : 24))
 static void
 cuda_ssv_null_bias_gate_kernel(
     const uint8_t *dsq, const int *offsets, const int *lengths,
@@ -341,9 +341,16 @@ cuda_ssv_null_bias_gate_kernel(
     int *survivor_idx, int *survivor_counter,
     float *survivor_usc, int *survivor_status)
 {
+  /* Block layout: WARPS warps per block, one sequence per warp.
+   * Shared memory layout (extern):
+   *   [0 ..   2*M)            : s_q, s_z lookup (block-shared, written once)
+   *   [2*M .. 2*M + WARPS*2*(M+1)) : per-warp prev/curr buffers for the
+   *                                  full-MSV fallback path (rare).
+   */
   extern __shared__ uint8_t mem[];
-  int seq = blockIdx.x;
-  int tid = threadIdx.x;
+  int warp = threadIdx.x >> 5;
+  int lane = threadIdx.x & 31;
+  int seq  = blockIdx.x * WARPS + warp;
   if (seq >= nseq) return;
 
   const uint8_t *sdsq = dsq + offsets[seq];
@@ -351,21 +358,22 @@ cuda_ssv_null_bias_gate_kernel(
   uint8_t seq_tjb_b = tjb_by_seq[seq];
 
   int stride = (M + 31) / 32;
-  int my_start = tid * stride;
+  int my_start = lane * stride;
   int my_count = stride;
   if (my_start + my_count > M) my_count = M - my_start;
   if (my_count < 0) my_count = 0;
 
-  /* Precompute q/z lookup in shared memory (only needed for MSV fallback) */
+  /* Precompute q/z lookup in shared memory (only needed for MSV fallback).
+   * Block-wide cooperative prefill so all warps share the table. */
   uint8_t *s_q = mem;
   uint8_t *s_z = mem + M;
-  for (int k = tid; k < M; k += 32) {
+  for (int k = threadIdx.x; k < M; k += 32 * WARPS) {
     s_q[k] = (uint8_t)(k % Q);
     s_z[k] = (uint8_t)(k / Q);
   }
   __syncthreads();
 
-  __shared__ int use_full_msv;
+  __shared__ int use_full_msv[WARPS];
   int raw_result = 0;
   int overflow_result = 0;
 
@@ -378,8 +386,8 @@ cuda_ssv_null_bias_gate_kernel(
     #pragma unroll
     for (int j = 0; j < STRIDE; j++) prev_reg[j] = 0;
 
-    if (tid == 0) {
-      use_full_msv = 0;
+    if (lane == 0) {
+      use_full_msv[warp] = 0;
     }
 
     uint8_t last_prev = 0;
@@ -387,7 +395,7 @@ cuda_ssv_null_bias_gate_kernel(
     for (int i = 1; i <= L; i++) {
       uint8_t x = sdsq[i];
       uint8_t from_left = __shfl_up_sync(0xffffffff, last_prev, 1);
-      if (tid == 0) from_left = 0;
+      if (lane == 0) from_left = 0;
 
       const uint8_t *rsc_row = rbv_lin + (int)x * M;
       for (int j = 0; j < my_count; j++) {
@@ -411,11 +419,11 @@ cuda_ssv_null_bias_gate_kernel(
       if (other > xE_local) xE_local = other;
     }
 
-    if (tid == 0) {
+    if (lane == 0) {
       int shifted_xE = (int) xE_local - (int) base_b + (int) seq_tjb_b + (int) tbm_b + 128;
       if (shifted_xE >= 255 - (int) bias_b) {
         if ((int) base_b - (int) seq_tjb_b - (int) tbm_b < 128) {
-          use_full_msv = 1;
+          use_full_msv[warp] = 1;
         } else {
           raw_result = 0;
           overflow_result = 1;
@@ -426,25 +434,27 @@ cuda_ssv_null_bias_gate_kernel(
       } else {
         int xJ = (int) xE_local - (int) tec_b;
         if (xJ > (int) base_b) {
-          use_full_msv = 1;
+          use_full_msv[warp] = 1;
         } else {
           raw_result = xJ;
           overflow_result = 0;
         }
       }
     }
-    __syncthreads();
-    if (!use_full_msv) goto SSV_DONE;
+    __syncwarp();
+    if (!use_full_msv[warp]) goto SSV_DONE;
   }
 
   /* Full MSV fallback (shared-memory path for ~0.3% of sequences or stride > STRIDE) */
   {
-    uint8_t *prev = mem;
+    /* Per-warp prev/curr buffers, placed after the shared s_q/s_z table. */
+    uint8_t *warp_mem = mem + 2 * M + warp * 2 * (M + 1);
+    uint8_t *prev = warp_mem;
     uint8_t *curr = prev + M + 1;
 
-    for (int k = tid; k <= M; k += 32) prev[k] = 0;
-    if (tid == 0) overflow_result = 0;
-    __syncthreads();
+    for (int k = lane; k <= M; k += 32) prev[k] = 0;
+    if (lane == 0) overflow_result = 0;
+    __syncwarp();
 
     uint8_t xJ = 0;
     uint8_t tjbm_b = (uint8_t)(seq_tjb_b + tbm_b);
@@ -454,7 +464,7 @@ cuda_ssv_null_bias_gate_kernel(
       uint8_t xE_pos = 0;
       uint8_t x = sdsq[i];
 
-      for (int k = tid + 1; k <= M; k += 32) {
+      for (int k = lane + 1; k <= M; k += 32) {
         int km1 = k - 1;
         int q   = km1 % Q;
         int z   = km1 / Q;
@@ -466,41 +476,39 @@ cuda_ssv_null_bias_gate_kernel(
         if (v > xE_pos) xE_pos = v;
         if (u8_add_sat(v, bias_b) == 255) overflow_result = 1;
       }
-      if (tid == 0) curr[0] = 0;
-      __syncthreads();
+      if (lane == 0) curr[0] = 0;
+      __syncwarp();
 
       for (int s = 16; s > 0; s >>= 1) {
         uint8_t other = __shfl_down_sync(0xffffffff, xE_pos, s);
         if (other > xE_pos) xE_pos = other;
       }
-      __shared__ uint8_t xE_shared;
-      if (tid == 0) xE_shared = u8_sub_sat(xE_pos, tec_b);
-      __syncthreads();
+      uint8_t xE_after = u8_sub_sat(xE_pos, tec_b);   /* valid on lane 0; only used by lane 0 */
 
-      if (tid == 0) {
-        if (xE_shared > xJ) xJ = xE_shared;
+      if (lane == 0) {
+        if (xE_after > xJ) xJ = xE_after;
         uint8_t maxBJ = (base_b > xJ) ? base_b : xJ;
         xB = u8_sub_sat(maxBJ, tjbm_b);
       }
-      __syncthreads();
+      __syncwarp();
 
       uint8_t *tmp = prev;
       prev = curr;
       curr = tmp;
     }
 
-    if (tid == 0) raw_result = (int) xJ;
+    if (lane == 0) raw_result = (int) xJ;
   }
 
 SSV_DONE:
   /* Store raw SSV results (needed for --gpu-ssv-compare and downstream stats) */
-  if (tid == 0) {
+  if (lane == 0) {
     raw_sc[seq] = raw_result;
     overflow_out[seq] = overflow_result;
   }
 
-  /* ---- Null + Bias + F1 Gate (thread 0 only) ---- */
-  if (tid == 0) {
+  /* ---- Null + Bias + F1 Gate (lane 0 of each warp only) ---- */
+  if (lane == 0) {
     /* Step 2: Null score */
     float nullsc;
     if (L <= 0) {
@@ -577,9 +585,11 @@ SSV_DONE:
   }
 }
 
-/* Dispatch macro for fused kernel template instantiation */
-#define SSV_FUSED_LAUNCH(STRIDE_VAL) \
-  cuda_ssv_null_bias_gate_kernel<STRIDE_VAL><<<nseq, P7_CUDA_MSV_BLOCK_THREADS, shmem>>>( \
+/* Dispatch macro for fused kernel template instantiation.
+ * Block dim = 32*WARPS_VAL (one warp = one sequence).
+ * Grid    = ceil(nseq / WARPS_VAL). */
+#define SSV_FUSED_LAUNCH(STRIDE_VAL, WARPS_VAL) \
+  cuda_ssv_null_bias_gate_kernel<STRIDE_VAL, WARPS_VAL><<<(nseq + (WARPS_VAL) - 1) / (WARPS_VAL), 32 * (WARPS_VAL), shmem>>>( \
     d_dsq_ptr, d_off_ptr, d_len_ptr, d_tjb_ptr, nseq, \
     cuom->d_rbv, cuom->d_rbv_lin, cuom->M, cuom->Q, cuom->Kp, \
     cuom->tbm_b, cuom->tec_b, cuom->tjb_b, \
@@ -592,6 +602,32 @@ SSV_DONE:
     engine->d_f1_survivor_idx, engine->d_f1_counter, \
     engine->d_f1_survivor_usc, engine->d_f1_survivor_status)
 
+/* 2D switch: one branch per (STRIDE, WARPS) value pair. */
+#define SSV_FUSED_DISPATCH_STRIDES(WARPS_VAL) \
+  switch (stride) { \
+    case  1: SSV_FUSED_LAUNCH( 1, WARPS_VAL); break; \
+    case  2: SSV_FUSED_LAUNCH( 2, WARPS_VAL); break; \
+    case  3: SSV_FUSED_LAUNCH( 3, WARPS_VAL); break; \
+    case  4: SSV_FUSED_LAUNCH( 4, WARPS_VAL); break; \
+    case  5: SSV_FUSED_LAUNCH( 5, WARPS_VAL); break; \
+    case  6: SSV_FUSED_LAUNCH( 6, WARPS_VAL); break; \
+    case  7: SSV_FUSED_LAUNCH( 7, WARPS_VAL); break; \
+    case  8: SSV_FUSED_LAUNCH( 8, WARPS_VAL); break; \
+    case  9: SSV_FUSED_LAUNCH( 9, WARPS_VAL); break; \
+    case 10: SSV_FUSED_LAUNCH(10, WARPS_VAL); break; \
+    case 11: SSV_FUSED_LAUNCH(11, WARPS_VAL); break; \
+    case 12: SSV_FUSED_LAUNCH(12, WARPS_VAL); break; \
+    case 13: SSV_FUSED_LAUNCH(13, WARPS_VAL); break; \
+    case 14: SSV_FUSED_LAUNCH(14, WARPS_VAL); break; \
+    case 15: SSV_FUSED_LAUNCH(15, WARPS_VAL); break; \
+    case 16: SSV_FUSED_LAUNCH(16, WARPS_VAL); break; \
+    case 17: SSV_FUSED_LAUNCH(17, WARPS_VAL); break; \
+    case 18: SSV_FUSED_LAUNCH(18, WARPS_VAL); break; \
+    case 19: SSV_FUSED_LAUNCH(19, WARPS_VAL); break; \
+    case 20: SSV_FUSED_LAUNCH(20, WARPS_VAL); break; \
+    default: SSV_FUSED_LAUNCH(20, WARPS_VAL); break; \
+  }
+
 extern "C" int
 p7_cuda_SSVNullBiasGateResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                 const P7_BG *bg, int64_t seq0, int nseq, int do_biasfilter,
@@ -599,11 +635,15 @@ p7_cuda_SSVNullBiasGateResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE
                                 int *survivor_idx, int *ret_nsurv,
                                 float *nullsc, float *filtersc,
                                 float *survivor_scores, int *survivor_statuses,
+                                int warps_per_block,
                                 char *errbuf, int errbuf_size)
 {
   int        status = eslOK;
   uint8_t   *h_tjb_by_seq = NULL;
-  size_t     shmem = (size_t) (cuom->M + 1) * 2;
+  int        WARPS = warps_per_block;
+  /* Per-block shmem: 2*M for the block-shared s_q/s_z lookup +
+   *                  WARPS*2*(M+1) for per-warp prev/curr in the rare full-MSV fallback. */
+  size_t     shmem;
   cudaEvent_t h2d0 = engine->evt_h2d0, h2d1 = engine->evt_h2d1;
   cudaEvent_t k0 = engine->evt_k0, k1 = engine->evt_k1;
   cudaEvent_t d2h0 = engine->evt_d2h0, d2h1 = engine->evt_d2h1;
@@ -615,9 +655,18 @@ p7_cuda_SSVNullBiasGateResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE
   if (!engine->resident_active) return eslEINVAL;
   if (nseq <= 0) { *ret_nsurv = 0; return eslOK; }
   if (seq0 < 0 || seq0 + nseq > engine->resident_nseq) return eslEINVAL;
+  if (WARPS != 1 && WARPS != 2 && WARPS != 3 && WARPS != 4 && WARPS != 6 && WARPS != 8) WARPS = 4;
+  shmem = (size_t) (2 * cuom->M) + (size_t) WARPS * 2 * (cuom->M + 1);
   if (shmem > 96 * 1024) {
-    if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA SSV fused profile M=%d exceeds shared-memory limit", cuom->M);
-    return eslERANGE;
+    /* Drop W until it fits, falling back to W=1 if even that's too big. */
+    while (WARPS > 1 && shmem > 96 * 1024) {
+      WARPS = (WARPS == 8 ? 6 : (WARPS == 6 ? 4 : (WARPS == 4 ? 3 : (WARPS == 3 ? 2 : 1))));
+      shmem = (size_t) (2 * cuom->M) + (size_t) WARPS * 2 * (cuom->M + 1);
+    }
+    if (shmem > 96 * 1024) {
+      if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA SSV fused profile M=%d exceeds shared-memory limit", cuom->M);
+      return eslERANGE;
+    }
   }
 
   ht0 = host_seconds();
@@ -717,37 +766,34 @@ p7_cuda_SSVNullBiasGateResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE
   engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   cudaEventRecord(h2d1);
 
-  /* Launch fused kernel with STRIDE dispatch */
+  /* Launch fused kernel with (STRIDE, WARPS) dispatch */
   {
     const uint8_t *d_dsq_ptr = engine->d_resident_dsq;
     const int     *d_off_ptr = engine->d_resident_offsets + seq0;
     const int     *d_len_ptr = engine->d_resident_lengths + seq0;
     const uint8_t *d_tjb_ptr = engine->d_tjb_by_seq;
     int stride = (cuom->M + 31) / 32;
+    /* Some kernels with W*WARP*WARPS large dynamic shmem need explicit opt-in on Ada */
+    if (shmem > 48 * 1024) {
+      switch (WARPS) {
+        case 1: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 2: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 3: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 3>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 4: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 4>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 6: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 6>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 8: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 8>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+      }
+    }
 
     cudaEventRecord(k0);
-    switch (stride) {
-      case  1: SSV_FUSED_LAUNCH(1);  break;
-      case  2: SSV_FUSED_LAUNCH(2);  break;
-      case  3: SSV_FUSED_LAUNCH(3);  break;
-      case  4: SSV_FUSED_LAUNCH(4);  break;
-      case  5: SSV_FUSED_LAUNCH(5);  break;
-      case  6: SSV_FUSED_LAUNCH(6);  break;
-      case  7: SSV_FUSED_LAUNCH(7);  break;
-      case  8: SSV_FUSED_LAUNCH(8);  break;
-      case  9: SSV_FUSED_LAUNCH(9);  break;
-      case 10: SSV_FUSED_LAUNCH(10); break;
-      case 11: SSV_FUSED_LAUNCH(11); break;
-      case 12: SSV_FUSED_LAUNCH(12); break;
-      case 13: SSV_FUSED_LAUNCH(13); break;
-      case 14: SSV_FUSED_LAUNCH(14); break;
-      case 15: SSV_FUSED_LAUNCH(15); break;
-      case 16: SSV_FUSED_LAUNCH(16); break;
-      case 17: SSV_FUSED_LAUNCH(17); break;
-      case 18: SSV_FUSED_LAUNCH(18); break;
-      case 19: SSV_FUSED_LAUNCH(19); break;
-      case 20: SSV_FUSED_LAUNCH(20); break;
-      default: SSV_FUSED_LAUNCH(20); break;  /* fallback uses shared-mem path inside kernel */
+    switch (WARPS) {
+      case 1: SSV_FUSED_DISPATCH_STRIDES(1); break;
+      case 2: SSV_FUSED_DISPATCH_STRIDES(2); break;
+      case 3: SSV_FUSED_DISPATCH_STRIDES(3); break;
+      case 4: SSV_FUSED_DISPATCH_STRIDES(4); break;
+      case 6: SSV_FUSED_DISPATCH_STRIDES(6); break;
+      case 8: SSV_FUSED_DISPATCH_STRIDES(8); break;
+      default: SSV_FUSED_DISPATCH_STRIDES(4); break;
     }
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_null_bias_gate_kernel launch")) != eslOK) goto CUDA_ERROR;
     cudaEventRecord(k1);
@@ -800,6 +846,7 @@ p7_cuda_SSVNullBiasGateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPRO
                                     int *survivor_idx, int *ret_nsurv,
                                     float *nullsc, float *filtersc,
                                     float *survivor_scores, int *survivor_statuses,
+                                    int warps_per_block,
                                     char *errbuf, int errbuf_size)
 {
   int        status = eslOK;
@@ -808,7 +855,8 @@ p7_cuda_SSVNullBiasGateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPRO
   int       *h_offsets = NULL;
   int       *h_lengths = NULL;
   uint8_t   *h_tjb_by_seq = NULL;
-  size_t     shmem = (size_t) (cuom->M + 1) * 2;
+  int        WARPS = warps_per_block;
+  size_t     shmem;
   cudaEvent_t h2d0 = engine->evt_h2d0, h2d1 = engine->evt_h2d1;
   cudaEvent_t k0 = engine->evt_k0, k1 = engine->evt_k1;
   cudaEvent_t d2h0 = engine->evt_d2h0, d2h1 = engine->evt_d2h1;
@@ -819,9 +867,17 @@ p7_cuda_SSVNullBiasGateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPRO
   if (!engine || !cuom || !bg || !chu || !survivor_idx || !ret_nsurv) return eslEINVAL;
   nseq = chu->N;
   if (nseq <= 0) { *ret_nsurv = 0; return eslOK; }
+  if (WARPS != 1 && WARPS != 2 && WARPS != 3 && WARPS != 4 && WARPS != 6 && WARPS != 8) WARPS = 4;
+  shmem = (size_t) (2 * cuom->M) + (size_t) WARPS * 2 * (cuom->M + 1);
   if (shmem > 96 * 1024) {
-    if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA SSV fused profile M=%d exceeds shared-memory limit", cuom->M);
-    return eslERANGE;
+    while (WARPS > 1 && shmem > 96 * 1024) {
+      WARPS = (WARPS == 8 ? 6 : (WARPS == 6 ? 4 : (WARPS == 4 ? 3 : (WARPS == 3 ? 2 : 1))));
+      shmem = (size_t) (2 * cuom->M) + (size_t) WARPS * 2 * (cuom->M + 1);
+    }
+    if (shmem > 96 * 1024) {
+      if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA SSV fused profile M=%d exceeds shared-memory limit", cuom->M);
+      return eslERANGE;
+    }
   }
 
   ht0 = host_seconds();
@@ -947,37 +1003,33 @@ p7_cuda_SSVNullBiasGateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPRO
   engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   cudaEventRecord(h2d1);
 
-  /* Launch fused kernel with STRIDE dispatch */
+  /* Launch fused kernel with (STRIDE, WARPS) dispatch */
   {
     const uint8_t *d_dsq_ptr = engine->d_dsq;
     const int     *d_off_ptr = engine->d_offsets;
     const int     *d_len_ptr = engine->d_lengths;
     const uint8_t *d_tjb_ptr = engine->d_tjb_by_seq;
     int stride = (cuom->M + 31) / 32;
+    if (shmem > 48 * 1024) {
+      switch (WARPS) {
+        case 1: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 2: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 3: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 3>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 4: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 4>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 6: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 6>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 8: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 8>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+      }
+    }
 
     cudaEventRecord(k0);
-    switch (stride) {
-      case  1: SSV_FUSED_LAUNCH(1);  break;
-      case  2: SSV_FUSED_LAUNCH(2);  break;
-      case  3: SSV_FUSED_LAUNCH(3);  break;
-      case  4: SSV_FUSED_LAUNCH(4);  break;
-      case  5: SSV_FUSED_LAUNCH(5);  break;
-      case  6: SSV_FUSED_LAUNCH(6);  break;
-      case  7: SSV_FUSED_LAUNCH(7);  break;
-      case  8: SSV_FUSED_LAUNCH(8);  break;
-      case  9: SSV_FUSED_LAUNCH(9);  break;
-      case 10: SSV_FUSED_LAUNCH(10); break;
-      case 11: SSV_FUSED_LAUNCH(11); break;
-      case 12: SSV_FUSED_LAUNCH(12); break;
-      case 13: SSV_FUSED_LAUNCH(13); break;
-      case 14: SSV_FUSED_LAUNCH(14); break;
-      case 15: SSV_FUSED_LAUNCH(15); break;
-      case 16: SSV_FUSED_LAUNCH(16); break;
-      case 17: SSV_FUSED_LAUNCH(17); break;
-      case 18: SSV_FUSED_LAUNCH(18); break;
-      case 19: SSV_FUSED_LAUNCH(19); break;
-      case 20: SSV_FUSED_LAUNCH(20); break;
-      default: SSV_FUSED_LAUNCH(20); break;
+    switch (WARPS) {
+      case 1: SSV_FUSED_DISPATCH_STRIDES(1); break;
+      case 2: SSV_FUSED_DISPATCH_STRIDES(2); break;
+      case 3: SSV_FUSED_DISPATCH_STRIDES(3); break;
+      case 4: SSV_FUSED_DISPATCH_STRIDES(4); break;
+      case 6: SSV_FUSED_DISPATCH_STRIDES(6); break;
+      case 8: SSV_FUSED_DISPATCH_STRIDES(8); break;
+      default: SSV_FUSED_DISPATCH_STRIDES(4); break;
     }
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_null_bias_gate_kernel launch")) != eslOK) goto CUDA_ERROR;
     cudaEventRecord(k1);

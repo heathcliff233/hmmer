@@ -928,6 +928,10 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
       if (!info->gpu_legacy_pipeline && !info->gpu_ssv_compare) {
         gpu_processed_n = (n_targetseqs == -1) ? search_chu->N : ESL_MIN(search_chu->N, n_targetseqs - seq_cnt);
 
+        int ssv_warps = p7_cuda_DefaultWarpsPerBlock(0, /*kernel_id=*/0,
+                                                     info->cuda_msv,
+                                                     info->gpu_ssv_warps);
+
         t0 = hmmsearch_WallTime();
         if (p7_cuda_engine_IsResident(info->cuda_engine))
           status = p7_cuda_SSVNullBiasGateResident(info->cuda_engine, info->cuda_msv, info->bg,
@@ -935,6 +939,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                      info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA], info->pli->F1,
                      gpu_f1_survivor_idx, &gpu_f1_nsurv,
                      gpu_nullsc, gpu_filtersc, gpu_surv_scores, gpu_surv_statuses,
+                     ssv_warps,
                      errbuf, sizeof(errbuf));
         else
           status = p7_cuda_SSVNullBiasGateDsqdataChunk(info->cuda_engine, info->cuda_msv, info->bg,
@@ -942,6 +947,7 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
                      info->om->evparam[p7_MMU], info->om->evparam[p7_MLAMBDA], info->pli->F1,
                      gpu_f1_survivor_idx, &gpu_f1_nsurv,
                      gpu_nullsc, gpu_filtersc, gpu_surv_scores, gpu_surv_statuses,
+                     ssv_warps,
                      errbuf, sizeof(errbuf));
         info->pli->time_msv += hmmsearch_WallTime() - t0;
         if (status != eslOK) p7_Fail("--gpu fused SSV+null+bias+gate failed: %s\n", errbuf);
@@ -1205,12 +1211,16 @@ hmmsearch_gpu_serial_loop(WORKER_INFO *info, ESL_DSQDATA *dd, int n_targetseqs)
             vit_launch_res = 0;
             for (t = 0; t < vit_launch_n; t++) vit_launch_res += (int) search_chu->L[gpu_vit_idx[vit_off + t]];
             info->pli->gpu_vit_launches++;
+            int vit_warps = p7_cuda_DefaultWarpsPerBlock(0, /*kernel_id=*/1,
+                                                        info->cuda_msv,
+                                                        info->gpu_vit_warps);
             t0 = hmmsearch_WallTime();
             status = p7_cuda_ViterbiFilterDsqdataSubset(info->cuda_engine, info->cuda_msv, search_chu,
                                                         gpu_vit_idx + vit_off, vit_launch_n, gpu_vit_filtersc_subset + vit_off,
                                                         info->om->evparam[p7_VMU], info->om->evparam[p7_VLAMBDA], info->pli->F2,
                                                         info->gpu_vit_compare ? (gpu_vit_scores + vit_off) : NULL,
                                                         gpu_vit_statuses + vit_off, gpu_vit_passed + vit_off,
+                                                        vit_warps,
                                                         errbuf, sizeof(errbuf));
             info->pli->time_vit += hmmsearch_WallTime() - t0;
             if (status != eslOK) p7_Fail("--gpu requested, but CUDA Viterbi failed: %s\n", errbuf);

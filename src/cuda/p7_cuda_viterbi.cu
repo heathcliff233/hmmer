@@ -53,7 +53,7 @@ vit_twv_idx(int t, int q, int lane, int Q)
  * local memory (stack). A dispatch switch selects the right instantiation.
  * ========================================================================= */
 
-template <int STRIDE>
+template <int STRIDE, int WARPS>
 __global__ static void
 cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
                         const int *seqidx, int nidx,
@@ -63,9 +63,22 @@ cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
                         float scale_w, int16_t base_w, int16_t ddbound_w, float nj,
                         float *scores, int *statuses)
 {
+  /* Block layout: WARPS warps per block, one sequence per warp.
+   * Shared memory layout: [0 .. 2*M) = block-shared s_q, s_z lookup. */
   extern __shared__ uint8_t vit_opt_mem[];
-  int tid = threadIdx.x;
-  int seq = blockIdx.x;
+  int warp = threadIdx.x >> 5;
+  int lane = threadIdx.x & 31;
+  int seq  = blockIdx.x * WARPS + warp;
+
+  /* Block-wide cooperative s_q/s_z prefill — all warps participate before early-return. */
+  uint8_t *s_q = vit_opt_mem;
+  uint8_t *s_z = vit_opt_mem + M;
+  for (int k = threadIdx.x; k < M; k += 32 * WARPS) {
+    s_q[k] = (uint8_t)(k % Q);
+    s_z[k] = (uint8_t)(k / Q);
+  }
+  __syncthreads();
+
   if (seq >= nidx) return;
 
   int si = seqidx ? seqidx[seq] : seq;
@@ -73,18 +86,10 @@ cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
   const uint8_t *s = dsq + offsets[si];
 
   int stride = (M + 31) / 32;
-  int my_start = tid * stride;
+  int my_start = lane * stride;
   int my_count = stride;
   if (my_start + my_count > M) my_count = M - my_start;
   if (my_count < 0) my_count = 0;
-
-  uint8_t *s_q = vit_opt_mem;
-  uint8_t *s_z = vit_opt_mem + M;
-  for (int k = tid; k < M; k += 32) {
-    s_q[k] = (uint8_t)(k % Q);
-    s_z[k] = (uint8_t)(k / Q);
-  }
-  __syncthreads();
 
   int16_t reg_M[STRIDE];
   int16_t reg_D[STRIDE];
@@ -110,7 +115,7 @@ cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
     int16_t km1_M = (int16_t) __shfl_up_sync(0xffffffff, (int) last_M, 1);
     int16_t km1_D = (int16_t) __shfl_up_sync(0xffffffff, (int) last_D, 1);
     int16_t km1_I = (int16_t) __shfl_up_sync(0xffffffff, (int) last_I, 1);
-    if (tid == 0) { km1_M = -32768; km1_D = -32768; km1_I = -32768; }
+    if (lane == 0) { km1_M = -32768; km1_D = -32768; km1_I = -32768; }
 
     int16_t dcv = -32768;
     int16_t xE_local = -32768;
@@ -153,7 +158,7 @@ cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
       o = __shfl_down_sync(0xffffffff, dmaxi, off); if (o > dmaxi) dmaxi = o;
     }
 
-    if (tid == 0) {
+    if (lane == 0) {
       int16_t xE = (int16_t) xEi;
       if (xE >= 32767) vit_overflow = 1;
       xN = i16_add_sat(xN, xw_n_loop);
@@ -172,7 +177,7 @@ cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
     int xB_bcast = __shfl_sync(0xffffffff, (int) xB, 0);
     if (dmax_all + (int) ddbound_w > xB_bcast) {
       int16_t from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) dcv, 1);
-      if (tid == 0) from_dcv = -32768;
+      if (lane == 0) from_dcv = -32768;
       #pragma unroll
       for (int j = 0; j < STRIDE; j++) {
         if (j >= my_count) break;
@@ -184,7 +189,7 @@ cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
       int any_improved;
       do {
         from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) from_dcv, 1);
-        if (tid == 0) from_dcv = -32768;
+        if (lane == 0) from_dcv = -32768;
         int improved = 0;
         #pragma unroll
         for (int j = 0; j < STRIDE; j++) {
@@ -198,12 +203,12 @@ cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
       } while (any_improved);
     } else {
       int16_t from_dcv = (int16_t) __shfl_up_sync(0xffffffff, (int) dcv, 1);
-      if (tid == 0) from_dcv = -32768;
+      if (lane == 0) from_dcv = -32768;
       if (my_count > 0 && from_dcv > reg_D[0]) reg_D[0] = from_dcv;
     }
   }
 
-  if (tid == 0) {
+  if (lane == 0) {
     if (vit_overflow) {
       scores[seq] = eslINFINITY;
       statuses[seq] = eslERANGE;
@@ -214,15 +219,33 @@ cuda_viterbi_opt_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
   }
 }
 
-/* Dispatch helper: select the right stride instantiation at runtime */
-#define VIT_OPT_LAUNCH(STRIDE_VAL)                                             \
-  cuda_viterbi_opt_kernel<STRIDE_VAL><<<nidx, 32, opt_shmem>>>(                \
+/* Dispatch helper: select (STRIDE, WARPS) instantiation at runtime.
+ * Block dim = 32*WARPS_VAL (one warp = one sequence). */
+#define VIT_OPT_LAUNCH(STRIDE_VAL, WARPS_VAL)                                  \
+  cuda_viterbi_opt_kernel<STRIDE_VAL, WARPS_VAL><<<(nidx + (WARPS_VAL) - 1) / (WARPS_VAL), 32 * (WARPS_VAL), opt_shmem>>>( \
     d_dsq_ptr, d_off_ptr, d_len_ptr, d_idx_ptr, nidx,                         \
     cuom->d_rwv, cuom->d_twv, cuom->M, cuom->Qw, cuom->Kp,                   \
     cuom->xw_n_loop, cuom->xw_n_move, cuom->xw_c_loop, cuom->xw_c_move,      \
     cuom->xw_j_loop, cuom->xw_j_move, cuom->xw_e_loop, cuom->xw_e_move,      \
     cuom->scale_w, cuom->base_w, cuom->ddbound_w, cuom->nj,                   \
     engine->d_vit_scores, engine->d_vit_statuses)
+
+#define VIT_OPT_DISPATCH_STRIDES_SMALL(WARPS_VAL) \
+  switch (stride) { \
+    case 1:  VIT_OPT_LAUNCH( 1, WARPS_VAL); break; case 2:  VIT_OPT_LAUNCH( 2, WARPS_VAL); break; \
+    case 3:  VIT_OPT_LAUNCH( 3, WARPS_VAL); break; case 4:  VIT_OPT_LAUNCH( 4, WARPS_VAL); break; \
+    case 5:  VIT_OPT_LAUNCH( 5, WARPS_VAL); break; case 6:  VIT_OPT_LAUNCH( 6, WARPS_VAL); break; \
+    case 7:  VIT_OPT_LAUNCH( 7, WARPS_VAL); break; case 8:  VIT_OPT_LAUNCH( 8, WARPS_VAL); break; \
+    case 9:  VIT_OPT_LAUNCH( 9, WARPS_VAL); break; case 10: VIT_OPT_LAUNCH(10, WARPS_VAL); break; \
+    case 11: VIT_OPT_LAUNCH(11, WARPS_VAL); break; case 12: VIT_OPT_LAUNCH(12, WARPS_VAL); break; \
+    case 13: VIT_OPT_LAUNCH(13, WARPS_VAL); break; case 14: VIT_OPT_LAUNCH(14, WARPS_VAL); break; \
+    case 15: VIT_OPT_LAUNCH(15, WARPS_VAL); break; case 16: VIT_OPT_LAUNCH(16, WARPS_VAL); break; \
+    case 17: VIT_OPT_LAUNCH(17, WARPS_VAL); break; case 18: VIT_OPT_LAUNCH(18, WARPS_VAL); break; \
+    case 19: VIT_OPT_LAUNCH(19, WARPS_VAL); break; case 20: VIT_OPT_LAUNCH(20, WARPS_VAL); break; \
+    case 21: VIT_OPT_LAUNCH(21, WARPS_VAL); break; case 22: VIT_OPT_LAUNCH(22, WARPS_VAL); break; \
+    case 23: VIT_OPT_LAUNCH(23, WARPS_VAL); break; case 24: VIT_OPT_LAUNCH(24, WARPS_VAL); break; \
+    default: VIT_OPT_LAUNCH(24, WARPS_VAL); break; \
+  }
 
 __global__ static void
 cuda_viterbi_score_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
@@ -414,6 +437,7 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                       ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                       const float *filtersc, double ev_mu, double ev_lambda, double F2,
                       float *scores, int *statuses, int *passed,
+                      int warps_per_block,
                       char *errbuf, int errbuf_size)
 {
   int status = eslOK;
@@ -568,26 +592,30 @@ p7_cuda_ViterbiSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     int     *d_idx_ptr = seqidx ? engine->d_vit_seqidx : NULL;
 
     if (use_opt_small || use_opt_large) {
+      int W = warps_per_block;
+      if (W != 1 && W != 2 && W != 3 && W != 4 && W != 6 && W != 8) W = 4;
       size_t opt_shmem = (size_t) cuom->M * 2;
       int stride = (cuom->M + 31) / 32;
       if (stride <= VIT_OPT_MAX_STRIDE_SMALL) {
-        switch (stride) {
-          case 1:  VIT_OPT_LAUNCH(1);  break;  case 2:  VIT_OPT_LAUNCH(2);  break;
-          case 3:  VIT_OPT_LAUNCH(3);  break;  case 4:  VIT_OPT_LAUNCH(4);  break;
-          case 5:  VIT_OPT_LAUNCH(5);  break;  case 6:  VIT_OPT_LAUNCH(6);  break;
-          case 7:  VIT_OPT_LAUNCH(7);  break;  case 8:  VIT_OPT_LAUNCH(8);  break;
-          case 9:  VIT_OPT_LAUNCH(9);  break;  case 10: VIT_OPT_LAUNCH(10); break;
-          case 11: VIT_OPT_LAUNCH(11); break;  case 12: VIT_OPT_LAUNCH(12); break;
-          case 13: VIT_OPT_LAUNCH(13); break;  case 14: VIT_OPT_LAUNCH(14); break;
-          case 15: VIT_OPT_LAUNCH(15); break;  case 16: VIT_OPT_LAUNCH(16); break;
-          case 17: VIT_OPT_LAUNCH(17); break;  case 18: VIT_OPT_LAUNCH(18); break;
-          case 19: VIT_OPT_LAUNCH(19); break;  case 20: VIT_OPT_LAUNCH(20); break;
-          case 21: VIT_OPT_LAUNCH(21); break;  case 22: VIT_OPT_LAUNCH(22); break;
-          case 23: VIT_OPT_LAUNCH(23); break;  case 24: VIT_OPT_LAUNCH(24); break;
-          default: VIT_OPT_LAUNCH(24); break;
+        switch (W) {
+          case 1: VIT_OPT_DISPATCH_STRIDES_SMALL(1); break;
+          case 2: VIT_OPT_DISPATCH_STRIDES_SMALL(2); break;
+          case 3: VIT_OPT_DISPATCH_STRIDES_SMALL(3); break;
+          case 4: VIT_OPT_DISPATCH_STRIDES_SMALL(4); break;
+          case 6: VIT_OPT_DISPATCH_STRIDES_SMALL(6); break;
+          case 8: VIT_OPT_DISPATCH_STRIDES_SMALL(8); break;
+          default: VIT_OPT_DISPATCH_STRIDES_SMALL(4); break;
         }
       } else {
-        VIT_OPT_LAUNCH(VIT_OPT_MAX_STRIDE_LARGE);
+        switch (W) {
+          case 1: VIT_OPT_LAUNCH(VIT_OPT_MAX_STRIDE_LARGE, 1); break;
+          case 2: VIT_OPT_LAUNCH(VIT_OPT_MAX_STRIDE_LARGE, 2); break;
+          case 3: VIT_OPT_LAUNCH(VIT_OPT_MAX_STRIDE_LARGE, 3); break;
+          case 4: VIT_OPT_LAUNCH(VIT_OPT_MAX_STRIDE_LARGE, 4); break;
+          case 6: VIT_OPT_LAUNCH(VIT_OPT_MAX_STRIDE_LARGE, 6); break;
+          case 8: VIT_OPT_LAUNCH(VIT_OPT_MAX_STRIDE_LARGE, 8); break;
+          default: VIT_OPT_LAUNCH(VIT_OPT_MAX_STRIDE_LARGE, 4); break;
+        }
       }
     } else {
       int blocks = (nidx + groups_per_block - 1) / groups_per_block;
@@ -646,10 +674,12 @@ extern "C" int
 p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                   ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                   float *scores, int *statuses,
+                                  int warps_per_block,
                                   char *errbuf, int errbuf_size)
 {
   return p7_cuda_ViterbiSubset(engine, cuom, chu, seqidx, nidx, NULL, 0.0f, 0.0f, 0.0f,
-                               scores, statuses, NULL, errbuf, errbuf_size);
+                               scores, statuses, NULL,
+                               warps_per_block, errbuf, errbuf_size);
 }
 
 extern "C" int
@@ -657,8 +687,10 @@ p7_cuda_ViterbiFilterDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROF
                                    ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                    const float *filtersc, double ev_mu, double ev_lambda, double F2,
                                    float *scores, int *statuses, int *passed,
+                                   int warps_per_block,
                                    char *errbuf, int errbuf_size)
 {
   return p7_cuda_ViterbiSubset(engine, cuom, chu, seqidx, nidx, filtersc, ev_mu, ev_lambda, F2,
-                               scores, statuses, passed, errbuf, errbuf_size);
+                               scores, statuses, passed,
+                               warps_per_block, errbuf, errbuf_size);
 }

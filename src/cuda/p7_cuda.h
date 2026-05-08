@@ -104,11 +104,13 @@ extern int  p7_cuda_ForwardFilterDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_
 extern int  p7_cuda_ViterbiScoreDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                               ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                               float *scores, int *statuses,
+                                              int warps_per_block,
                                               char *errbuf, int errbuf_size);
 extern int  p7_cuda_ViterbiFilterDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
                                                const float *filtersc, double ev_mu, double ev_lambda, double F2,
                                                float *scores, int *statuses, int *passed,
+                                               int warps_per_block,
                                                char *errbuf, int errbuf_size);
 extern int  p7_cuda_ForwardBackwardParser(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                            const ESL_DSQ *dsq, int L, P7_OMX *oxf, P7_OMX *oxb,
@@ -141,6 +143,7 @@ extern int  p7_cuda_SSVNullBiasGateResident(P7_CUDA_ENGINE *engine, const P7_CUD
                                              int *survivor_idx, int *ret_nsurv,
                                              float *nullsc, float *filtersc,
                                              float *survivor_scores, int *survivor_statuses,
+                                             int warps_per_block,
                                              char *errbuf, int errbuf_size);
 extern int  p7_cuda_SSVNullBiasGateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                  const P7_BG *bg, ESL_DSQDATA_CHUNK *chu, int do_biasfilter,
@@ -148,6 +151,7 @@ extern int  p7_cuda_SSVNullBiasGateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7
                                                  int *survivor_idx, int *ret_nsurv,
                                                  float *nullsc, float *filtersc,
                                                  float *survivor_scores, int *survivor_statuses,
+                                                 int warps_per_block,
                                                  char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, int64_t dsq_size,
@@ -155,9 +159,19 @@ extern int  p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t 
                                            char *errbuf, int errbuf_size);
 extern void p7_cuda_engine_ReleaseDatabase(P7_CUDA_ENGINE *engine);
 extern int  p7_cuda_engine_IsResident(const P7_CUDA_ENGINE *engine);
+extern int  p7_cuda_engine_PreallocParser(P7_CUDA_ENGINE *engine, int max_nseq, int max_L,
+                                           char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_MSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                        int64_t seq0, int nseq, float *scores, int *statuses,
                                        char *errbuf, int errbuf_size);
+
+/* Auto-tune helpers: pick warps-per-block for the multi-warp DP kernels.
+ * kernel_id: 0 = fused SSV/null/bias/gate, 1 = Viterbi opt.
+ * Returns a value in {1,2,3,4,6,8} chosen from per-block shmem cost and
+ * device shmem-per-SM / threads-per-SM limits to maximize resident warps.
+ * If user_w > 0, returns user_w clamped to the supported set. */
+extern int  p7_cuda_DefaultWarpsPerBlock(int device_id, int kernel_id,
+                                          const P7_CUDA_MSVPROFILE *cuom, int user_w);
 
 #endif /*P7_CUDA_INCLUDED*/
