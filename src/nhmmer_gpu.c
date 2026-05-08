@@ -1535,6 +1535,7 @@ static int
 nhmmer_gpu_forward_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int64_t seq_id,
                              int complementarity, P7_HMM_WINDOW *windows, int nwindows,
                              P7_HMM_WINDOW **ret_survivors, int *ret_nsurv,
+                             float **ret_surv_xf, float **ret_surv_fwdsc,
                              char *errbuf, int errbuf_size)
 {
   int status = eslOK;
@@ -1547,11 +1548,19 @@ nhmmer_gpu_forward_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int64_t se
   float *scores = NULL;
   int *statuses = NULL;
   int *seqidx = NULL;
+  float *xf = NULL;
+  size_t *x_offsets = NULL;
+  size_t total_xcells = 0;
   P7_HMM_WINDOW *survivors = NULL;
+  float *surv_xf = NULL;
+  float *surv_fwdsc = NULL;
+  size_t *surv_x_offsets = NULL;
   int nsurv = 0;
 
   *ret_survivors = NULL;
   *ret_nsurv = 0;
+  *ret_surv_xf = NULL;
+  *ret_surv_fwdsc = NULL;
 
   if (nwindows == 0) return eslOK;
 
@@ -1566,29 +1575,43 @@ nhmmer_gpu_forward_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int64_t se
   status = nhmmer_gpu_window_batch_pack(&wb, sq, &tmp_wl);
   if (status != eslOK) { nhmmer_gpu_window_batch_free(&wb); goto ERROR; }
 
-  ESL_ALLOC(scores, sizeof(float) * nwindows);
-  ESL_ALLOC(statuses, sizeof(int) * nwindows);
+  ESL_ALLOC(scores, sizeof(float) * 2 * nwindows);
+  ESL_ALLOC(statuses, sizeof(int) * 2 * nwindows);
   ESL_ALLOC(seqidx, sizeof(int) * nwindows);
+  ESL_ALLOC(x_offsets, sizeof(size_t) * nwindows);
 
-  for (i = 0; i < nwindows; i++)
+  for (i = 0; i < nwindows; i++) {
     seqidx[i] = i;
+    x_offsets[i] = total_xcells;
+    total_xcells += (size_t)(windows[i].length + 1) * p7X_NXCELLS;
+  }
 
-  /* GPU Forward score-only: compute Forward scores for all windows in parallel */
-  status = p7_cuda_ForwardScoreDsqdataSubset(info->cuda_engine, info->cuda_msv,
-                                              &wb.chu, seqidx, nwindows,
-                                              scores, statuses,
-                                              errbuf, errbuf_size);
+  ESL_ALLOC(xf, sizeof(float) * total_xcells);
+
+  /* GPU Forward parser: compute Forward scores AND save xmx for all windows */
+  status = p7_cuda_ForwardParserDsqdataSubset(info->cuda_engine, info->cuda_msv,
+                                               &wb.chu, seqidx, nwindows,
+                                               x_offsets, total_xcells,
+                                               xf, scores, statuses,
+                                               errbuf, errbuf_size);
   nhmmer_gpu_window_batch_free(&wb);
   if (status != eslOK) goto ERROR;
 
-  /* F3 gating: keep windows where GPU Forward score passes threshold */
+  /* F3 gating: keep windows where GPU Forward score passes threshold.
+   * Track survivor indices for xf compaction. */
   ESL_ALLOC(survivors, sizeof(P7_HMM_WINDOW) * nwindows);
+  ESL_ALLOC(surv_x_offsets, sizeof(size_t) * nwindows);
+  ESL_ALLOC(surv_fwdsc, sizeof(float) * nwindows);
+  int *surv_src_idx = NULL;
+  ESL_ALLOC(surv_src_idx, sizeof(int) * nwindows);
+  size_t surv_total_xcells = 0;
+
   for (i = 0; i < nwindows; i++) {
-    if (statuses[i] != eslOK) continue;
+    if (statuses[2*i] != eslOK) continue;
 
     int window_len = windows[i].length;
     ESL_DSQ *subseq = sq->dsq + windows[i].n - 1;
-    float fwdsc = scores[i];
+    float fwdsc = scores[2*i];
     float nullsc, bias_filtersc, filtersc, seq_score;
     double P_val;
 
@@ -1606,11 +1629,32 @@ nhmmer_gpu_forward_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int64_t se
     P_val = esl_exp_surv(seq_score, om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA]);
     if (P_val > pli->F3 * 2.0) continue;
 
-    survivors[nsurv++] = windows[i];
+    surv_src_idx[nsurv] = i;
+    surv_fwdsc[nsurv] = fwdsc;
+    survivors[nsurv] = windows[i];
+    surv_x_offsets[nsurv] = surv_total_xcells;
+    surv_total_xcells += (size_t)(window_len + 1) * p7X_NXCELLS;
+    nsurv++;
+  }
+
+  /* Compact xf: copy survivor rows into contiguous surv_xf buffer */
+  if (nsurv > 0 && surv_total_xcells > 0) {
+    ESL_ALLOC(surv_xf, sizeof(float) * surv_total_xcells);
+    for (int si = 0; si < nsurv; si++) {
+      int src = surv_src_idx[si];
+      size_t xcells = (size_t)(windows[src].length + 1) * p7X_NXCELLS;
+      memcpy(surv_xf + surv_x_offsets[si], xf + x_offsets[src], sizeof(float) * xcells);
+    }
   }
 
   *ret_survivors = survivors;
   *ret_nsurv = nsurv;
+  *ret_surv_xf = surv_xf;
+  *ret_surv_fwdsc = surv_fwdsc;
+  free(surv_x_offsets);
+  free(surv_src_idx);
+  free(xf);
+  free(x_offsets);
   free(scores);
   free(statuses);
   free(seqidx);
@@ -1618,6 +1662,12 @@ nhmmer_gpu_forward_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int64_t se
 
 ERROR:
   free(survivors);
+  free(surv_xf);
+  free(surv_fwdsc);
+  free(surv_x_offsets);
+  free(surv_src_idx);
+  free(xf);
+  free(x_offsets);
   free(scores);
   free(statuses);
   free(seqidx);
@@ -1629,6 +1679,7 @@ ERROR:
 static int
 nhmmer_gpu_run_fb_parser_batch(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
                                P7_HMM_WINDOW *windows, int nwindows,
+                               float *precomputed_xf, const float *precomputed_fwdsc,
                                float **ret_xf, float **ret_xb,
                                float **ret_scores, int **ret_statuses,
                                size_t **ret_x_offsets, int **ret_L_eff,
@@ -1644,6 +1695,7 @@ nhmmer_gpu_run_fb_parser_batch(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   float      *xb        = NULL;
   float      *fb_scores = NULL;
   int        *fb_statuses = NULL;
+  int         backward_only = (precomputed_xf != NULL);
 
   *ret_xf = *ret_xb = NULL;
   *ret_scores = NULL;
@@ -1664,7 +1716,13 @@ nhmmer_gpu_run_fb_parser_batch(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
     total_xcells += (size_t)(L_eff[i] + 1) * p7X_NXCELLS;
   }
 
-  ESL_ALLOC(xf, sizeof(float) * total_xcells);
+  if (backward_only) {
+    xf = precomputed_xf;
+    for (i = 0; i < nwindows; i++)
+      fb_scores[i * 2] = precomputed_fwdsc[i];
+  } else {
+    ESL_ALLOC(xf, sizeof(float) * total_xcells);
+  }
   ESL_ALLOC(xb, sizeof(float) * total_xcells);
 
   /* Sub-batch loop */
@@ -1723,15 +1781,27 @@ nhmmer_gpu_run_fb_parser_batch(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
                      ? x_offsets[sub_end] - x_offsets[sub_start]
                      : total_xcells       - x_offsets[sub_start];
 
-    status = p7_cuda_ForwardBackwardParserDsqdataSubset(
-        info->cuda_engine, info->cuda_msv,
-        &wb.chu, local_seqidx, sub_n,
-        local_offsets, sub_total,
-        xf + x_offsets[sub_start],
-        xb + x_offsets[sub_start],
-        fb_scores  + sub_start * 2,
-        fb_statuses + sub_start * 2,
-        errbuf, errbuf_size);
+    if (backward_only) {
+      status = p7_cuda_BackwardParserDsqdataSubset(
+          info->cuda_engine, info->cuda_msv,
+          &wb.chu, local_seqidx, sub_n,
+          local_offsets, sub_total,
+          xf + x_offsets[sub_start],
+          xb + x_offsets[sub_start],
+          fb_scores  + sub_start * 2,
+          fb_statuses + sub_start * 2,
+          errbuf, errbuf_size);
+    } else {
+      status = p7_cuda_ForwardBackwardParserDsqdataSubset(
+          info->cuda_engine, info->cuda_msv,
+          &wb.chu, local_seqidx, sub_n,
+          local_offsets, sub_total,
+          xf + x_offsets[sub_start],
+          xb + x_offsets[sub_start],
+          fb_scores  + sub_start * 2,
+          fb_statuses + sub_start * 2,
+          errbuf, errbuf_size);
+    }
 
     free(local_seqidx);
     free(local_offsets);
@@ -1750,7 +1820,8 @@ nhmmer_gpu_run_fb_parser_batch(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   return eslOK;
 
 ERROR:
-  free(xf); free(xb); free(fb_scores); free(fb_statuses);
+  if (!backward_only) free(xf);
+  free(xb); free(fb_scores); free(fb_statuses);
   free(x_offsets); free(L_eff);
   return status;
 }
@@ -1995,15 +2066,18 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     P7_HMM_WINDOW *fwd_survivors = NULL;
     int nfwd_surv = 0;
     int nvit_windows = vit_wl.count;
+    float  *prefilter_xf = NULL;
+    float  *prefilter_fwdsc = NULL;
     clock_gettime(CLOCK_MONOTONIC, &ts0);
     status = nhmmer_gpu_forward_prefilter(info, sq, seq_id, complementarity,
                                           vit_wl.windows, vit_wl.count,
                                           &fwd_survivors, &nfwd_surv,
+                                          &prefilter_xf, &prefilter_fwdsc,
                                           errbuf, errbuf_size);
     free(vit_wl.windows);
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     info->t_fwd_prefilter += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
-    if (status != eslOK) { free(fwd_survivors); goto ERROR; }
+    if (status != eslOK) { free(fwd_survivors); free(prefilter_xf); free(prefilter_fwdsc); goto ERROR; }
 
     /* Log window stats for profiling */
     {
@@ -2017,10 +2091,12 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
 
     if (nfwd_surv == 0) {
       free(fwd_survivors);
+      free(prefilter_xf);
+      free(prefilter_fwdsc);
       return eslOK;
     }
 
-    /* GPU FB parser batch: compute Forward/Backward xmx for all survivors */
+    /* GPU FB parser batch: Backward-only using prefilter xf, or full FB if no prefilter xf */
     float   *gpu_xf = NULL, *gpu_xb = NULL, *gpu_fb_scores = NULL;
     int     *gpu_fb_statuses = NULL, *gpu_fb_L_eff = NULL;
     size_t  *gpu_fb_x_offsets = NULL;
@@ -2028,8 +2104,10 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
 
     clock_gettime(CLOCK_MONOTONIC, &ts0);
     status = nhmmer_gpu_run_fb_parser_batch(info, sq, fwd_survivors, nfwd_surv,
+                                             prefilter_xf, prefilter_fwdsc,
                                              &gpu_xf, &gpu_xb, &gpu_fb_scores, &gpu_fb_statuses,
                                              &gpu_fb_x_offsets, &gpu_fb_L_eff, errbuf, errbuf_size);
+    free(prefilter_fwdsc); prefilter_fwdsc = NULL;
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     info->t_gpu_fb_parser += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
     if (status == eslOK && gpu_xf != NULL)
@@ -2344,6 +2422,8 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   int       i;
   P7_OPROFILE *om = info->om;
 
+  struct timespec ts0, ts1;
+
   /* Build an HMM window list from the pre-chunked data.
    * Each chunk becomes a window. Overlapping regions will be
    * merged by p7_pli_ExtendAndMergeWindows below. */
@@ -2367,6 +2447,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   int gpu_nwindows = 0;
 
   /* Use GPU-resident path when nucdb is uploaded and chunks have sufficient overlap */
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
   const uint8_t *d_nucdb = p7_cuda_engine_NucdbDevPtr(info->cuda_engine);
   if (d_nucdb &&
       (int64_t)ndb->hdr.overlap >= (int64_t)om->max_length &&
@@ -2408,9 +2489,12 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
                                    errbuf, errbuf_size);
   }
   if (status != eslOK) return status;
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
+  info->t_ssv += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
 
   if (gpu_nwindows == 0) { free(gpu_windows); return eslOK; }
 
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
   for (i = 0; i < gpu_nwindows; i++) {
     p7_hmmwindow_new(&msv_windowlist,
                      0,
@@ -2428,6 +2512,8 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
     p7_hmm_ScoreDataComputeRest(om, info->scoredata);
 
   p7_pli_ExtendAndMergeWindows(om, info->scoredata, &msv_windowlist, 0);
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
+  info->t_merge += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
 
   if (msv_windowlist.count == 0) {
     free(msv_windowlist.windows);
@@ -2438,6 +2524,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   NHMMER_GPU_WINDOW_BATCH wb;
   memset(&wb, 0, sizeof(wb));
 
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
   if (info->do_gpu_batch && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
     status = nhmmer_gpu_window_batch_init(&wb, msv_windowlist.count);
     if (status != eslOK) goto ERROR;
@@ -2452,6 +2539,8 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
     if (msv_windowlist.count == 0) {
       nhmmer_gpu_window_batch_free(&wb);
       free(msv_windowlist.windows);
+      clock_gettime(CLOCK_MONOTONIC, &ts1);
+      info->t_batch_filter += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
       return eslOK;
     }
 
@@ -2463,18 +2552,23 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       if (msv_windowlist.count == 0) {
         nhmmer_gpu_window_batch_free(&wb);
         free(msv_windowlist.windows);
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        info->t_batch_filter += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
         return eslOK;
       }
     }
 
     nhmmer_gpu_window_batch_free(&wb);
   }
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
+  info->t_batch_filter += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
 
   /* GPU scanning Viterbi longtarget */
   if (info->do_gpu_vit_lt && msv_windowlist.count > 0) {
     P7_HMM_WINDOWLIST vit_wl;
     vit_wl.windows = NULL;
 
+    clock_gettime(CLOCK_MONOTONIC, &ts0);
     status = nhmmer_gpu_viterbi_longtarget(info, sq, &msv_windowlist, &vit_wl,
                                            errbuf, errbuf_size);
     if (status != eslOK) {
@@ -2484,6 +2578,8 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
 
     free(msv_windowlist.windows);
     msv_windowlist.windows = NULL;
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    info->t_vit_lt += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
 
     if (vit_wl.count == 0) {
       if (vit_wl.windows) free(vit_wl.windows);
@@ -2498,6 +2594,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
     if (ncpus_vlt < 1) ncpus_vlt = 1;
     if (ncpus_vlt > vit_wl.count) ncpus_vlt = vit_wl.count;
 
+    clock_gettime(CLOCK_MONOTONIC, &ts0);
 #ifdef HMMER_THREADS
     if (ncpus_vlt > 1) {
       NHMMER_GPU_WORKER *workers = NULL;
@@ -2547,6 +2644,8 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       free(workers);
       free(threads);
       free(vit_wl.windows);
+      clock_gettime(CLOCK_MONOTONIC, &ts1);
+      info->t_cpu_workers += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
       return status;
     }
 #endif
@@ -2574,6 +2673,8 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
 
       nhmmer_gpu_worker_destroy(&w);
       free(vit_wl.windows);
+      clock_gettime(CLOCK_MONOTONIC, &ts1);
+      info->t_cpu_workers += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
       return status;
     }
   }
@@ -2583,6 +2684,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   if (ncpus < 1) ncpus = 1;
   if (ncpus > msv_windowlist.count) ncpus = msv_windowlist.count;
 
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
 #ifdef HMMER_THREADS
   if (ncpus > 1) {
     NHMMER_GPU_WORKER *workers = NULL;
@@ -2631,6 +2733,8 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
     free(workers);
     free(threads);
     free(msv_windowlist.windows);
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    info->t_cpu_workers += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
     return status;
   }
 #endif
@@ -2657,6 +2761,8 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
 
     nhmmer_gpu_worker_destroy(&w);
     free(msv_windowlist.windows);
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    info->t_cpu_workers += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
     return status;
   }
 

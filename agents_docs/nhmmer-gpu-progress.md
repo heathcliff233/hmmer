@@ -1,6 +1,6 @@
 # nhmmer GPU Support — Progress
 
-Last updated: 2026-05-08
+Last updated: 2026-05-09
 
 ## Architecture
 
@@ -38,14 +38,16 @@ Input FASTA/nucdb
                        ▼
 ┌─────────────────────────────────────────────────────┐
 │ GPU Forward Pre-filter (F3*2.0 relaxed gate)        │
-│   → GPU Forward score-only on sub-windows           │
-│   → removes ~50-60% of windows before FB + domain   │
+│   → GPU Forward parser on sub-windows (saves xmx)   │
+│   → removes ~50-60% of windows before Backward      │
+│   → survivor xf compacted for Backward-only stage   │
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│ GPU FB Parser (batch ForwardBackward xmx)           │
-│   → batch Forward+Backward parser on all survivors  │
-│   → returns xmx arrays for domaindef envelope-find  │
+│ GPU Backward Parser (batch Backward-only xmx)       │
+│   → uses pre-computed Forward xf from prefilter     │
+│   → runs Backward parser only on F3 survivors       │
+│   → returns xf+xb arrays for domaindef envelope-find│
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
@@ -83,6 +85,7 @@ Both strands processed sequentially (forward, then reverse complement).
 | `src/nhmmer_gpu.c` | GPU orchestration: batch filter, Viterbi, scanning Vit, domain rescore, hit reporting |
 | `src/cuda/p7_cuda_ssv_longtarget.cu` | SSV longtarget kernel + `SSVLongtargetResident` |
 | `src/cuda/p7_cuda_viterbi_longtarget.cu` | Scanning Viterbi kernel + threshold kernel |
+| `src/cuda/p7_cuda_fb_parser.cu` | Forward/Backward parser batch: Forward-only, Backward-only, and combined F+B modes |
 | `src/cuda/p7_cuda_domain_rescore.cu` | Domain rescoring: 6 GPU kernels (Fwd/Bck/Decoding/OA/OATrace/Domcorr) |
 | `src/cuda/p7_cuda_runtime.cu` | Engine create/destroy/reset, nucdb upload/release |
 | `src/cuda/p7_cuda_internal.h` | Engine struct (all device buffers including domain rescore grow-only buffers) |
@@ -114,7 +117,7 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 --gpu-device N          # CUDA device selection
 ```
 
-## Benchmark Results (2026-05-08)
+## Benchmark Results (2026-05-09)
 
 **Target**: chr22.fa (50MB, ~101.6M residues both strands)
 **System**: RTX 4090, 4 CPU threads
@@ -122,7 +125,7 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
 | CPU-4 | 0.33s / 154 | 0.45s / 120 | 1.64s / 215 |
-| GPU-4 FASTA | 1.74s / 156 | 2.07s / 124 | 10.3s / 264 |
+| GPU-4 FASTA | 1.35s / 154 | 1.92s / 122 | 5.34s / 261 |
 
 ### GPU Domain Rescoring Performance
 
@@ -134,13 +137,13 @@ Cross-window batching + trim batching replaces per-domain GPU calls with two bat
 | query_short | ~600 | varies | ~300 | varies |
 | query_medium | ~300 | varies | ~100 | varies |
 
-Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms each). Cross-window batching: **1.74s** (18x improvement).
+Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms each). Cross-window batching: **1.74s** (18x improvement). Forward-Backward split (prefilter saves xf, Backward-only): **1.35s** (further 1.3x).
 
 ### Parity Notes
 
-- **MADE1 (M=80)**: 156 vs 154 (2-hit difference, within 1% tolerance)
-- **query_short (M=151)**: 124 vs 120 (4-hit difference)
-- **query_medium (M=501)**: 264 vs 215 (extra hits from fixed `xw_*` parameters in scanning Viterbi)
+- **MADE1 (M=80)**: 154 vs 154 (exact match)
+- **query_short (M=151)**: 122 vs 120 (2-hit difference)
+- **query_medium (M=501)**: 261 vs 215 (extra hits from fixed `xw_*` parameters in scanning Viterbi)
 
 ## GPU Domain Rescoring Architecture
 
@@ -169,12 +172,12 @@ Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms
 
 | Kernel | Purpose | Design |
 |--------|---------|--------|
-| `cuda_domain_fwd_full_kernel` | Full Forward with matrix storage | 1 block/domain, 1 thread/block, shared mem for prev/curr |
-| `cuda_domain_bck_full_kernel` | Full Backward | Same design, reads forward xmx |
-| `cuda_domain_decoding_kernel` | Posterior Decoding (fwd*bck/total) | Element-wise, no shared mem needed |
-| `cuda_domain_optacc_kernel` | Optimal Accuracy DP | Similar to Forward, uses pp matrix |
-| `cuda_domain_oatrace_kernel` | OA Traceback (reverse) | Writes trace arrays (st, k, i, pp) |
-| `cuda_domain_fwd_scoreonly_kernel` | Domcorrection Forward (orig rfv) | Score-only, no matrix storage |
+| `cuda_domain_fwd_full_kernel` | Full Forward with matrix storage | T threads/block, parallel prefix scan for D-state, tree reduction for xE |
+| `cuda_domain_bck_full_kernel` | Full Backward | T threads/block, reverse prefix scan, reads forward xmx for scaling |
+| `cuda_domain_decoding_kernel` | Posterior Decoding (fwd*bck/total) | T threads/block, strided element-wise, no prefix scan needed |
+| `cuda_domain_optacc_kernel` | Optimal Accuracy DP | 1 thread/block (deferred: needs max-prefix scan) |
+| `cuda_domain_oatrace_kernel` | OA Traceback (reverse) | 1 thread/block (inherently sequential traceback) |
+| `cuda_domain_fwd_scoreonly_kernel` | Domcorrection Forward (orig rfv) | T threads/block, parallel prefix scan, score-only (no matrix storage) |
 
 ### Grow-Only Engine Buffers
 
