@@ -382,9 +382,10 @@ p7_domaindef_ByViterbi(P7_PROFILE *gm, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_
  */
 int
 p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPROFILE *om,
-				   P7_OMX *oxf, P7_OMX *oxb, P7_OMX *fwd, P7_OMX *bck, 
+				   P7_OMX *oxf, P7_OMX *oxb, P7_OMX *fwd, P7_OMX *bck,
 				   P7_DOMAINDEF *ddef, P7_BG *bg, int long_target,
-				   P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr)
+				   P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr,
+				   int envelopes_only)
 {
   int i, j;
   int triggered;
@@ -466,10 +467,26 @@ p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPRO
                   */
                   ddef->nenvelopes++;
 
+                  if (envelopes_only) {
+                    if (ddef->ndom == ddef->nalloc) {
+                      ESL_REALLOC(ddef->dcl, sizeof(P7_DOMAIN) * (ddef->nalloc*2));
+                      ddef->nalloc *= 2;
+                    }
+                    ddef->dcl[ddef->ndom].ienv          = i2;
+                    ddef->dcl[ddef->ndom].jenv          = j2;
+                    ddef->dcl[ddef->ndom].ad             = NULL;
+                    ddef->dcl[ddef->ndom].scores_per_pos = NULL;
+                    ddef->dcl[ddef->ndom].envsc          = 0.0;
+                    ddef->dcl[ddef->ndom].domcorrection   = 0.0;
+                    ddef->dcl[ddef->ndom].oasc            = 0.0;
+                    ddef->ndom++;
+                    last_j2 = j2;
+                  } else {
                   /*the !long_target argument will cause the function to recompute null2
                    * scores if this is part of a long_target (nhmmer) pipeline */
                   if (rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i2, j2, TRUE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr) == eslOK)
                        last_j2 = j2;
+                  }
             }
             p7_spensemble_Reuse(ddef->sp);
             p7_trace_Reuse(ddef->tr);
@@ -478,7 +495,22 @@ p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPRO
         {
             /* The region looks simple, single domain; convert the region to an envelope. */
             ddef->nenvelopes++;
-            rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i, j, FALSE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr);
+            if (envelopes_only) {
+              if (ddef->ndom == ddef->nalloc) {
+                ESL_REALLOC(ddef->dcl, sizeof(P7_DOMAIN) * (ddef->nalloc*2));
+                ddef->nalloc *= 2;
+              }
+              ddef->dcl[ddef->ndom].ienv          = i;
+              ddef->dcl[ddef->ndom].jenv          = j;
+              ddef->dcl[ddef->ndom].ad             = NULL;
+              ddef->dcl[ddef->ndom].scores_per_pos = NULL;
+              ddef->dcl[ddef->ndom].envsc          = 0.0;
+              ddef->dcl[ddef->ndom].domcorrection   = 0.0;
+              ddef->dcl[ddef->ndom].oasc            = 0.0;
+              ddef->ndom++;
+            } else {
+              rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i, j, FALSE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr);
+            }
         }
         i     = -1;
         triggered = FALSE;
@@ -487,9 +519,14 @@ p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPRO
 
 
   /* Restore model to uni/multihit mode, and to its original length model */
-  if (p7_IsMulti(save_mode)) p7_oprofile_ReconfigMultihit(om, saveL); 
-  else                       p7_oprofile_ReconfigUnihit  (om, saveL); 
+  if (p7_IsMulti(save_mode)) p7_oprofile_ReconfigMultihit(om, saveL);
+  else                       p7_oprofile_ReconfigUnihit  (om, saveL);
   return eslOK;
+
+ ERROR:
+  if (p7_IsMulti(save_mode)) p7_oprofile_ReconfigMultihit(om, saveL);
+  else                       p7_oprofile_ReconfigUnihit  (om, saveL);
+  return status;
 }
 
 
@@ -713,7 +750,7 @@ region_trace_ensemble(P7_DOMAINDEF *ddef, const P7_OPROFILE *om, const ESL_DSQ *
  *             in p7_oprofile_UpdateFwdEmissionScores().
  *
  */
-static int
+int
 reparameterize_model (P7_BG *bg, P7_OPROFILE *om, const ESL_SQ *sq, int start, int L, float *fwd_emissions, float *bgf_arr, float *sc_arr) {
   int     K   = om->abc->K;
   int i;
@@ -1085,7 +1122,7 @@ main(int argc, char **argv)
 
   p7_Forward (sq->dsq, sq->n, om,      fwd, &overall_sc); 
   p7_Backward(sq->dsq, sq->n, om, fwd, bck, &sc);       
-  p7_domaindef_ByPosteriorHeuristics(sq, NULL, om, oxf, oxb, fwd, bck, ddef, NULL, FALSE, NULL, NULL, NULL);
+  p7_domaindef_ByPosteriorHeuristics(sq, NULL, om, oxf, oxb, fwd, bck, ddef, NULL, FALSE, NULL, NULL, NULL, FALSE);
 
 
   printf("Overall raw likelihood score: %.2f nats\n", overall_sc);
@@ -1234,7 +1271,7 @@ main(int argc, char **argv)
 	  p7_GForward (sq->dsq, sq->n, gm, fwd, &overall_sc); 
 	  if (! do_baseline) {
 	    p7_GBackward(sq->dsq, sq->n, gm, bck, &sc);       
-	    p7_domaindef_ByPosteriorHeuristics(sq, gm, fwd, bck, gxf, gxb, ddef, NULL, FALSE, NULL, NULL, NULL);
+	    p7_domaindef_ByPosteriorHeuristics(sq, gm, fwd, bck, gxf, gxb, ddef, NULL, FALSE, NULL, NULL, NULL, FALSE);
 	    //Is this even being compiled by any tests? Looks like there's a fair amount of bit rot here
 	  }
 	}

@@ -115,6 +115,29 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_vlt_windows)   cudaFree(engine->d_vlt_windows);
   if (engine->d_vlt_win_count) cudaFree(engine->d_vlt_win_count);
   if (engine->d_resident_nucdb) cudaFree(engine->d_resident_nucdb);
+  /* Domain rescore grow-only buffers */
+  for (int i = 0; i < 4; i++) {
+    if (engine->d_dom_dpf[i]) cudaFree(engine->d_dom_dpf[i]);
+    if (engine->d_dom_xmx[i]) cudaFree(engine->d_dom_xmx[i]);
+  }
+  if (engine->d_dom_rfv_all)      cudaFree(engine->d_dom_rfv_all);
+  if (engine->d_dom_dsq_all)      cudaFree(engine->d_dom_dsq_all);
+  if (engine->d_dom_dsq_ptrs)     cudaFree(engine->d_dom_dsq_ptrs);
+  if (engine->d_dom_rfv_ptrs)     cudaFree(engine->d_dom_rfv_ptrs);
+  if (engine->d_dom_lengths)      cudaFree(engine->d_dom_lengths);
+  if (engine->d_dom_dp_offsets)   cudaFree(engine->d_dom_dp_offsets);
+  if (engine->d_dom_xmx_offsets)  cudaFree(engine->d_dom_xmx_offsets);
+  if (engine->d_dom_envsc)        cudaFree(engine->d_dom_envsc);
+  if (engine->d_dom_bcksc)        cudaFree(engine->d_dom_bcksc);
+  if (engine->d_dom_oasc)         cudaFree(engine->d_dom_oasc);
+  if (engine->d_dom_domcorr)      cudaFree(engine->d_dom_domcorr);
+  if (engine->d_dom_statuses)     cudaFree(engine->d_dom_statuses);
+  if (engine->d_dom_trace_st)     cudaFree(engine->d_dom_trace_st);
+  if (engine->d_dom_trace_k)      cudaFree(engine->d_dom_trace_k);
+  if (engine->d_dom_trace_i)      cudaFree(engine->d_dom_trace_i);
+  if (engine->d_dom_trace_pp)     cudaFree(engine->d_dom_trace_pp);
+  if (engine->d_dom_trace_N)      cudaFree(engine->d_dom_trace_N);
+  if (engine->d_dom_orig_rfv)     cudaFree(engine->d_dom_orig_rfv);
   free(engine);
 }
 

@@ -1592,7 +1592,10 @@ extern void          p7_domaindef_Destroy(P7_DOMAINDEF *ddef);
 extern int p7_domaindef_ByViterbi            (P7_PROFILE *gm, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_GMX *gx1, P7_GMX *gx2, P7_DOMAINDEF *ddef);
 extern int p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPROFILE *om, P7_OMX *oxf, P7_OMX *oxb, P7_OMX *fwd, P7_OMX *bck,
 				                                  P7_DOMAINDEF *ddef, P7_BG *bg, int long_target,
-				                                  P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr);
+				                                  P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr,
+				                                  int envelopes_only);
+extern int reparameterize_model(P7_BG *bg, P7_OPROFILE *om, const ESL_SQ *sq, int start, int L,
+                                float *fwd_emissions, float *bgf_arr, float *sc_arr);
 
 
 /* p7_gmx.c */

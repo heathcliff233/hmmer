@@ -60,6 +60,9 @@ typedef struct {
   double            t_fwd_prefilter; /* GPU Forward pre-filter */
   double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
   double            t_cpu_workers;   /* CPU domaindef + hit reporting */
+#ifdef HMMER_THREADS
+  pthread_mutex_t   gpu_domain_mutex; /* serialize GPU domain rescore across threads */
+#endif
 } NHMMER_GPU_INFO;
 
 int nhmmer_gpu_serial_loop(NHMMER_GPU_INFO *info, ESL_SQFILE *dbfp,

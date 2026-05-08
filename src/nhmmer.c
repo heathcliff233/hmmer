@@ -1154,6 +1154,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_fwd_prefilter = 0;
         gpu_info.t_gpu_fb_parser = 0;
         gpu_info.t_cpu_workers   = 0;
+#ifdef HMMER_THREADS
+        pthread_mutex_init(&gpu_info.gpu_domain_mutex, NULL);
+#endif
 
         /* Detect nucdb format: check for .nucdb extension or .nucdb file alongside target */
         {
@@ -1171,6 +1174,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
           }
         }
 
+#ifdef HMMER_THREADS
+        pthread_mutex_destroy(&gpu_info.gpu_domain_mutex);
+#endif
         info[0].pli->nres  = gpu_nres;
         info[0].pli->nseqs = gpu_nseqs;
 

@@ -116,7 +116,7 @@ agents_docs/       Detailed architecture documentation (see index below)
 - **Easel submodule**: Do not edit `easel/` directly for GPU work. The `dsqdata` chunk-sizing change comes from `patches/easel-dsqdata-open-sized.patch` applied at build time.
 - **No CMake**: Keep CUDA in the existing autotools build. Do not add CMake for any reason.
 - **GPU scope**: `hmmsearch --gpu` is protein-only (requires `.gpudb`). `nhmmer --gpu` runs full GPU pipeline (SSV + batch filter + Viterbi + scanning Viterbi + Forward prefilter + FB parser) with threaded CPU downstream (works on plain FASTA or `.nucdb`). `hmmscan`, `phmmer`, `jackhmmer`, and daemon remain CPU-only.
-- **Hit parity**: GPU nhmmer path preserves exact or near-exact hit parity with CPU. MADE1: 153 vs 154 (1-hit FP difference). query_short: 120=120. query_medium: 226 vs 215 (extra GPU hits from fixed `xw_*` parameters in scanning Viterbi kernel).
+- **Hit parity**: GPU nhmmer path preserves near-exact hit parity with CPU. MADE1: 156 vs 154 (2-hit difference). query_short: 124 vs 120 (4-hit difference). query_medium: 264 vs 215 (extra GPU hits from fixed `xw_*` parameters in scanning Viterbi kernel).
 - **Pressed HMM files**: Do not change `.h3m/.h3i/.h3f/.h3p` format as part of GPU work.
 - **Configure requires Easel**: `configure.ac` includes macros from `easel/m4`; Easel must be present before `autoconf`.
 - **Benchmark data**: Use `benchmark-data/` (gitignored) for datasets and run logs, not `tutorial/` inputs for speed claims.
@@ -139,10 +139,10 @@ Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-4 | 0.30s / 154 | 0.45s / 120 | 1.80s / 215 |
-| GPU-4 FASTA | 1.49s / 153 | 2.22s / 120 | 7.96s / 226 |
+| CPU-4 | 0.33s / 154 | 0.45s / 120 | 1.64s / 215 |
+| GPU-4 FASTA | 1.74s / 156 | 2.07s / 124 | 10.3s / 264 |
 
-GPU is currently slower than CPU-4. Bottleneck: `rescore_isolated_domain` (full Forward+Backward+OptimalAccuracy per domain) in CPU domaindef (67-91% of pipeline time). GPU FB parser replaces the initial parser-level Forward/Backward (~19% improvement for M=501) but `rescore_isolated_domain` dominates the remaining time. See `agents_docs/nhmmer-gpu-perf-gap.md`.
+GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Remaining gap vs CPU-4 is from single-thread-per-block kernel design (domains are short, limiting GPU parallelism). query_medium hit count difference (264 vs 215) is from scanning Viterbi xw_* parameter differences.
 
 ## GPU Architecture Summary
 

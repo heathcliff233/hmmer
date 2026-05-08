@@ -936,7 +936,7 @@ p7_Pipeline_PostFwdWithParserMatrices(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *
   pli->n_past_fwd++;
 
   t0 = p7_pipeline_WallTime();
-  status = p7_domaindef_ByPosteriorHeuristics(sq, ntsq, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, FALSE, NULL, NULL, NULL);
+  status = p7_domaindef_ByPosteriorHeuristics(sq, ntsq, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, FALSE, NULL, NULL, NULL, FALSE);
   pli->time_domain += p7_pipeline_WallTime() - t0;
   if (status != eslOK) ESL_FAIL(status, pli->errbuf, "domain definition workflow failure"); /* eslERANGE can happen  */
   if (pli->ddef->nregions   == 0) return eslOK; /* score passed threshold but there's no discrete domains here       */
@@ -1304,7 +1304,7 @@ p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_T
 
   //if we're asked to not do null correction, pass a NULL instead of a temp scores variable - domaindef knows what to do
   status = p7_domaindef_ByPosteriorHeuristics(pli_tmp->tmpseq, NULL, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, TRUE,
-                                              pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr);
+                                              pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE);
 
   pli_tmp->tmpseq->dsq = dsq_holder;
   if (status != eslOK) ESL_FAIL(status, pli->errbuf, "domain definition workflow failure"); /* eslERANGE can happen */

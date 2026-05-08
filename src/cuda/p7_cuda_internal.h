@@ -125,6 +125,35 @@ struct p7_cuda_msv_engine_s {
   /* Nucdb resident data (uploaded once, reused across sequences/queries) */
   uint8_t            *d_resident_nucdb;
   int64_t             resident_nucdb_size;
+
+  /* Domain rescore grow-only buffers */
+  float              *d_dom_dpf[4];       /* [0]=fwd [1]=bck/pp [2]=pp [3]=oa */
+  size_t              dom_dp_alloc;        /* total_dp_cells currently allocated */
+  float              *d_dom_xmx[4];       /* [0]=fwd [1]=bck [2]=pp [3]=oa */
+  size_t              dom_xmx_alloc;       /* total_xmx floats allocated */
+  float              *d_dom_rfv_all;
+  size_t              dom_rfv_alloc;       /* bytes */
+  uint8_t            *d_dom_dsq_all;
+  size_t              dom_dsq_alloc;
+  const uint8_t     **d_dom_dsq_ptrs;
+  const float       **d_dom_rfv_ptrs;
+  int                *d_dom_lengths;
+  size_t             *d_dom_dp_offsets;
+  size_t             *d_dom_xmx_offsets;
+  float              *d_dom_envsc;
+  float              *d_dom_bcksc;
+  float              *d_dom_oasc;
+  float              *d_dom_domcorr;
+  int                *d_dom_statuses;
+  int                 dom_meta_alloc;      /* ndomains currently allocated */
+  int8_t             *d_dom_trace_st;
+  int                *d_dom_trace_k;
+  int                *d_dom_trace_i;
+  float              *d_dom_trace_pp;
+  int                *d_dom_trace_N;
+  size_t              dom_trace_alloc;     /* ndomains * max_trace_len */
+  float              *d_dom_orig_rfv;
+  size_t              dom_orig_rfv_alloc;  /* bytes */
 };
 
 struct p7_cuda_msv_profile_s {

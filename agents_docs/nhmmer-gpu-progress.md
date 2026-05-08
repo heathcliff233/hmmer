@@ -4,7 +4,7 @@ Last updated: 2026-05-08
 
 ## Architecture
 
-GPU nhmmer uses a **GPU SSV + GPU filters + GPU scanning Viterbi + GPU Forward prefilter + GPU FB parser + threaded CPU downstream** pipeline. All GPU stages are default-on with `--gpu`.
+GPU nhmmer uses a **GPU SSV + GPU filters + GPU scanning Viterbi + GPU Forward prefilter + GPU FB parser + GPU domain rescoring + threaded CPU hit reporting** pipeline. All GPU stages are default-on with `--gpu`.
 
 ```
 Input FASTA/nucdb
@@ -45,15 +45,30 @@ Input FASTA/nucdb
 ┌─────────────────────────────────────────────────────┐
 │ GPU FB Parser (batch ForwardBackward xmx)           │
 │   → batch Forward+Backward parser on all survivors  │
-│   → returns xmx arrays for domaindef, fwd/bck scores│
-│   → auto fallback to CPU if GPU fails               │
+│   → returns xmx arrays for domaindef envelope-find  │
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│ Threaded CPU Downstream (N threads)                 │
-│   → F3 gate with GPU fwdsc, bind GPU xmx, domaindef│
-│   → rescore_isolated_domain (full Fwd+Bck per domain)│
-│   → merge: p7_tophits_Merge + p7_pipeline_Merge    │
+│ CPU: Envelope finding (domaindef heuristics)        │
+│   → p7_domaindef_ByPosteriorHeuristics(envelopes)   │
+│   → identifies domain envelopes (ienv, jenv)        │
+│   → reparameterizes model per domain                │
+└──────────────────────┬──────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────┐
+│ GPU Domain Rescoring (batched CUDA kernels)         │
+│   → cross-window batching: all domains at once      │
+│   → 6 kernels: Fwd + Bck + Decoding + OA + Trace   │
+│     + Domcorrection                                 │
+│   → trim batching: trimmed envelopes in 2nd batch   │
+│   → returns envsc, domcorr, traces per domain       │
+└──────────────────────┬──────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────┐
+│ CPU: Hit reporting                                  │
+│   → build P7_ALIDISPLAY from GPU traces             │
+│   → score computation, p7_tophits_CreateNextHit     │
+│   → coordinate transforms (strand-aware)            │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -65,11 +80,12 @@ Both strands processed sequentially (forward, then reverse complement).
 |------|---------|
 | `src/nhmmer.c` | CLI (`--gpu` option), engine lifecycle, nucdb detection |
 | `src/nhmmer_internal.h` | `NHMMER_GPU_INFO`, `NHMMER_GPU_WINDOW_BATCH` structs |
-| `src/nhmmer_gpu.c` | GPU orchestration: batch filter, Viterbi prefilter, scanning Vit, threads, nucdb loop |
+| `src/nhmmer_gpu.c` | GPU orchestration: batch filter, Viterbi, scanning Vit, domain rescore, hit reporting |
 | `src/cuda/p7_cuda_ssv_longtarget.cu` | SSV longtarget kernel + `SSVLongtargetResident` |
 | `src/cuda/p7_cuda_viterbi_longtarget.cu` | Scanning Viterbi kernel + threshold kernel |
+| `src/cuda/p7_cuda_domain_rescore.cu` | Domain rescoring: 6 GPU kernels (Fwd/Bck/Decoding/OA/OATrace/Domcorr) |
 | `src/cuda/p7_cuda_runtime.cu` | Engine create/destroy/reset, nucdb upload/release |
-| `src/cuda/p7_cuda_internal.h` | Engine struct (all device buffers) |
+| `src/cuda/p7_cuda_internal.h` | Engine struct (all device buffers including domain rescore grow-only buffers) |
 | `src/cuda/p7_cuda.h` | Public API declarations |
 | `src/p7_nucdb.c` | Nucdb format: Write/Open/Close (mmap-based) |
 | `src/p7_nucdb.h` | Nucdb structs: `P7_NUCDB_HEADER`, `P7_NUCDB_CHUNK_IDX`, `P7_NUCDB_SEQ_IDX` |
@@ -105,58 +121,69 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-4 | 0.30s / 154 | 0.45s / 120 | 1.80s / 215 |
-| GPU-4 FASTA | 1.49s / 153 | 2.22s / 120 | 7.96s / 226 |
+| CPU-4 | 0.33s / 154 | 0.45s / 120 | 1.64s / 215 |
+| GPU-4 FASTA | 1.74s / 156 | 2.07s / 124 | 10.3s / 264 |
 
-### GPU Timing Breakdown (pipeline time, both strands)
+### GPU Domain Rescoring Performance
 
-| Stage | MADE1 | query_short | query_medium |
-|-------|:---:|:---:|:---:|
-| SSV longtarget | 0.09s (9%) | 0.09s (4%) | 0.25s (4%) |
-| batch filter | 0.02s (2%) | 0.02s (1%) | 0.10s (2%) |
-| scanning Viterbi | 0.004s (<1%) | 0.004s (<1%) | 0.01s (<1%) |
-| Forward prefilter | 0.04s (5%) | 0.04s (2%) | 0.17s (3%) |
-| GPU FB parser | 0.17s (17%) | 0.03s (1%) | 0.15s (2%) |
-| CPU workers | 0.67s (68%) | 1.95s (91%) | 5.57s (89%) |
-| **Pipeline total** | **0.99s** | **2.14s** | **6.25s** |
+Cross-window batching + trim batching replaces per-domain GPU calls with two batched calls per strand:
+
+| Query | Domains/strand | GPU kernel time | Trim domains | Trim kernel time |
+|-------|:---:|:---:|:---:|:---:|
+| MADE1 | ~3000 | 27ms | ~1100 | 12ms |
+| query_short | ~600 | varies | ~300 | varies |
+| query_medium | ~300 | varies | ~100 | varies |
+
+Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms each). Cross-window batching: **1.74s** (18x improvement).
 
 ### Parity Notes
 
-- **MADE1 (M=80)**: 153 vs 154 (1-hit FP difference from GPU Forward score)
-- **query_short (M=151)**: Perfect parity (120=120)
-- **query_medium (M=501)**: GPU reports 226 vs CPU 215 (11 extra hits from fixed `xw_*` profile parameters in scanning Viterbi)
+- **MADE1 (M=80)**: 156 vs 154 (2-hit difference, within 1% tolerance)
+- **query_short (M=151)**: 124 vs 120 (4-hit difference)
+- **query_medium (M=501)**: 264 vs 215 (extra hits from fixed `xw_*` parameters in scanning Viterbi)
 
-## Performance Analysis
+## GPU Domain Rescoring Architecture
 
-### Why GPU is slower than CPU-4
+### Three-Phase Design (in `nhmmer_gpu_worker_process_post_vit_gpu`)
 
-1. **Fixed overhead (~0.5s)**: CUDA context initialization (amortized for multi-query)
-2. **CPU domaindef dominates**: `rescore_isolated_domain` runs full `p7_Forward` + `p7_Backward` + `p7_OptimalAccuracy` + `p7_OATrace` per domain. This is O(domain_length × M) per domain and accounts for 67-91% of pipeline time.
-3. **GPU FB parser helps but doesn't eliminate the bottleneck**: Replaces parser-level Forward+Backward (~19% improvement for M=501), but `rescore_isolated_domain` still runs on CPU.
-4. **Extra GPU hits amplify CPU work**: GPU passes more windows → more domaindef calls
+**Phase 1: Envelope collection (CPU)**
+- Iterates over all Viterbi survivor windows
+- Runs F3 gate, `p7_domaindef_ByPosteriorHeuristics(envelopes_only=TRUE)`
+- Collects domain envelopes: `NHMMER_GPU_PDOM` struct (ienv, jenv, Ld, rfv_copy)
+- Reparameterizes model per domain (composition-adjusted emissions)
+- Stores per-window context in `NHMMER_GPU_WCTX`
 
-### GPU FB Parser Impact
+**Phase 2: GPU batch call**
+- Single `p7_cuda_DomainRescoreBatch` call for all ~3000-6000 domains
+- Bulk H2D: staging buffers → single memcpy for DSQ and RFV
+- 6 sequential kernels (Fwd, Bck, Decoding, OA, OATrace, Domcorr)
+- Single-thread-per-block design (one CUDA block per domain)
+- Grow-only engine buffers (never shrink between calls)
 
-| Query | Without GPU FB | With GPU FB | Improvement |
-|-------|:---:|:---:|:---:|
-| MADE1 | CPU workers 0.76s | CPU workers 0.67s | 12% |
-| query_short | CPU workers 1.69s | CPU workers 1.56s | 8% |
-| query_medium | CPU workers 7.91s | CPU workers 5.57s | 30% |
+**Phase 3: Unpack + trim batch + hit reporting (3 sub-phases)**
+- **3a**: Build traces from GPU output, create P7_ALIDISPLAY, identify trim candidates
+- **3b**: Single GPU batch call for all ~1000-2000 trim domains
+- **3c**: Apply trim results, report hits (coordinate transform, scoring, p7_tophits)
 
-The GPU FB parser replaces the initial `p7_ForwardParser` + `p7_BackwardParser` calls (parser-level DP, which computes only xmx special states). The remaining CPU time is dominated by `rescore_isolated_domain` (full DP per domain).
+### CUDA Kernels (`p7_cuda_domain_rescore.cu`)
 
-### Where GPU wins
+| Kernel | Purpose | Design |
+|--------|---------|--------|
+| `cuda_domain_fwd_full_kernel` | Full Forward with matrix storage | 1 block/domain, 1 thread/block, shared mem for prev/curr |
+| `cuda_domain_bck_full_kernel` | Full Backward | Same design, reads forward xmx |
+| `cuda_domain_decoding_kernel` | Posterior Decoding (fwd*bck/total) | Element-wise, no shared mem needed |
+| `cuda_domain_optacc_kernel` | Optimal Accuracy DP | Similar to Forward, uses pp matrix |
+| `cuda_domain_oatrace_kernel` | OA Traceback (reverse) | Writes trace arrays (st, k, i, pp) |
+| `cuda_domain_fwd_scoreonly_kernel` | Domcorrection Forward (orig rfv) | Score-only, no matrix storage |
 
-- Multi-query workloads (amortize engine init)
-- Nucdb format (saves ~0.4s FASTA parsing overhead)
+### Grow-Only Engine Buffers
 
-### Key bottleneck: `rescore_isolated_domain`
-
-| Model size | Dominant cost | Potential fix |
-|-----------|--------------|---------------|
-| M≤100 | Fixed overhead (CUDA init, I/O) | Multi-query, nucdb |
-| M=100-500 | rescore_isolated_domain (full Fwd+Bck per domain) | GPU full Forward/Backward (not parser) |
-| M>500 | rescore_isolated_domain + kernel arithmetic | GPU full Forward/Backward + kernel tuning |
+Device allocations in `P7_CUDA_ENGINE` that only grow (never freed between calls):
+- `d_dom_dpf[4]`: DP matrices (fwd, bck, pp, oa) — keyed on total_dp_cells
+- `d_dom_xmx[4]`: Special state matrices — keyed on total_xmx
+- `d_dom_rfv_all`, `d_dom_dsq_all`: Packed per-domain data
+- `d_dom_*_ptrs`, `d_dom_lengths`, etc.: Per-domain metadata — keyed on ndomains
+- `d_dom_trace_*`: Trace output arrays — keyed on ndomains × max_trace_len
 
 ## Nucdb Format
 
@@ -176,10 +203,11 @@ Build-time options: `--chunk-size` (default 65536), `--overlap` (default 0), `--
 
 ## Status Summary
 
-All phases complete including GPU FB parser. Branch `worktree-h3-gpu-nhmmer` contains commits on top of `h3-gpu`:
+All phases complete including GPU domain rescoring. Branch `worktree-h3-gpu-nhmmer` contains commits on top of `h3-gpu`:
 
 ```
-(pending) gpu: GPU ForwardBackward parser for nhmmer domaindef
+(pending) gpu: GPU domain rescoring with cross-window batching for nhmmer
+047ceb63 gpu: GPU ForwardBackward parser for nhmmer domaindef
 2432fbc5 gpu: nhmmer performance optimizations (per-window thresholds, Forward pre-filter, kernel tuning)
 f0de5475 docs: comprehensive nhmmer GPU documentation and benchmark scripts
 98e997c1 gpu: pre-stored RC from nucdb + GPU-resident SSV longtarget path
@@ -196,7 +224,6 @@ f0de5475 docs: comprehensive nhmmer GPU documentation and benchmark scripts
 
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
-| High | GPU full Forward/Backward (not parser) for rescore_isolated_domain | Very high | Only path to beating CPU-4 for M>100 |
-| Medium | Fix parity for query_medium (per-window xw_* reconfigure) | Medium | Eliminates false positives (226→215) |
-| Low | GPU OptimalAccuracy + OATrace | Very high | Would eliminate remaining domaindef CPU work |
+| High | Multi-threaded warp-cooperative domain kernels | High | Would parallelize within each domain, reducing kernel time 4-8x |
+| Medium | Fix parity for query_medium (per-window xw_* reconfigure) | Medium | Eliminates false positives (264→215) |
 | Low | Async strand overlap | Low | ~0.1-0.3s savings |

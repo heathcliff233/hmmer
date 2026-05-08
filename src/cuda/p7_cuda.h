@@ -214,6 +214,26 @@ extern int  p7_cuda_engine_UploadNucdb(P7_CUDA_ENGINE *engine, const uint8_t *da
 extern void p7_cuda_engine_ReleaseNucdb(P7_CUDA_ENGINE *engine);
 extern const uint8_t *p7_cuda_engine_NucdbDevPtr(const P7_CUDA_ENGINE *engine);
 
+extern int  p7_cuda_DomainRescoreBatch(P7_CUDA_ENGINE *engine,
+                                       const P7_CUDA_MSVPROFILE *cuom,
+                                       int ndomains,
+                                       const uint8_t **h_dsq_ptrs,
+                                       const int      *h_lengths,
+                                       const float   **h_rfv_ptrs,
+                                       const float    *h_orig_rfv,
+                                       int Q, int Kp, float nj,
+                                       float   *h_envsc,
+                                       float   *h_domcorrection,
+                                       float   *h_oasc,
+                                       int8_t  *h_trace_st,
+                                       int     *h_trace_k,
+                                       int     *h_trace_i,
+                                       float   *h_trace_pp,
+                                       int     *h_trace_N,
+                                       int      max_trace_len,
+                                       int     *h_statuses,
+                                       char    *errbuf, int errbuf_size);
+
 extern int  p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                       const ESL_DSQ *dsq, int L,
                                       const P7_HMM_WINDOW *windows, int nwindows,
