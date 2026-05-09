@@ -29,9 +29,15 @@ dr_cell_lane(int c, int Q)
 /* ================================================================
  * Kernel 1: Full Forward with full dpf matrix storage
  *
- * One block per domain. Single thread per block.
+ * One block per domain, T threads cooperating.
+ * - M/I cells: strided over c
+ * - D-state per-row chain: parallel (a,b) prefix scan in 2-cell pairs
+ * - xE accumulation: tree reduction
+ * - Full dpf row write: strided
  * Unihit mode: xf_e_loop=0 (no J), xf_e_move=1 (E->C always).
  * Stores xmx special states AND full M/I/D cells per position.
+ *
+ * Shared memory layout: prev[3N] + curr[3N] + bcoef[N] + scanA[T] + scanB[T]
  * ================================================================ */
 __global__ static void
 cuda_domain_fwd_full_kernel(const uint8_t **dsq_ptrs, const int *lengths,
@@ -45,110 +51,219 @@ cuda_domain_fwd_full_kernel(const uint8_t **dsq_ptrs, const int *lengths,
 {
   extern __shared__ float shmem[];
   int b = blockIdx.x;
+  int tid = threadIdx.x;
+  int T = blockDim.x;
   int N = Q * 4;
-  float *prev = shmem;
-  float *curr = prev + (size_t)N * 3;
-
-  if (threadIdx.x != 0) return;
-
-  const uint8_t *dsq = dsq_ptrs[b];
-  int L = lengths[b];
-  const float *rfv = rfv_ptrs[b];
-  float *dpf = dpf_out + dp_offsets[b];
-  float *xmx = xmx_out + xmx_offsets[b];
-
-  /* Unihit mode: pmove/ploop are L-dependent; J loop disabled */
-  float pmove = (2.0f + nj) / ((float)L + 2.0f + nj);
-  float ploop = 1.0f - pmove;
-
-  float xN = 1.0f, xJ = 0.0f, xC = 0.0f, xE = 0.0f;
-  float xB = pmove;
-  float totscale = 0.0f;
+  float *prev  = shmem;
+  float *curr  = prev + (size_t)N * 3;
+  float *bcoef = curr + (size_t)N * 3;
+  float *scanA = bcoef + N;
+  float *scanB = scanA + T;
+  __shared__ int sL;
+  __shared__ const uint8_t *sdsq;
+  __shared__ const float *srfv;
+  __shared__ float *sdpf;
+  __shared__ float *sxmx;
+  __shared__ float spmove, sploop;
+  __shared__ float sxN, sxJ, sxB, sxC, sxE, stotscale;
+  __shared__ float sscale, sinv;
 
   size_t row_cells = (size_t)N * 3;
 
-  for (int c = 0; c < N * 3; c++) prev[c] = 0.0f;
-  for (int c = 0; c < (int)row_cells; c++) dpf[c] = 0.0f;
+  if (tid == 0) {
+    sL = lengths[b];
+    sdsq = dsq_ptrs[b];
+    srfv = rfv_ptrs[b];
+    sdpf = dpf_out + dp_offsets[b];
+    sxmx = xmx_out + xmx_offsets[b];
 
-  xmx[p7X_E] = xE;
-  xmx[p7X_N] = xN;
-  xmx[p7X_J] = xJ;
-  xmx[p7X_B] = xB;
-  xmx[p7X_C] = xC;
-  xmx[p7X_SCALE] = 1.0f;
+    spmove = (2.0f + nj) / ((float)sL + 2.0f + nj);
+    sploop = 1.0f - spmove;
+    sxN = 1.0f; sxJ = 0.0f; sxC = 0.0f; sxE = 0.0f;
+    sxB = spmove;
+    stotscale = 0.0f;
 
-  for (int i = 1; i <= L; i++) {
-    uint8_t x = dsq[i];
-    if (x >= Kp) { envsc_out[b] = 0.0f; statuses_out[b] = eslEINVAL; return; }
+    sxmx[p7X_E]     = 0.0f;
+    sxmx[p7X_N]     = 1.0f;
+    sxmx[p7X_J]     = 0.0f;
+    sxmx[p7X_B]     = sxB;
+    sxmx[p7X_C]     = 0.0f;
+    sxmx[p7X_SCALE] = 1.0f;
+  }
+  __syncthreads();
 
-    xE = 0.0f;
-    for (int c = 0; c < N; c++) {
+  for (int c = tid; c < (int)row_cells; c += T) prev[c] = 0.0f;
+  for (int c = tid; c < (int)row_cells; c += T) sdpf[c] = 0.0f;
+  __syncthreads();
+
+  for (int i = 1; i <= sL; i++) {
+    uint8_t x = sdsq[i];
+    if (x >= Kp) {
+      if (tid == 0) { envsc_out[b] = 0.0f; statuses_out[b] = eslEINVAL; }
+      __syncthreads();
+      return;
+    }
+
+    /* M/I states: strided over c */
+    for (int c = tid; c < N; c += T) {
       int q = dr_cell_q(c, Q);
       int lane = dr_cell_lane(c, Q);
       int cell = c * 3;
       float mpv = (c == 0) ? 0.0f : prev[(c - 1) * 3 + 0];
       float dpv = (c == 0) ? 0.0f : prev[(c - 1) * 3 + 1];
       float ipv = (c == 0) ? 0.0f : prev[(c - 1) * 3 + 2];
-      float m = xB * tfv[dr_tfv_idx(p7O_BM, q, lane, Q)];
+      float m = sxB * tfv[dr_tfv_idx(p7O_BM, q, lane, Q)];
       m += mpv * tfv[dr_tfv_idx(p7O_MM, q, lane, Q)];
       m += ipv * tfv[dr_tfv_idx(p7O_IM, q, lane, Q)];
       m += dpv * tfv[dr_tfv_idx(p7O_DM, q, lane, Q)];
-      m *= rfv[((int)x * Q + q) * 4 + lane];
+      m *= srfv[((int)x * Q + q) * 4 + lane];
       curr[cell + 0] = m;
       curr[cell + 2] = prev[cell + 0] * tfv[dr_tfv_idx(p7O_MI, q, lane, Q)]
                       + prev[cell + 2] * tfv[dr_tfv_idx(p7O_II, q, lane, Q)];
     }
+    __syncthreads();
 
-    curr[1] = 0.0f;
-    for (int c = 1; c < N; c++) {
-      int pq = dr_cell_q(c - 1, Q);
-      int plane = dr_cell_lane(c - 1, Q);
-      curr[c * 3 + 1] = curr[(c - 1) * 3 + 0] * tfv[dr_tfv_idx(p7O_MD, pq, plane, Q)]
-                       + curr[(c - 1) * 3 + 1] * tfv[dr_tfv_idx(p7O_DD, pq, plane, Q)];
+    /* D init: D[c] = a[c] + bcoef[c] * D[c-1], a[c] = curr[(c-1).M]*MD, bcoef = DD */
+    for (int c = tid; c < N; c += T) {
+      int cell = c * 3;
+      if (c == 0) {
+        curr[cell + 1] = 0.0f;
+        bcoef[c] = 0.0f;
+      } else {
+        int pq = dr_cell_q(c - 1, Q);
+        int plane = dr_cell_lane(c - 1, Q);
+        curr[cell + 1] = curr[(c - 1) * 3 + 0] * tfv[dr_tfv_idx(p7O_MD, pq, plane, Q)];
+        bcoef[c] = tfv[dr_tfv_idx(p7O_DD, pq, plane, Q)];
+      }
+    }
+    __syncthreads();
+
+    /* Pairwise (a,b) prefix scan over D recurrence: each tid handles cells c0=2*tid, c1=c0+1.
+       After scan, scanA[tid] = D[c1] (or D[c0] if c1>=N), with prefixes from earlier pairs. */
+    if (tid < T) {
+      int c0 = tid * 2;
+      int c1 = c0 + 1;
+      if (c0 < N) {
+        float a0 = curr[c0 * 3 + 1];
+        float b0 = bcoef[c0];
+        float a1 = (c1 < N) ? curr[c1 * 3 + 1] : 0.0f;
+        float b1 = (c1 < N) ? bcoef[c1] : 1.0f;
+        scanA[tid] = a1 + b1 * a0;
+        scanB[tid] = b1 * b0;
+      } else {
+        scanA[tid] = 0.0f;
+        scanB[tid] = 1.0f;
+      }
+    }
+    __syncthreads();
+
+    for (int off = 1; off < T; off <<= 1) {
+      float a_prev = 0.0f, b_prev = 1.0f, a_cur = 0.0f, b_cur = 1.0f;
+      if (tid < T) {
+        a_cur = scanA[tid];
+        b_cur = scanB[tid];
+        if (tid >= off) { a_prev = scanA[tid - off]; b_prev = scanB[tid - off]; }
+      }
+      __syncthreads();
+      if (tid < T && tid >= off) {
+        scanA[tid] = a_cur + b_cur * a_prev;
+        scanB[tid] = b_cur * b_prev;
+      }
+      __syncthreads();
     }
 
-    for (int c = 0; c < N; c++) xE += curr[c * 3 + 0] + curr[c * 3 + 1];
+    if (tid < T) {
+      int c0 = tid * 2;
+      int c1 = c0 + 1;
+      if (c0 < N) {
+        float prefixA = (tid == 0) ? 0.0f : scanA[tid - 1];
+        float a0 = curr[c0 * 3 + 1];
+        float d0 = a0 + bcoef[c0] * prefixA;
+        curr[c0 * 3 + 1] = d0;
+        if (c1 < N) {
+          float a1 = curr[c1 * 3 + 1];
+          curr[c1 * 3 + 1] = a1 + bcoef[c1] * d0;
+        }
+      }
+    }
+    __syncthreads();
 
-    /* Unihit: E->C = 1.0, E->J = 0, J loop = 0, J->B = 0 */
-    xN = xN * ploop;
-    xC = (xC * ploop) + xE;      /* xf_e_move = 1.0 in unihit */
-    xJ = 0.0f;                    /* J disabled in unihit */
-    xB = xN * pmove;              /* only N->B path in unihit */
-
-    float scale = 1.0f;
-    if (xE > 1.0e4f) {
-      scale = xE;
-      float inv = 1.0f / xE;
-      xN *= inv; xC *= inv; xJ *= inv; xB *= inv;
-      for (int c = 0; c < N * 3; c++) curr[c] *= inv;
-      totscale += logf(xE);
-      xE = 1.0f;
+    /* xE = sum over c of (M[c] + D[c]): tree reduction */
+    {
+      float partial = 0.0f;
+      for (int c = tid; c < N; c += T) partial += curr[c * 3 + 0] + curr[c * 3 + 1];
+      scanA[tid] = partial;
+    }
+    __syncthreads();
+    for (int off = T >> 1; off > 0; off >>= 1) {
+      if (tid < off) scanA[tid] += scanA[tid + off];
+      __syncthreads();
     }
 
-    float *dpf_row = dpf + (size_t)i * row_cells;
-    for (int c = 0; c < (int)row_cells; c++) dpf_row[c] = curr[c];
+    if (tid == 0) {
+      sxE = scanA[0];
+      /* Unihit: E->C = 1.0, E->J = 0, J loop = 0, J->B = 0 */
+      sxN = sxN * sploop;
+      sxC = (sxC * sploop) + sxE;
+      sxJ = 0.0f;
+      sxB = sxN * spmove;
+      sscale = 1.0f;
+      sinv = 1.0f;
+      if (sxE > 1.0e4f) {
+        sscale = sxE;
+        sinv = 1.0f / sxE;
+        sxN *= sinv; sxC *= sinv; sxJ *= sinv; sxB *= sinv;
+        stotscale += logf(sxE);
+        sxE = 1.0f;
+      }
 
-    xmx[i * p7X_NXCELLS + p7X_E]     = xE;
-    xmx[i * p7X_NXCELLS + p7X_N]     = xN;
-    xmx[i * p7X_NXCELLS + p7X_J]     = xJ;
-    xmx[i * p7X_NXCELLS + p7X_B]     = xB;
-    xmx[i * p7X_NXCELLS + p7X_C]     = xC;
-    xmx[i * p7X_NXCELLS + p7X_SCALE] = scale;
+      sxmx[i * p7X_NXCELLS + p7X_E]     = sxE;
+      sxmx[i * p7X_NXCELLS + p7X_N]     = sxN;
+      sxmx[i * p7X_NXCELLS + p7X_J]     = sxJ;
+      sxmx[i * p7X_NXCELLS + p7X_B]     = sxB;
+      sxmx[i * p7X_NXCELLS + p7X_C]     = sxC;
+      sxmx[i * p7X_NXCELLS + p7X_SCALE] = sscale;
+    }
+    __syncthreads();
 
-    float *tmp = prev; prev = curr; curr = tmp;
+    if (sscale > 1.0f) {
+      for (int c = tid; c < (int)row_cells; c += T) curr[c] *= sinv;
+      __syncthreads();
+    }
+
+    /* Strided write of full dpf row */
+    {
+      float *dpf_row = sdpf + (size_t)i * row_cells;
+      for (int c = tid; c < (int)row_cells; c += T) dpf_row[c] = curr[c];
+    }
+    __syncthreads();
+
+    /* All threads must observe the same prev/curr after each row.
+       Recompute from i parity instead of swapping per-thread pointers. */
+    {
+      int swap = (i & 1);
+      prev = swap ? (shmem + (size_t)N * 3) : shmem;
+      curr = swap ? shmem : (shmem + (size_t)N * 3);
+    }
   }
 
-  if (isnan(xC) || (L > 0 && xC == 0.0f) || isinf(xC)) {
-    envsc_out[b] = 0.0f;
-    statuses_out[b] = eslERANGE;
-  } else {
-    envsc_out[b] = totscale + logf(xC * pmove);
-    statuses_out[b] = eslOK;
+  if (tid == 0) {
+    if (isnan(sxC) || (sL > 0 && sxC == 0.0f) || isinf(sxC)) {
+      envsc_out[b] = 0.0f;
+      statuses_out[b] = eslERANGE;
+    } else {
+      envsc_out[b] = stotscale + logf(sxC * spmove);
+      statuses_out[b] = eslOK;
+    }
   }
 }
 
 /* ================================================================
  * Kernel 2: Full Backward with full dpf matrix storage
+ *
+ * One block per domain, T threads cooperating.
+ * Mirrors cuda_backward_parser_xmx_batch_parallel_kernel layout.
+ * Shared memory: next[3N] + curr[3N] + bcoef[N] + scanA[T] + scanB[T]
  * ================================================================ */
 __global__ static void
 cuda_domain_bck_full_kernel(const uint8_t **dsq_ptrs, const int *lengths,
@@ -162,84 +277,187 @@ cuda_domain_bck_full_kernel(const uint8_t **dsq_ptrs, const int *lengths,
 {
   extern __shared__ float shmem[];
   int b = blockIdx.x;
+  int tid = threadIdx.x;
+  int T = blockDim.x;
   int N = Q * 4;
-  float *next = shmem;
-  float *curr = next + (size_t)N * 3;
+  float *next  = shmem;
+  float *curr  = next + (size_t)N * 3;
+  float *bcoef = curr + (size_t)N * 3;
+  float *scanA = bcoef + N;
+  float *scanB = scanA + T;
+  __shared__ int sL;
+  __shared__ const uint8_t *sdsq;
+  __shared__ const float *srfv;
+  __shared__ float *sdpf;
+  __shared__ float *sxbck;
+  __shared__ const float *sxfwd;
+  __shared__ float spmove, sploop;
+  __shared__ float sxJ, sxB, sxN, sxC, sxE, stotscale;
+  __shared__ float sscale, sinv;
 
-  if (threadIdx.x != 0) return;
-
-  const uint8_t *dsq = dsq_ptrs[b];
-  int L = lengths[b];
-  const float *rfv = rfv_ptrs[b];
-  float *dpf = dpf_out + dp_offsets[b];
-  float *xbck = xmx_out + xmx_offsets[b];
-  const float *xfwd = xmx_fwd + xmx_offsets[b];
   size_t row_cells = (size_t)N * 3;
 
-  /* Unihit mode */
-  float pmove = (2.0f + nj) / ((float)L + 2.0f + nj);
-  float ploop = 1.0f - pmove;
-  float xJ = 0.0f, xB = 0.0f, xN = 0.0f;
-  float xC = pmove;         /* xf_c_move in unihit = pmove */
-  float xE = xC * 1.0f;    /* xf_e_move = 1.0 in unihit */
-  float totscale = 0.0f;
+  if (tid == 0) {
+    sL = lengths[b];
+    sdsq = dsq_ptrs[b];
+    srfv = rfv_ptrs[b];
+    sdpf = dpf_out + dp_offsets[b];
+    sxbck = xmx_out + xmx_offsets[b];
+    sxfwd = xmx_fwd + xmx_offsets[b];
 
-  /* Initialize row L */
-  for (int c = 0; c < N; c++) {
-    next[c * 3 + 0] = xE;
-    next[c * 3 + 1] = xE;
+    spmove = (2.0f + nj) / ((float)sL + 2.0f + nj);
+    sploop = 1.0f - spmove;
+    sxJ = 0.0f; sxB = 0.0f; sxN = 0.0f;
+    sxC = spmove;
+    sxE = sxC * 1.0f;     /* xf_e_move = 1.0 in unihit */
+    stotscale = 0.0f;
+  }
+  __syncthreads();
+
+  /* ---- Row L initialization ---- */
+  for (int c = tid; c < N; c += T) {
+    next[c * 3 + 0] = sxE;
+    next[c * 3 + 1] = sxE;
     next[c * 3 + 2] = 0.0f;
   }
-  for (int c = N - 2; c >= 0; c--) {
-    int q = dr_cell_q(c, Q);
-    int lane = dr_cell_lane(c, Q);
-    next[c * 3 + 1] += next[(c + 1) * 3 + 1] * tfv[dr_tfv_idx(p7O_DD, q, lane, Q)];
+  __syncthreads();
+
+  /* Reverse DD prefix scan over D states.
+     Original recurrence: for c = N-2..0: next[c].D += next[c+1].D * tfv[DD,c]
+     In (a,b) form going right-to-left, pair tid handles c0=N-1-2*tid, c1=c0-1. */
+  if (tid < T) {
+    int c0 = N - 1 - tid * 2;
+    int c1 = c0 - 1;
+    if (c0 >= 0 && c0 < N) {
+      float a0 = next[c0 * 3 + 1];
+      float b0 = (c0 + 1 < N) ? tfv[dr_tfv_idx(p7O_DD, dr_cell_q(c0, Q), dr_cell_lane(c0, Q), Q)] : 0.0f;
+      if (c1 >= 0) {
+        float a1 = next[c1 * 3 + 1];
+        float b1 = tfv[dr_tfv_idx(p7O_DD, dr_cell_q(c1, Q), dr_cell_lane(c1, Q), Q)];
+        scanA[tid] = a1 + b1 * a0;
+        scanB[tid] = b1 * b0;
+      } else {
+        scanA[tid] = a0;
+        scanB[tid] = b0;
+      }
+    } else {
+      scanA[tid] = 0.0f;
+      scanB[tid] = 1.0f;
+    }
   }
-  for (int c = N - 2; c >= 0; c--) {
-    int q = dr_cell_q(c, Q);
-    int lane = dr_cell_lane(c, Q);
-    next[c * 3 + 0] += next[(c + 1) * 3 + 1] * tfv[dr_tfv_idx(p7O_MD, q, lane, Q)];
+  __syncthreads();
+  for (int off = 1; off < T; off <<= 1) {
+    float a_prev = 0.0f, b_prev = 1.0f, a_cur = 0.0f, b_cur = 1.0f;
+    if (tid < T) {
+      a_cur = scanA[tid];
+      b_cur = scanB[tid];
+      if (tid >= off) { a_prev = scanA[tid - off]; b_prev = scanB[tid - off]; }
+    }
+    __syncthreads();
+    if (tid < T && tid >= off) {
+      scanA[tid] = a_cur + b_cur * a_prev;
+      scanB[tid] = b_cur * b_prev;
+    }
+    __syncthreads();
+  }
+  if (tid < T) {
+    int c0 = N - 1 - tid * 2;
+    int c1 = c0 - 1;
+    float incoming = (tid == 0) ? 0.0f : scanA[tid - 1];
+    if (c0 >= 0 && c0 < N) {
+      float b0 = (c0 + 1 < N) ? tfv[dr_tfv_idx(p7O_DD, dr_cell_q(c0, Q), dr_cell_lane(c0, Q), Q)] : 0.0f;
+      float d0 = next[c0 * 3 + 1] + b0 * incoming;
+      next[c0 * 3 + 1] = d0;
+      if (c1 >= 0) {
+        float b1 = tfv[dr_tfv_idx(p7O_DD, dr_cell_q(c1, Q), dr_cell_lane(c1, Q), Q)];
+        next[c1 * 3 + 1] = next[c1 * 3 + 1] + b1 * d0;
+      }
+    }
+  }
+  __syncthreads();
+
+  /* MD pass: next[c].M += next[c+1].D * tfv[MD,c] (independent across c, strided) */
+  for (int c = tid; c < N - 1; c += T) {
+    next[c * 3 + 0] += next[(c + 1) * 3 + 1] * tfv[dr_tfv_idx(p7O_MD, dr_cell_q(c, Q), dr_cell_lane(c, Q), Q)];
+  }
+  __syncthreads();
+
+  if (tid == 0) {
+    sscale = sxfwd[sL * p7X_NXCELLS + p7X_SCALE];
+    if (sscale > 1.0f) {
+      sinv = 1.0f / sscale;
+      sxE *= sinv; sxN *= sinv; sxC *= sinv; sxJ *= sinv; sxB *= sinv;
+      stotscale += logf(sscale);
+    } else {
+      sinv = 1.0f;
+    }
+
+    sxbck[sL * p7X_NXCELLS + p7X_E]     = sxE;
+    sxbck[sL * p7X_NXCELLS + p7X_N]     = sxN;
+    sxbck[sL * p7X_NXCELLS + p7X_J]     = sxJ;
+    sxbck[sL * p7X_NXCELLS + p7X_B]     = sxB;
+    sxbck[sL * p7X_NXCELLS + p7X_C]     = sxC;
+    sxbck[sL * p7X_NXCELLS + p7X_SCALE] = sscale;
+  }
+  __syncthreads();
+
+  if (sscale > 1.0f) {
+    for (int c = tid; c < (int)row_cells; c += T) next[c] *= sinv;
+    __syncthreads();
   }
 
-  float scale = xfwd[L * p7X_NXCELLS + p7X_SCALE];
-  if (scale > 1.0f) {
-    float inv = 1.0f / scale;
-    xE *= inv; xN *= inv; xC *= inv; xJ *= inv; xB *= inv;
-    for (int c = 0; c < N * 3; c++) next[c] *= inv;
-    totscale += logf(scale);
+  {
+    float *dpf_rowL = sdpf + (size_t)sL * row_cells;
+    for (int c = tid; c < (int)row_cells; c += T) dpf_rowL[c] = next[c];
   }
+  __syncthreads();
 
-  float *dpf_rowL = dpf + (size_t)L * row_cells;
-  for (int c = 0; c < (int)row_cells; c++) dpf_rowL[c] = next[c];
+  /* ---- Main backward loop, i = L-1 .. 1 ---- */
+  for (int i = sL - 1; i >= 1; i--) {
+    uint8_t x = sdsq[i + 1];
+    if (x >= Kp) {
+      if (tid == 0) { bcksc_out[b] = 0.0f; statuses_out[b] = eslEINVAL; }
+      __syncthreads();
+      return;
+    }
 
-  xbck[L * p7X_NXCELLS + p7X_E]     = xE;
-  xbck[L * p7X_NXCELLS + p7X_N]     = xN;
-  xbck[L * p7X_NXCELLS + p7X_J]     = xJ;
-  xbck[L * p7X_NXCELLS + p7X_B]     = xB;
-  xbck[L * p7X_NXCELLS + p7X_C]     = xC;
-  xbck[L * p7X_NXCELLS + p7X_SCALE] = scale;
+    /* xB = sum over c of next[c].M * rfv[x][c] * tfv[BM,c] : tree reduction */
+    {
+      float partial = 0.0f;
+      for (int c = tid; c < N; c += T) {
+        int q = dr_cell_q(c, Q);
+        int lane = dr_cell_lane(c, Q);
+        float mpv = next[c * 3 + 0] * srfv[((int)x * Q + q) * 4 + lane];
+        partial += mpv * tfv[dr_tfv_idx(p7O_BM, q, lane, Q)];
+      }
+      scanA[tid] = partial;
+    }
+    __syncthreads();
+    for (int off = T >> 1; off > 0; off >>= 1) {
+      if (tid < off) scanA[tid] += scanA[tid + off];
+      __syncthreads();
+    }
+    if (tid == 0) {
+      sxB = scanA[0];
+      /* Unihit: E->J=0, J=0 */
+      sxC = sxC * sploop;
+      sxJ = 0.0f;
+      sxN = (sxB * spmove) + (sxN * sploop);
+      sxE = sxC * 1.0f;
+    }
+    __syncthreads();
 
-  for (int i = L - 1; i >= 1; i--) {
-    uint8_t x = dsq[i + 1];
-    if (x >= Kp) { bcksc_out[b] = 0.0f; statuses_out[b] = eslEINVAL; return; }
-
-    xB = 0.0f;
-    for (int c = 0; c < N; c++) {
+    /* Per-row inner: M/D/I from next[c+1] + next[c]; bcoef[c] = DD[c]; +xE on M and D. */
+    for (int c = tid; c < N; c += T) {
+      int cell = c * 3;
       int q = dr_cell_q(c, Q);
       int lane = dr_cell_lane(c, Q);
-      float mpv = next[c * 3 + 0] * rfv[((int)x * Q + q) * 4 + lane];
-      xB += mpv * tfv[dr_tfv_idx(p7O_BM, q, lane, Q)];
-    }
-    for (int c = N - 1; c >= 0; c--) {
-      int cell = c * 3;
       float mpv = 0.0f;
       if (c + 1 < N) {
         int nq = dr_cell_q(c + 1, Q);
         int nlane = dr_cell_lane(c + 1, Q);
-        mpv = next[(c + 1) * 3 + 0] * rfv[((int)x * Q + nq) * 4 + nlane];
+        mpv = next[(c + 1) * 3 + 0] * srfv[((int)x * Q + nq) * 4 + nlane];
       }
-      int q = dr_cell_q(c, Q);
-      int lane = dr_cell_lane(c, Q);
       curr[cell + 2] = next[cell + 2] * tfv[dr_tfv_idx(p7O_II, q, lane, Q)];
       curr[cell + 0] = next[cell + 2] * tfv[dr_tfv_idx(p7O_MI, q, lane, Q)];
       if (c + 1 < N) {
@@ -251,78 +469,153 @@ cuda_domain_bck_full_kernel(const uint8_t **dsq_ptrs, const int *lengths,
       } else {
         curr[cell + 1] = 0.0f;
       }
+      curr[cell + 0] += sxE;
+      curr[cell + 1] += sxE;
+      bcoef[c] = (c + 1 < N) ? tfv[dr_tfv_idx(p7O_DD, q, lane, Q)] : 0.0f;
     }
+    __syncthreads();
 
-    /* Unihit: E->J = 0, J = 0 */
-    xC = xC * ploop;
-    xJ = 0.0f;
-    xN = (xB * pmove) + (xN * ploop);
-    xE = xC * 1.0f;   /* xf_e_move = 1.0 */
-
-    for (int c = N - 1; c >= 0; c--) {
-      curr[c * 3 + 0] += xE;
-      curr[c * 3 + 1] += xE;
-      if (c + 1 < N) {
-        int q = dr_cell_q(c, Q);
-        int lane = dr_cell_lane(c, Q);
-        curr[c * 3 + 1] += curr[(c + 1) * 3 + 1] * tfv[dr_tfv_idx(p7O_DD, q, lane, Q)];
+    /* Reverse DD prefix scan, same as row-L init */
+    if (tid < T) {
+      int c0 = N - 1 - tid * 2;
+      int c1 = c0 - 1;
+      if (c0 >= 0 && c0 < N) {
+        float a0 = curr[c0 * 3 + 1];
+        float b0 = bcoef[c0];
+        if (c1 >= 0) {
+          float a1 = curr[c1 * 3 + 1];
+          float b1 = bcoef[c1];
+          scanA[tid] = a1 + b1 * a0;
+          scanB[tid] = b1 * b0;
+        } else {
+          scanA[tid] = a0;
+          scanB[tid] = b0;
+        }
+      } else {
+        scanA[tid] = 0.0f;
+        scanB[tid] = 1.0f;
       }
     }
-    for (int c = N - 2; c >= 0; c--) {
-      int q = dr_cell_q(c, Q);
-      int lane = dr_cell_lane(c, Q);
-      curr[c * 3 + 0] += curr[(c + 1) * 3 + 1] * tfv[dr_tfv_idx(p7O_MD, q, lane, Q)];
+    __syncthreads();
+    for (int off = 1; off < T; off <<= 1) {
+      float a_prev = 0.0f, b_prev = 1.0f, a_cur = 0.0f, b_cur = 1.0f;
+      if (tid < T) {
+        a_cur = scanA[tid];
+        b_cur = scanB[tid];
+        if (tid >= off) { a_prev = scanA[tid - off]; b_prev = scanB[tid - off]; }
+      }
+      __syncthreads();
+      if (tid < T && tid >= off) {
+        scanA[tid] = a_cur + b_cur * a_prev;
+        scanB[tid] = b_cur * b_prev;
+      }
+      __syncthreads();
+    }
+    if (tid < T) {
+      int c0 = N - 1 - tid * 2;
+      int c1 = c0 - 1;
+      float incoming = (tid == 0) ? 0.0f : scanA[tid - 1];
+      if (c0 >= 0 && c0 < N) {
+        float d0 = curr[c0 * 3 + 1] + bcoef[c0] * incoming;
+        curr[c0 * 3 + 1] = d0;
+        if (c1 >= 0) curr[c1 * 3 + 1] = curr[c1 * 3 + 1] + bcoef[c1] * d0;
+      }
+    }
+    __syncthreads();
+
+    /* MD pass on curr (independent across c, strided) */
+    for (int c = tid; c < N - 1; c += T) {
+      curr[c * 3 + 0] += curr[(c + 1) * 3 + 1] * tfv[dr_tfv_idx(p7O_MD, dr_cell_q(c, Q), dr_cell_lane(c, Q), Q)];
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+      sscale = sxfwd[i * p7X_NXCELLS + p7X_SCALE];
+      if (sscale > 1.0f) {
+        sinv = 1.0f / sscale;
+        sxE *= sinv; sxN *= sinv; sxJ *= sinv; sxB *= sinv; sxC *= sinv;
+        stotscale += logf(sscale);
+      } else {
+        sinv = 1.0f;
+      }
+      sxbck[i * p7X_NXCELLS + p7X_E]     = sxE;
+      sxbck[i * p7X_NXCELLS + p7X_N]     = sxN;
+      sxbck[i * p7X_NXCELLS + p7X_J]     = sxJ;
+      sxbck[i * p7X_NXCELLS + p7X_B]     = sxB;
+      sxbck[i * p7X_NXCELLS + p7X_C]     = sxC;
+      sxbck[i * p7X_NXCELLS + p7X_SCALE] = sscale;
+    }
+    __syncthreads();
+
+    if (sscale > 1.0f) {
+      for (int c = tid; c < (int)row_cells; c += T) curr[c] *= sinv;
+      __syncthreads();
     }
 
-    scale = xfwd[i * p7X_NXCELLS + p7X_SCALE];
-    if (scale > 1.0f) {
-      float inv = 1.0f / scale;
-      xE *= inv; xN *= inv; xJ *= inv; xB *= inv; xC *= inv;
-      for (int c = 0; c < N * 3; c++) curr[c] *= inv;
-      totscale += logf(scale);
+    {
+      float *dpf_row = sdpf + (size_t)i * row_cells;
+      for (int c = tid; c < (int)row_cells; c += T) dpf_row[c] = curr[c];
     }
+    __syncthreads();
 
-    float *dpf_row = dpf + (size_t)i * row_cells;
-    for (int c = 0; c < (int)row_cells; c++) dpf_row[c] = curr[c];
-
-    xbck[i * p7X_NXCELLS + p7X_E]     = xE;
-    xbck[i * p7X_NXCELLS + p7X_N]     = xN;
-    xbck[i * p7X_NXCELLS + p7X_J]     = xJ;
-    xbck[i * p7X_NXCELLS + p7X_B]     = xB;
-    xbck[i * p7X_NXCELLS + p7X_C]     = xC;
-    xbck[i * p7X_NXCELLS + p7X_SCALE] = scale;
-
-    float *tmp = next; next = curr; curr = tmp;
+    /* Swap next/curr by parity. Initial: next=shmem, curr=shmem+3N. After 1st
+       iter, next should hold what we just wrote (curr), so swap. iteration count
+       from L-1 down to 1 → we measure parity from (sL - 1 - i) but simpler: track
+       by (sL - i) parity which is 1 after 1st iter, 0 after 2nd, etc. */
+    {
+      int swap = ((sL - i) & 1);
+      next = swap ? (shmem + (size_t)N * 3) : shmem;
+      curr = swap ? shmem : (shmem + (size_t)N * 3);
+    }
   }
 
-  if (L >= 1) {
-    uint8_t x = dsq[1];
-    if (x >= Kp) { bcksc_out[b] = 0.0f; statuses_out[b] = eslEINVAL; return; }
-    xB = 0.0f;
-    for (int c = 0; c < N; c++) {
+  /* ---- Final tail at i=0 ---- */
+  if (sL >= 1) {
+    uint8_t x = sdsq[1];
+    if (x >= Kp) {
+      if (tid == 0) { bcksc_out[b] = 0.0f; statuses_out[b] = eslEINVAL; }
+      __syncthreads();
+      return;
+    }
+    float partial = 0.0f;
+    for (int c = tid; c < N; c += T) {
       int q = dr_cell_q(c, Q);
       int lane = dr_cell_lane(c, Q);
-      float mpv = next[c * 3 + 0] * rfv[((int)x * Q + q) * 4 + lane];
-      xB += mpv * tfv[dr_tfv_idx(p7O_BM, q, lane, Q)];
+      float mpv = next[c * 3 + 0] * srfv[((int)x * Q + q) * 4 + lane];
+      partial += mpv * tfv[dr_tfv_idx(p7O_BM, q, lane, Q)];
     }
-    xN = (xB * pmove) + (xN * ploop);
+    scanA[tid] = partial;
+    __syncthreads();
+    for (int off = T >> 1; off > 0; off >>= 1) {
+      if (tid < off) scanA[tid] += scanA[tid + off];
+      __syncthreads();
+    }
+    if (tid == 0) {
+      sxB = scanA[0];
+      sxN = (sxB * spmove) + (sxN * sploop);
+    }
+    __syncthreads();
   }
 
-  for (int c = 0; c < (int)row_cells; c++) dpf[c] = 0.0f;
+  /* Zero row 0 of dpf, then write final xmx[0] */
+  for (int c = tid; c < (int)row_cells; c += T) sdpf[c] = 0.0f;
+  __syncthreads();
 
-  xbck[p7X_E] = 0.0f;
-  xbck[p7X_N] = xN;
-  xbck[p7X_J] = 0.0f;
-  xbck[p7X_B] = xB;
-  xbck[p7X_C] = 0.0f;
-  xbck[p7X_SCALE] = 1.0f;
+  if (tid == 0) {
+    sxbck[p7X_E] = 0.0f;
+    sxbck[p7X_N] = sxN;
+    sxbck[p7X_J] = 0.0f;
+    sxbck[p7X_B] = sxB;
+    sxbck[p7X_C] = 0.0f;
+    sxbck[p7X_SCALE] = 1.0f;
 
-  if (isnan(xN) || (L > 0 && xN == 0.0f) || isinf(xN)) {
-    bcksc_out[b] = 0.0f;
-    statuses_out[b] = eslERANGE;
-  } else {
-    bcksc_out[b] = totscale + logf(xN);
-    statuses_out[b] = eslOK;
+    if (isnan(sxN) || (sL > 0 && sxN == 0.0f) || isinf(sxN)) {
+      bcksc_out[b] = 0.0f;
+      statuses_out[b] = eslERANGE;
+    } else {
+      bcksc_out[b] = stotscale + logf(sxN);
+      statuses_out[b] = eslOK;
+    }
   }
 }
 
@@ -331,6 +624,7 @@ cuda_domain_bck_full_kernel(const uint8_t **dsq_ptrs, const int *lengths,
  *
  * pp[i][c] = fwd[i][c] * bck[i][c] * scaleproduct
  * Writes to separate pp buffer (not in-place on bck).
+ * Multi-thread: strided over (i, c). xmx writes are independent across rows.
  * ================================================================ */
 __global__ static void
 cuda_domain_decoding_kernel(const int *lengths, int Q,
@@ -342,56 +636,70 @@ cuda_domain_decoding_kernel(const int *lengths, int Q,
                             float *xmx_pp, float nj, int *statuses)
 {
   int b = blockIdx.x;
-  if (threadIdx.x != 0) return;
+  int tid = threadIdx.x;
+  int T = blockDim.x;
 
-  int L = lengths[b];
+  __shared__ int sL;
+  __shared__ const float *sfwd, *sbck, *sxf, *sxb;
+  __shared__ float       *spp,  *sxp;
+  __shared__ float scaleproduct, sploop;
+
+  if (tid == 0) {
+    sL = lengths[b];
+    sfwd = dpf_fwd + dp_offsets[b];
+    sbck = dpf_bck + dp_offsets[b];
+    spp  = dpf_pp  + dp_offsets[b];
+    sxf  = xmx_fwd + xmx_offsets[b];
+    sxb  = xmx_bck + xmx_offsets[b];
+    sxp  = xmx_pp  + xmx_offsets[b];
+
+    scaleproduct = 1.0f / sxb[p7X_N];
+    float pmove = (2.0f + nj) / ((float)sL + 2.0f + nj);
+    sploop = 1.0f - pmove;
+
+    sxp[p7X_E] = 0.0f;
+    sxp[p7X_N] = 0.0f;
+    sxp[p7X_J] = 0.0f;
+    sxp[p7X_C] = 0.0f;
+    sxp[p7X_B] = 0.0f;
+    sxp[p7X_SCALE] = 1.0f;
+
+    if (isinf(scaleproduct)) statuses[b] = eslERANGE;
+  }
+  __syncthreads();
+
   int N = Q * 4;
   size_t row_cells = (size_t)N * 3;
-  const float *fwd = dpf_fwd + dp_offsets[b];
-  const float *bck = dpf_bck + dp_offsets[b];
-  float       *pp  = dpf_pp  + dp_offsets[b];
-  const float *xf  = xmx_fwd + xmx_offsets[b];
-  const float *xb  = xmx_bck + xmx_offsets[b];
-  float       *xp  = xmx_pp  + xmx_offsets[b];
 
-  float scaleproduct = 1.0f / xb[p7X_N];
+  /* Row 0: zero pp */
+  for (int c = tid; c < (int)row_cells; c += T) spp[c] = 0.0f;
+  __syncthreads();
 
-  /* Unihit: N/C loop = ploop, J loop = 0 */
-  float pmove = (2.0f + nj) / ((float)L + 2.0f + nj);
-  float ploop = 1.0f - pmove;
+  /* Per-row dp cells: strided across (i, c) jointly. Each row-i needs the row's
+     forward SCALE which depends only on i (not on cells), so fetch per-i. */
+  for (int i = 1; i <= sL; i++) {
+    const float *frow = sfwd + (size_t)i * row_cells;
+    const float *brow = sbck + (size_t)i * row_cells;
+    float       *prow = spp  + (size_t)i * row_cells;
+    float totr = scaleproduct * sxf[i * p7X_NXCELLS + p7X_SCALE];
 
-  /* Row 0: all zeros */
-  for (int c = 0; c < (int)row_cells; c++) pp[c] = 0.0f;
-  xp[p7X_E] = 0.0f;
-  xp[p7X_N] = 0.0f;
-  xp[p7X_J] = 0.0f;
-  xp[p7X_C] = 0.0f;
-  xp[p7X_B] = 0.0f;
-  xp[p7X_SCALE] = 1.0f;
-
-  for (int i = 1; i <= L; i++) {
-    const float *frow = fwd + (size_t)i * row_cells;
-    const float *brow = bck + (size_t)i * row_cells;
-    float       *prow = pp  + (size_t)i * row_cells;
-    float totr = scaleproduct * xf[i * p7X_NXCELLS + p7X_SCALE];
-
-    for (int c = 0; c < N; c++) {
+    for (int c = tid; c < N; c += T) {
       int cell = c * 3;
       prow[cell + 0] = frow[cell + 0] * brow[cell + 0] * totr;  /* M */
-      prow[cell + 1] = 0.0f;                                      /* D: always 0 in pp */
+      prow[cell + 1] = 0.0f;                                     /* D: always 0 in pp */
       prow[cell + 2] = frow[cell + 2] * brow[cell + 2] * totr;  /* I */
     }
-
-    xp[i * p7X_NXCELLS + p7X_E] = 0.0f;
-    xp[i * p7X_NXCELLS + p7X_N] = xf[(i-1) * p7X_NXCELLS + p7X_N] * xb[i * p7X_NXCELLS + p7X_N] * ploop * scaleproduct;
-    xp[i * p7X_NXCELLS + p7X_J] = 0.0f;  /* J loop = 0 in unihit */
-    xp[i * p7X_NXCELLS + p7X_C] = xf[(i-1) * p7X_NXCELLS + p7X_C] * xb[i * p7X_NXCELLS + p7X_C] * ploop * scaleproduct;
-    xp[i * p7X_NXCELLS + p7X_B] = 0.0f;
-    xp[i * p7X_NXCELLS + p7X_SCALE] = 1.0f;
-    /* Note: scaleproduct is NOT updated when backward uses forward's scales (has_own_scales=FALSE) */
   }
 
-  if (isinf(scaleproduct)) statuses[b] = eslERANGE;
+  /* Per-row xmx writes: strided over i. */
+  for (int i = tid + 1; i <= sL; i += T) {
+    sxp[i * p7X_NXCELLS + p7X_E] = 0.0f;
+    sxp[i * p7X_NXCELLS + p7X_N] = sxf[(i-1) * p7X_NXCELLS + p7X_N] * sxb[i * p7X_NXCELLS + p7X_N] * sploop * scaleproduct;
+    sxp[i * p7X_NXCELLS + p7X_J] = 0.0f;  /* J loop = 0 in unihit */
+    sxp[i * p7X_NXCELLS + p7X_C] = sxf[(i-1) * p7X_NXCELLS + p7X_C] * sxb[i * p7X_NXCELLS + p7X_C] * sploop * scaleproduct;
+    sxp[i * p7X_NXCELLS + p7X_B] = 0.0f;
+    sxp[i * p7X_NXCELLS + p7X_SCALE] = 1.0f;
+  }
 }
 
 /* ================================================================
@@ -719,6 +1027,9 @@ cuda_domain_oatrace_kernel(const int *lengths, int Q, int M,
 
 /* ================================================================
  * Kernel 6: Forward score-only for domcorrection
+ *
+ * Same threading structure as cuda_domain_fwd_full_kernel, but with no
+ * per-row dpf/xmx writes (only the final score is needed).
  * ================================================================ */
 __global__ static void
 cuda_domain_fwd_scoreonly_kernel(const uint8_t **dsq_ptrs, const int *lengths,
@@ -728,36 +1039,52 @@ cuda_domain_fwd_scoreonly_kernel(const uint8_t **dsq_ptrs, const int *lengths,
 {
   extern __shared__ float shmem[];
   int b = blockIdx.x;
+  int tid = threadIdx.x;
+  int T = blockDim.x;
   int N = Q * 4;
-  float *prev = shmem;
-  float *curr = prev + (size_t)N * 3;
+  float *prev  = shmem;
+  float *curr  = prev + (size_t)N * 3;
+  float *bcoef = curr + (size_t)N * 3;
+  float *scanA = bcoef + N;
+  float *scanB = scanA + T;
+  __shared__ int sL;
+  __shared__ const uint8_t *sdsq;
+  __shared__ float spmove, sploop;
+  __shared__ float sxN, sxJ, sxB, sxC, sxE, stotscale;
+  __shared__ float sscale, sinv;
 
-  if (threadIdx.x != 0) return;
+  size_t row_cells = (size_t)N * 3;
 
-  const uint8_t *dsq = dsq_ptrs[b];
-  int L = lengths[b];
+  if (tid == 0) {
+    sL = lengths[b];
+    sdsq = dsq_ptrs[b];
+    spmove = (2.0f + nj) / ((float)sL + 2.0f + nj);
+    sploop = 1.0f - spmove;
+    sxN = 1.0f; sxJ = 0.0f; sxC = 0.0f; sxE = 0.0f;
+    sxB = spmove;
+    stotscale = 0.0f;
+  }
+  __syncthreads();
 
-  float pmove = (2.0f + nj) / ((float)L + 2.0f + nj);
-  float ploop = 1.0f - pmove;
-  float xN = 1.0f, xJ = 0.0f, xC = 0.0f, xE = 0.0f;
-  float xB = pmove;
-  float totscale = 0.0f;
+  for (int c = tid; c < (int)row_cells; c += T) prev[c] = 0.0f;
+  __syncthreads();
 
-  for (int c = 0; c < N * 3; c++) prev[c] = 0.0f;
+  for (int i = 1; i <= sL; i++) {
+    uint8_t x = sdsq[i];
+    if (x >= Kp) {
+      if (tid == 0) { scores_out[b] = 0.0f; statuses_out[b] = eslEINVAL; }
+      __syncthreads();
+      return;
+    }
 
-  for (int i = 1; i <= L; i++) {
-    uint8_t x = dsq[i];
-    if (x >= Kp) { scores_out[b] = 0.0f; statuses_out[b] = eslEINVAL; return; }
-
-    xE = 0.0f;
-    for (int c = 0; c < N; c++) {
+    for (int c = tid; c < N; c += T) {
       int q = dr_cell_q(c, Q);
       int lane = dr_cell_lane(c, Q);
       int cell = c * 3;
       float mpv = (c == 0) ? 0.0f : prev[(c - 1) * 3 + 0];
       float dpv = (c == 0) ? 0.0f : prev[(c - 1) * 3 + 1];
       float ipv = (c == 0) ? 0.0f : prev[(c - 1) * 3 + 2];
-      float m = xB * tfv[dr_tfv_idx(p7O_BM, q, lane, Q)];
+      float m = sxB * tfv[dr_tfv_idx(p7O_BM, q, lane, Q)];
       m += mpv * tfv[dr_tfv_idx(p7O_MM, q, lane, Q)];
       m += ipv * tfv[dr_tfv_idx(p7O_IM, q, lane, Q)];
       m += dpv * tfv[dr_tfv_idx(p7O_DM, q, lane, Q)];
@@ -766,38 +1093,121 @@ cuda_domain_fwd_scoreonly_kernel(const uint8_t **dsq_ptrs, const int *lengths,
       curr[cell + 2] = prev[cell + 0] * tfv[dr_tfv_idx(p7O_MI, q, lane, Q)]
                       + prev[cell + 2] * tfv[dr_tfv_idx(p7O_II, q, lane, Q)];
     }
+    __syncthreads();
 
-    curr[1] = 0.0f;
-    for (int c = 1; c < N; c++) {
-      int pq = dr_cell_q(c - 1, Q);
-      int plane = dr_cell_lane(c - 1, Q);
-      curr[c * 3 + 1] = curr[(c - 1) * 3 + 0] * tfv[dr_tfv_idx(p7O_MD, pq, plane, Q)]
-                       + curr[(c - 1) * 3 + 1] * tfv[dr_tfv_idx(p7O_DD, pq, plane, Q)];
+    /* D init + bcoef */
+    for (int c = tid; c < N; c += T) {
+      int cell = c * 3;
+      if (c == 0) {
+        curr[cell + 1] = 0.0f;
+        bcoef[c] = 0.0f;
+      } else {
+        int pq = dr_cell_q(c - 1, Q);
+        int plane = dr_cell_lane(c - 1, Q);
+        curr[cell + 1] = curr[(c - 1) * 3 + 0] * tfv[dr_tfv_idx(p7O_MD, pq, plane, Q)];
+        bcoef[c] = tfv[dr_tfv_idx(p7O_DD, pq, plane, Q)];
+      }
+    }
+    __syncthreads();
+
+    /* (a,b) prefix scan */
+    if (tid < T) {
+      int c0 = tid * 2;
+      int c1 = c0 + 1;
+      if (c0 < N) {
+        float a0 = curr[c0 * 3 + 1];
+        float b0 = bcoef[c0];
+        float a1 = (c1 < N) ? curr[c1 * 3 + 1] : 0.0f;
+        float b1 = (c1 < N) ? bcoef[c1] : 1.0f;
+        scanA[tid] = a1 + b1 * a0;
+        scanB[tid] = b1 * b0;
+      } else {
+        scanA[tid] = 0.0f;
+        scanB[tid] = 1.0f;
+      }
+    }
+    __syncthreads();
+    for (int off = 1; off < T; off <<= 1) {
+      float a_prev = 0.0f, b_prev = 1.0f, a_cur = 0.0f, b_cur = 1.0f;
+      if (tid < T) {
+        a_cur = scanA[tid];
+        b_cur = scanB[tid];
+        if (tid >= off) { a_prev = scanA[tid - off]; b_prev = scanB[tid - off]; }
+      }
+      __syncthreads();
+      if (tid < T && tid >= off) {
+        scanA[tid] = a_cur + b_cur * a_prev;
+        scanB[tid] = b_cur * b_prev;
+      }
+      __syncthreads();
+    }
+    if (tid < T) {
+      int c0 = tid * 2;
+      int c1 = c0 + 1;
+      if (c0 < N) {
+        float prefixA = (tid == 0) ? 0.0f : scanA[tid - 1];
+        float a0 = curr[c0 * 3 + 1];
+        float d0 = a0 + bcoef[c0] * prefixA;
+        curr[c0 * 3 + 1] = d0;
+        if (c1 < N) {
+          float a1 = curr[c1 * 3 + 1];
+          curr[c1 * 3 + 1] = a1 + bcoef[c1] * d0;
+        }
+      }
+    }
+    __syncthreads();
+
+    /* xE tree reduction */
+    {
+      float partial = 0.0f;
+      for (int c = tid; c < N; c += T) partial += curr[c * 3 + 0] + curr[c * 3 + 1];
+      scanA[tid] = partial;
+    }
+    __syncthreads();
+    for (int off = T >> 1; off > 0; off >>= 1) {
+      if (tid < off) scanA[tid] += scanA[tid + off];
+      __syncthreads();
     }
 
-    for (int c = 0; c < N; c++) xE += curr[c * 3 + 0] + curr[c * 3 + 1];
+    if (tid == 0) {
+      sxE = scanA[0];
+      sxN = sxN * sploop;
+      sxC = (sxC * sploop) + sxE;
+      sxJ = 0.0f;
+      sxB = sxN * spmove;
+      sscale = 1.0f;
+      sinv = 1.0f;
+      if (sxE > 1.0e4f) {
+        sscale = sxE;
+        sinv = 1.0f / sxE;
+        sxN *= sinv; sxC *= sinv; sxJ *= sinv; sxB *= sinv;
+        stotscale += logf(sxE);
+        sxE = 1.0f;
+      }
+    }
+    __syncthreads();
 
-    xN = xN * ploop;
-    xC = (xC * ploop) + xE;
-    xJ = 0.0f;
-    xB = xN * pmove;
-
-    if (xE > 1.0e4f) {
-      float inv = 1.0f / xE;
-      xN *= inv; xC *= inv; xJ *= inv; xB *= inv;
-      for (int c = 0; c < N * 3; c++) curr[c] *= inv;
-      totscale += logf(xE);
+    if (sscale > 1.0f) {
+      for (int c = tid; c < (int)row_cells; c += T) curr[c] *= sinv;
+      __syncthreads();
     }
 
-    float *tmp = prev; prev = curr; curr = tmp;
+    /* swap by parity */
+    {
+      int swap = (i & 1);
+      prev = swap ? (shmem + (size_t)N * 3) : shmem;
+      curr = swap ? shmem : (shmem + (size_t)N * 3);
+    }
   }
 
-  if (isnan(xC) || (L > 0 && xC == 0.0f) || isinf(xC)) {
-    scores_out[b] = 0.0f;
-    statuses_out[b] = eslERANGE;
-  } else {
-    scores_out[b] = totscale + logf(xC * pmove);
-    statuses_out[b] = eslOK;
+  if (tid == 0) {
+    if (isnan(sxC) || (sL > 0 && sxC == 0.0f) || isinf(sxC)) {
+      scores_out[b] = 0.0f;
+      statuses_out[b] = eslERANGE;
+    } else {
+      scores_out[b] = stotscale + logf(sxC * spmove);
+      statuses_out[b] = eslOK;
+    }
   }
 }
 
@@ -843,7 +1253,13 @@ p7_cuda_DomainRescoreBatch(P7_CUDA_ENGINE *engine,
   int status;
   int N = Q * 4;
   size_t row_cells = (size_t)N * 3;
-  size_t shmem_bytes = row_cells * 2 * sizeof(float);
+  /* Threading for parallel kernels: T threads per block, capped 1024.
+     Pair-wise prefix scan: each thread handles two D cells, so T = ceil(N/2). */
+  int T_par = next_pow2_at_least((N + 1) / 2, 32);
+  if (T_par > 1024) T_par = 1024;
+  /* Parallel-kernel shmem: prev[3N] + curr[3N] + bcoef[N] + scanA[T] + scanB[T] */
+  size_t shmem_par = sizeof(float) * ((size_t)2 * N * 3 + (size_t)N + (size_t)2 * T_par);
+  /* Decoding kernel: no dynamic shmem */
   size_t total_dp_cells = 0;
   size_t total_xmx = 0;
   size_t total_dsq = 0;
@@ -989,22 +1405,45 @@ p7_cuda_DomainRescoreBatch(P7_CUDA_ENGINE *engine,
   /* Original rfv for domcorrection */
   if ((status = cuda_status(cudaMemcpy(engine->d_dom_orig_rfv, h_orig_rfv, rfv_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "H2D")) != eslOK) goto ERROR;
 
+  /* If parallel-kernel shmem exceeds the 48KB default, opt in to the dynamic
+     shared-memory limit (sm_89 supports up to 100KB). */
+  if (shmem_par > 48 * 1024) {
+    int max_dynamic_shmem = 0;
+    cudaError_t attr_status = cudaDeviceGetAttribute(&max_dynamic_shmem,
+                                                     cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                                                     engine->device_id);
+    if (attr_status != cudaSuccess || (size_t)max_dynamic_shmem < shmem_par) {
+      if (errbuf && errbuf_size > 0)
+        snprintf(errbuf, errbuf_size,
+                 "domain rescore shmem %zu B exceeds device max %d B (M=%d)",
+                 shmem_par, max_dynamic_shmem, cuom->M);
+      status = eslERANGE;
+      goto ERROR;
+    }
+    cudaFuncSetAttribute(cuda_domain_fwd_full_kernel,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_par);
+    cudaFuncSetAttribute(cuda_domain_bck_full_kernel,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_par);
+    cudaFuncSetAttribute(cuda_domain_fwd_scoreonly_kernel,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_par);
+  }
+
   /* ---- Kernel 1: Full Forward ---- */
-  cuda_domain_fwd_full_kernel<<<ndomains, 1, shmem_bytes>>>(
+  cuda_domain_fwd_full_kernel<<<ndomains, T_par, shmem_par>>>(
     engine->d_dom_dsq_ptrs, engine->d_dom_lengths, engine->d_dom_rfv_ptrs, cuom->d_tfv,
     Q, Kp, nj, engine->d_dom_dp_offsets, engine->d_dom_xmx_offsets,
     engine->d_dom_dpf[0], engine->d_dom_xmx[0], engine->d_dom_envsc, engine->d_dom_statuses);
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "fwd kernel")) != eslOK) goto ERROR;
 
   /* ---- Kernel 2: Full Backward ---- */
-  cuda_domain_bck_full_kernel<<<ndomains, 1, shmem_bytes>>>(
+  cuda_domain_bck_full_kernel<<<ndomains, T_par, shmem_par>>>(
     engine->d_dom_dsq_ptrs, engine->d_dom_lengths, engine->d_dom_rfv_ptrs, cuom->d_tfv,
     Q, Kp, nj, engine->d_dom_dp_offsets, engine->d_dom_xmx_offsets,
     engine->d_dom_dpf[1], engine->d_dom_xmx[0], engine->d_dom_xmx[1], engine->d_dom_bcksc, engine->d_dom_statuses);
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "bck kernel")) != eslOK) goto ERROR;
 
   /* ---- Kernel 3: Posterior Decoding ---- */
-  cuda_domain_decoding_kernel<<<ndomains, 1>>>(
+  cuda_domain_decoding_kernel<<<ndomains, T_par>>>(
     engine->d_dom_lengths, Q, engine->d_dom_dp_offsets, engine->d_dom_xmx_offsets,
     engine->d_dom_dpf[0], engine->d_dom_dpf[1], engine->d_dom_dpf[2],
     engine->d_dom_xmx[0], engine->d_dom_xmx[1], engine->d_dom_xmx[2], nj, engine->d_dom_statuses);
@@ -1026,7 +1465,7 @@ p7_cuda_DomainRescoreBatch(P7_CUDA_ENGINE *engine,
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "oatrace kernel")) != eslOK) goto ERROR;
 
   /* ---- Kernel 6: Domcorrection Forward ---- */
-  cuda_domain_fwd_scoreonly_kernel<<<ndomains, 1, shmem_bytes>>>(
+  cuda_domain_fwd_scoreonly_kernel<<<ndomains, T_par, shmem_par>>>(
     engine->d_dom_dsq_ptrs, engine->d_dom_lengths, engine->d_dom_orig_rfv, cuom->d_tfv,
     Q, Kp, nj, engine->d_dom_domcorr, engine->d_dom_statuses);
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "domcorr kernel")) != eslOK) goto ERROR;

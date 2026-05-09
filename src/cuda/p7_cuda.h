@@ -121,6 +121,21 @@ extern int  p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, c
                                                         const size_t *x_offsets, size_t total_xcells,
                                                         float *xf, float *xb, float *scores, int *statuses,
                                                         char *errbuf, int errbuf_size);
+/* Forward-only variant: runs Forward parser kernel, writes xf xmx and Forward
+ * scores. xb is unused; scores[2k+1] is left untouched. */
+extern int  p7_cuda_ForwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                                const size_t *x_offsets, size_t total_xcells,
+                                                float *xf, float *scores, int *statuses,
+                                                char *errbuf, int errbuf_size);
+/* Backward-only variant: takes xf as INPUT (H2D'd by this call), runs Backward
+ * parser kernel, writes xb xmx and Backward scores. scores[2k+0] is left
+ * untouched; scores[2k+1] holds Backward score. */
+extern int  p7_cuda_BackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                 ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                                 const size_t *x_offsets, size_t total_xcells,
+                                                 const float *xf, float *xb, float *scores, int *statuses,
+                                                 char *errbuf, int errbuf_size);
 extern int  p7_cuda_F1GatingDsqdataChunk(P7_CUDA_ENGINE *engine,
                                           const float *msv_scores, const int *msv_statuses,
                                           int nseq, int do_biasfilter,

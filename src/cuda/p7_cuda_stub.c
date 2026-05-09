@@ -228,6 +228,30 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
 }
 
 int
+p7_cuda_ForwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                   ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                   const size_t *x_offsets, size_t total_xcells,
+                                   float *xf, float *scores, int *statuses,
+                                   char *errbuf, int errbuf_size)
+{
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
+p7_cuda_BackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                    ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                    const size_t *x_offsets, size_t total_xcells,
+                                    const float *xf, float *xb, float *scores, int *statuses,
+                                    char *errbuf, int errbuf_size)
+{
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
 p7_cuda_F1GatingDsqdataChunk(P7_CUDA_ENGINE *engine,
                               const float *msv_scores, const int *msv_statuses,
                               int nseq, int do_biasfilter,
