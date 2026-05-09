@@ -136,12 +136,13 @@ A GPU-accelerated path for `nhmmer` is available via `--gpu`. Rebased on latest 
 - **GPU domain rescoring** (`p7_cuda_DomainRescoreBatch`): Cross-window batching of all domains (6 kernels: Fwd/Bck/Decoding/OA/OATrace/Domcorr) + trim batching. Replaces `rescore_isolated_domain` (the 67-91% bottleneck). 4/6 kernels use T-thread-per-block with parallel prefix scan.
 - **GPU FB parser** (`nhmmer_gpu_run_fb_parser_batch`): Batch Forward+Backward parser on GPU. Forward-Backward split: prefilter saves xf, Backward-only for F3 survivors.
 - **Forward pre-filter** (`nhmmer_gpu_forward_prefilter`): GPU Forward score-only with F3*2.0 relaxed gate. Removes 45-60% of sub-windows before FB parser.
+- **Skip-Forward optimization**: `p7_pli_postFwd_LongTarget()` injects GPU-precomputed xf/fwdsc, skipping redundant CPU Forward. Gated on `--gpu-fwd-prefilter`.
 - **Batch filter** (`--gpu-batch`): Packs merged windows as synthetic ESL_DSQDATA_CHUNK (zero-copy), runs GPU MSV + null + bias batch scoring, applies F1 gating.
 - **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors (warps_per_block=1 for short windows). Windows below F2 threshold skipped before scanning Viterbi.
 - **Threading**: Post-vit workers distributed across N CPU threads with deep-copied per-thread state.
 - **Engine reuse**: CUDA engine created once before query loop, saves ~250ms per additional query.
-- **Hit parity**: MADE1 151/154 (3-hit diff, <2%), query_short 119/120 (1-hit diff), query_medium 218/215 (3-hit diff, <2%). Remaining differences from float32 vs double precision. Domain rescoring uses nj=0 (unihit) matching CPU.
-- **Performance**: GPU-4 FASTA: MADE1 1.35s, query_short 1.92s, query_medium 5.34s. CPU-4: 0.33s, 0.45s, 1.64s. GPU bottleneck: CPU workers (envelope-finding, 75-94% of wall time).
+- **Hit parity**: MADE1 462/465 (3-hit diff, <1%), query_short 363/363 (exact match), query_medium 648/648 (exact match). Remaining differences from float32 vs double precision.
+- **Performance**: GPU-4 FASTA: MADE1 1.01s, query_short 0.99s, query_medium 2.87s. GPU-4 overlap-nucdb: MADE1 0.64s, query_short 1.02s, query_medium 2.23s. CPU-4: 0.31s, 0.40s, 1.57s. GPU bottleneck: CPU workers (envelope-finding, 44-94% of wall time).
 - **Files**: `src/nhmmer_gpu.c`, `src/nhmmer_internal.h`, `src/cuda/p7_cuda_ssv_longtarget.cu`, `src/cuda/p7_cuda_viterbi_longtarget.cu`, `src/cuda/p7_cuda_domain_rescore.cu`, `src/cuda/p7_cuda_fb_parser.cu`
 - **Detailed docs**: See `nhmmer-gpu-progress.md` and `nhmmer-gpu-todo.md`.
 

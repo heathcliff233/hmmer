@@ -4,18 +4,24 @@ Last updated: 2026-05-09
 
 ## TL;DR
 
-GPU-4 nhmmer is **~2-3x slower than CPU-4** on single-query workloads. After
-fixing the scanning Viterbi threshold bug (wrong Gumbel invsurv function), the
-GPU now has near-exact hit parity with CPU (0-3 hit difference). The remaining
-gap is CUDA init overhead plus envelope-finding runtime.
+GPU-4 nhmmer is **~1.8-3.3x slower than CPU-4** on single-query FASTA workloads
+(~1.4-2.6x slower with overlap-nucdb). After fixing the scanning Viterbi
+threshold bug (wrong Gumbel invsurv function), the GPU now has near-exact hit
+parity with CPU (0-3 hit difference). The remaining gap is CUDA init overhead
+plus envelope-finding runtime. The skip-Forward optimization
+(`p7_pli_postFwd_LongTarget`) eliminates redundant CPU Forward when
+`--gpu-fwd-prefilter` is set.
 
 ## Current Benchmark (RTX 4090, chr22)
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-4 | 0.32s / 465 | 0.48s / 363 | 1.66s / 648 |
-| GPU-4 FASTA | 0.91s / 462 | 1.40s / 363 | 2.85s / 648 |
-| Ratio | 2.8x | 2.9x | 1.7x |
+| CPU-1 | 1.08s / 465 | 1.33s / 363 | 5.67s / 648 |
+| CPU-4 | 0.31s / 465 | 0.40s / 363 | 1.57s / 648 |
+| GPU-4 FASTA | 1.01s / 462 | 0.99s / 363 | 2.87s / 648 |
+| GPU-4 nucdb | 0.78s / 462 | 0.97s / 363 | 2.50s / 648 |
+| GPU-4 overlap-nucdb | 0.64s / 462 | 1.02s / 363 | 2.23s / 648 |
+| Ratio (GPU-4 FASTA vs CPU-4) | 3.3x | 2.5x | 1.8x |
 
 ## Aligned per-stage Gantt — query_medium (M=501) on chr22
 
@@ -139,6 +145,8 @@ GPU-4 is even slower than CPU-1, despite committing the GPU + 4 CPU threads.
 | OptAcc kernel parallelization | Small | Medium | Open (needs max-prefix scan) |
 | Multi-query amortization | ~0.5s | Done | Engine reuse implemented |
 | Nucdb format | ~0.4s | Done | Eliminates FASTA parsing |
+| Overlap-nucdb (GPU-resident SSV) | ~0.3-0.6s | Done | Zero per-chunk H2D |
+| Skip-Forward optimization | Varies | Done | `p7_pli_postFwd_LongTarget()` uses GPU xf |
 | Redundant Forward elimination | ~0.5–5s | Done | Prefilter saves xf for Backward-only |
 | Parallel-thread domain kernels | ~0.04–0.4s | Done | 4/6 kernels use T threads |
 

@@ -139,10 +139,15 @@ Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-4 | 0.32s / 465 | 0.48s / 363 | 1.66s / 648 |
-| GPU-4 FASTA | 0.91s / 462 | 1.40s / 363 | 2.85s / 648 |
+| CPU-1 | 1.08s / 465 | 1.33s / 363 | 5.67s / 648 |
+| CPU-4 | 0.31s / 465 | 0.40s / 363 | 1.57s / 648 |
+| GPU-4 FASTA | 1.01s / 462 | 0.99s / 363 | 2.87s / 648 |
+| GPU-4 nucdb | 0.78s / 462 | 0.97s / 363 | 2.50s / 648 |
+| GPU-4 overlap-nucdb | 0.64s / 462 | 1.02s / 363 | 2.23s / 648 |
 
-GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior. Remaining gap vs CPU-4 is from CPU workers (envelope-finding). Remaining hit count differences (0-3 hits, <1%) are from float32 vs double precision in Forward/Backward accumulation.
+GPU nhmmer now supports a **skip-Forward optimization**: when `--gpu-fwd-prefilter` gates windows through the GPU Forward pre-filter, workers use `p7_pli_postFwd_LongTarget()` which injects GPU-precomputed xf matrices and skips redundant CPU Forward recomputation. Only Backward + domain definition + hit reporting run on CPU. Without `--gpu-fwd-prefilter`, the standard `p7_pli_postViterbi_LongTarget()` path runs full CPU Forward+Backward.
+
+GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior. Remaining gap vs CPU-4 is from CUDA init overhead (~0.5s) plus CPU workers (envelope-finding, 44-93% of pipeline). The overlap-nucdb format eliminates FASTA parsing and enables GPU-resident SSV (zero per-chunk H2D). GPU-4 overlap-nucdb is 1.7-3.6x faster than CPU-1 for short models. Remaining hit count differences (0-3 hits, <1%) are from float32 vs double precision in Forward/Backward accumulation.
 
 ## GPU Architecture Summary
 
@@ -177,6 +182,19 @@ These flags are not shown in `hmmsearch -h` output but are defined in `src/hmmse
 --gpu-ssv-compare      Debug: compare SSV scores to monolithic MSV
 --gpu-ssv-warps        Warps per block for fused SSV kernel (0=auto)
 --gpu-vit-warps        Warps per block for Viterbi opt kernel (0=auto)
+```
+
+Nhmmer-specific expert flags (defined in `src/nhmmer.c`):
+
+```
+--gpu-fwd-prefilter    GPU Forward pre-filter: skip-Forward optimization (docgroup 12)
+--gpu-batch            GPU batch SSV/bias filtering on merged windows
+--gpu-vit-prefilter    GPU Viterbi as pre-filter before scanning Viterbi
+--gpu-vit-longtarget   GPU scanning Viterbi for sub-window detection
+--gpu-cpu-postmsv      Bypass GPU scanning Viterbi/Fwd; use CPU postSSV
+--gpu-compare          Debug: compare GPU filter scores to CPU per stage
+--gpu-chunk-size N     Chunk size in residues (default 65536)
+--gpu-device N         CUDA device id
 ```
 
 ## Verification Checklist

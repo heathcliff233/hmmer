@@ -27,6 +27,7 @@ fi
 
 TARGET="$WORKDIR/chr22.fa"
 NUCDB="$WORKDIR/chr22.nucdb.nucdb"
+OVERLAP_NUCDB="$WORKDIR/chr22-overlap.nucdb.nucdb"
 QUERIES=("MADE1" "query_short" "query_medium")
 
 if [ ! -f "$TARGET" ]; then
@@ -34,10 +35,16 @@ if [ ! -f "$TARGET" ]; then
     exit 1
 fi
 
-# Build nucdb if missing
+# Build nucdb (no overlap) if missing
 if [ ! -f "$NUCDB" ] && [ -x "$HMMNUCDB" ]; then
     echo "Building nucdb..."
     "$HMMNUCDB" "$TARGET" "$WORKDIR/chr22.nucdb" 2>/dev/null
+fi
+
+# Build overlap nucdb (GPU-resident SSV path) if missing
+if [ ! -f "$OVERLAP_NUCDB" ] && [ -x "$HMMNUCDB" ]; then
+    echo "Building overlap nucdb (--overlap 2001)..."
+    "$HMMNUCDB" --overlap 2001 "$TARGET" "$WORKDIR/chr22-overlap.nucdb" 2>/dev/null
 fi
 
 run_bench() {
@@ -81,6 +88,10 @@ for q in "${QUERIES[@]}"; do
 
         if [ -f "$NUCDB" ]; then
             run_bench "GPU-4 (nucdb)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$NUCDB"
+        fi
+
+        if [ -f "$OVERLAP_NUCDB" ]; then
+            run_bench "GPU-4 (overlap-nucdb)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$OVERLAP_NUCDB"
         fi
     else
         echo "  (GPU not available — build with --enable-cuda)"

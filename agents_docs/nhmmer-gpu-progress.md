@@ -112,7 +112,9 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 --gpu-batch             # SSV/bias batch on GPU (default-on with --gpu)
 --gpu-vit-prefilter     # Viterbi pre-filter (default-on with --gpu)
 --gpu-vit-longtarget    # Scanning Viterbi (default-on with --gpu)
---gpu-fwd-prefilter     # Forward pre-filter (wired, not implemented)
+--gpu-fwd-prefilter     # Forward pre-filter with skip-Forward optimization (docgroup 12)
+--gpu-cpu-postmsv       # Bypass GPU scanning Viterbi/Fwd; CPU postSSV path
+--gpu-compare           # Debug: compare GPU vs CPU scores per stage
 --gpu-chunk-size N      # Chunk size (default 65536)
 --gpu-device N          # CUDA device selection
 ```
@@ -124,8 +126,11 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-4 | 0.32s / 465 | 0.48s / 363 | 1.66s / 648 |
-| GPU-4 FASTA | 0.91s / 462 | 1.40s / 363 | 2.85s / 648 |
+| CPU-1 | 1.08s / 465 | 1.33s / 363 | 5.67s / 648 |
+| CPU-4 | 0.31s / 465 | 0.40s / 363 | 1.57s / 648 |
+| GPU-4 FASTA | 1.01s / 462 | 0.99s / 363 | 2.87s / 648 |
+| GPU-4 nucdb | 0.78s / 462 | 0.97s / 363 | 2.50s / 648 |
+| GPU-4 overlap-nucdb | 0.64s / 462 | 1.02s / 363 | 2.23s / 648 |
 
 ### GPU Domain Rescoring Performance
 
@@ -137,7 +142,17 @@ Cross-window batching + trim batching replaces per-domain GPU calls with two bat
 | query_short | ~600 | varies | ~300 | varies |
 | query_medium | ~300 | varies | ~100 | varies |
 
-Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms each). Cross-window batching: **1.74s** (18x improvement). Forward-Backward split (prefilter saves xf, Backward-only): **1.35s** (further 1.3x). Scanning Viterbi threshold fix: **0.91s** (further 1.5x).
+Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms each). Cross-window batching: **1.74s** (18x improvement). Forward-Backward split (prefilter saves xf, Backward-only): **1.35s** (further 1.3x). Scanning Viterbi threshold fix: **0.91s** (further 1.5x). Nucdb + overlap-nucdb paths: **0.64s** (GPU-resident SSV, zero per-chunk H2D).
+
+### Skip-Forward Optimization
+
+When `--gpu-fwd-prefilter` is set, workers use `p7_pli_postFwd_LongTarget()` instead of `p7_pli_postViterbi_LongTarget()`. This injects GPU-precomputed Forward special cells (xf) and scores (fwdsc) directly, skipping redundant CPU Forward recomputation. Only Backward + domain definition + hit reporting run on CPU.
+
+Implementation:
+- `NHMMER_GPU_WORKER` carries `prefilter_xf`, `prefilter_fwdsc`, `prefilter_xf_offset` (non-owning pointers into shared buffers)
+- `nhmmer_gpu_worker_process_post_fwd()` injects xf into `pli->oxf->xmx`, reconstructs `totscale`, calls `p7_pli_postFwd_LongTarget()`
+- `p7_pli_postFwd_LongTarget()` in `p7_pipeline.c` performs F3 check using provided fwdsc, then Backward + domaindef + hit reporting
+- Gated on `use_skip_fwd = info->do_gpu_fwd && prefilter_xf != NULL`
 
 ### Parity Notes
 
@@ -208,9 +223,13 @@ Build-time options: `--chunk-size` (default 65536), `--overlap` (default 0), `--
 
 ## Status Summary
 
-All phases complete including GPU domain rescoring. Branch `worktree-h3-gpu-nhmmer` is rebased on top of latest `h3-gpu` (fused SSV+null+bias+gate kernel, multi-warp-per-block SSV/Viterbi, templated kernels, ~7.3x protein profmark). Commits:
+All phases complete including GPU domain rescoring + skip-Forward optimization. Branch `h3-gpu` includes all nhmmer GPU work (fused SSV+null+bias+gate kernel, multi-warp-per-block SSV/Viterbi, templated kernels, ~7.3x protein profmark). Key commits:
 
 ```
+a7936ac8 gpu: fix scanning Viterbi threshold bug + add --gpu-compare and --gpu-cpu-postmsv
+063207a2 build: ignore src/hmmnucdb and suppress easel submodule dirty state
+a5a49fc0 gpu: multi-thread domain rescore kernels + split Forward/Backward parser API
+26a6a5e7 gpu: rebase compatibility fix and doc refresh for h3-gpu latest
 d1a7a4a6 gpu: fix nhmmer domain rescoring parity by using unihit nj=0
 93c51c5b gpu: eliminate redundant Forward in nhmmer prefilter→FB pipeline
 1e0116e0 gpu: GPU domain rescoring with cross-window batching for nhmmer
