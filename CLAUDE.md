@@ -116,7 +116,7 @@ agents_docs/       Detailed architecture documentation (see index below)
 - **Easel submodule**: Do not edit `easel/` directly for GPU work. The `dsqdata` chunk-sizing change comes from `patches/easel-dsqdata-open-sized.patch` applied at build time.
 - **No CMake**: Keep CUDA in the existing autotools build. Do not add CMake for any reason.
 - **GPU scope**: `hmmsearch --gpu` is protein-only (requires `.gpudb`). `nhmmer --gpu` runs full GPU pipeline (SSV + batch filter + Viterbi + scanning Viterbi + Forward prefilter + FB parser) with threaded CPU downstream (works on plain FASTA or `.nucdb`). `hmmscan`, `phmmer`, `jackhmmer`, and daemon remain CPU-only.
-- **Hit parity**: GPU nhmmer path preserves near-exact hit parity with CPU. MADE1: 462 vs 465 (3-hit difference). query_short: 363 vs 363 (exact match). query_medium: 648 vs 648 (exact match). Remaining differences are from float32 vs double precision in Forward/Backward accumulation.
+- **Hit parity**: GPU nhmmer path preserves near-exact hit parity with CPU. MADE1: 153 vs 154 (1-hit difference). query_short: 120 vs 120 (exact match). query_medium: 215 vs 215 (exact match). Remaining differences are from float32 vs double precision in Forward/Backward accumulation.
 - **Pressed HMM files**: Do not change `.h3m/.h3i/.h3f/.h3p` format as part of GPU work.
 - **Configure requires Easel**: `configure.ac` includes macros from `easel/m4`; Easel must be present before `autoconf`.
 - **Benchmark data**: Use `benchmark-data/` (gitignored) for datasets and run logs, not `tutorial/` inputs for speed claims.
@@ -139,15 +139,13 @@ Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-1 | 1.08s / 465 | 1.33s / 363 | 5.67s / 648 |
-| CPU-4 | 0.31s / 465 | 0.40s / 363 | 1.57s / 648 |
-| GPU-4 FASTA | 1.01s / 462 | 0.99s / 363 | 2.87s / 648 |
-| GPU-4 nucdb | 0.78s / 462 | 0.97s / 363 | 2.50s / 648 |
-| GPU-4 overlap-nucdb | 0.64s / 462 | 1.02s / 363 | 2.23s / 648 |
+| CPU-1 | 0.93s / 154 | 1.27s / 120 | 5.86s / 215 |
+| CPU-4 | 0.30s / 154 | 0.37s / 120 | 1.63s / 215 |
+| GPU-4 nucdb | 0.53s / 153 | 0.68s / 120 | 2.52s / 215 |
 
 GPU nhmmer now supports a **skip-Forward optimization**: when `--gpu-fwd-prefilter` gates windows through the GPU Forward pre-filter, workers use `p7_pli_postFwd_LongTarget()` which injects GPU-precomputed xf matrices and skips redundant CPU Forward recomputation. Only Backward + domain definition + hit reporting run on CPU. Without `--gpu-fwd-prefilter`, the standard `p7_pli_postViterbi_LongTarget()` path runs full CPU Forward+Backward.
 
-GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior. Remaining gap vs CPU-4 is from CUDA init overhead (~0.5s) plus CPU workers (envelope-finding, 44-93% of pipeline). The overlap-nucdb format eliminates FASTA parsing and enables GPU-resident SSV (zero per-chunk H2D). GPU-4 overlap-nucdb is 1.7-3.6x faster than CPU-1 for short models. Remaining hit count differences (0-3 hits, <1%) are from float32 vs double precision in Forward/Backward accumulation.
+GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior. Remaining gap vs CPU-4 is from CUDA init overhead (~0.4s) plus CPU workers (Forward/Backward/Domain, 59-89% of GPU pipeline time). GPU scanning Viterbi produces ~18% more windows than CPU due to warp-parallel evaluation order differences in int16 DP, causing proportionally more CPU worker time. Remaining hit count differences (0-1 hits, <1%) are from float32 vs double precision in Forward/Backward accumulation.
 
 ## GPU Architecture Summary
 

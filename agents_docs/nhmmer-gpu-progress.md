@@ -119,18 +119,16 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 --gpu-device N          # CUDA device selection
 ```
 
-## Benchmark Results (2026-05-09)
+## Benchmark Results (2026-05-10)
 
 **Target**: chr22.fa (50MB, ~101.6M residues both strands)
 **System**: RTX 4090, 4 CPU threads
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-1 | 1.08s / 465 | 1.33s / 363 | 5.67s / 648 |
-| CPU-4 | 0.31s / 465 | 0.40s / 363 | 1.57s / 648 |
-| GPU-4 FASTA | 1.01s / 462 | 0.99s / 363 | 2.87s / 648 |
-| GPU-4 nucdb | 0.78s / 462 | 0.97s / 363 | 2.50s / 648 |
-| GPU-4 overlap-nucdb | 0.64s / 462 | 1.02s / 363 | 2.23s / 648 |
+| CPU-1 | 0.93s / 154 | 1.27s / 120 | 5.86s / 215 |
+| CPU-4 | 0.30s / 154 | 0.37s / 120 | 1.63s / 215 |
+| GPU-4 nucdb | 0.53s / 153 | 0.68s / 120 | 2.52s / 215 |
 
 ### GPU Domain Rescoring Performance
 
@@ -156,11 +154,19 @@ Implementation:
 
 ### Parity Notes
 
-- **MADE1 (M=80)**: 462 vs 465 (3-hit difference, <1%)
-- **query_short (M=151)**: 363 vs 363 (exact match)
-- **query_medium (M=501)**: 648 vs 648 (exact match)
+- **MADE1 (M=80)**: 153 vs 154 (1-hit difference, <1%)
+- **query_short (M=151)**: 120 vs 120 (exact match)
+- **query_medium (M=501)**: 215 vs 215 (exact match)
 
-Remaining differences are from float32 vs double precision in Forward/Backward accumulation. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior.
+Remaining 1-hit difference on MADE1 is from float32 vs double precision in Forward/Backward accumulation. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior.
+
+### Bias Filter Precision Fix (2026-05-10)
+
+Fixed two precision bugs in the GPU scanning Viterbi threshold path:
+
+1. **`cuda_bias_filter_kernel`**: Was using a fixed `t[0][0]` transition for all windows (uploaded once at init). Now computes per-window `t00 = L/(L+1)` matching CPU's `p7_bg_SetLength` per-window behavior. Also switched from `logf()` to `(float)log()` matching CPU's double-precision log in `esl_hmm_Forward`.
+
+2. **`cuda_compute_viterbi_thresholds_kernel`**: Was subtracting `nullsc_win` (null for window_len) from bias score, but CPU subtracts `nullsc_loc` (null for loc_window_len = min(window_len, max_length)). Also switched `invP` and `nullsc` computations to double precision matching CPU's `esl_gumbel_invsurv` and `p7_bg_NullOne`.
 
 ## GPU Domain Rescoring Architecture
 

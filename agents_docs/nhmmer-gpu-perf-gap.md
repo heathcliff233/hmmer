@@ -1,27 +1,25 @@
 # nhmmer GPU vs CPU Performance Gap
 
-Last updated: 2026-05-09
+Last updated: 2026-05-10
 
 ## TL;DR
 
-GPU-4 nhmmer is **~1.8-3.3x slower than CPU-4** on single-query FASTA workloads
-(~1.4-2.6x slower with overlap-nucdb). After fixing the scanning Viterbi
-threshold bug (wrong Gumbel invsurv function), the GPU now has near-exact hit
-parity with CPU (0-3 hit difference). The remaining gap is CUDA init overhead
-plus envelope-finding runtime. The skip-Forward optimization
-(`p7_pli_postFwd_LongTarget`) eliminates redundant CPU Forward when
-`--gpu-fwd-prefilter` is set.
+GPU-4 nhmmer is **~1.5-1.8x slower than CPU-4** on single-query nucdb workloads.
+After fixing the scanning Viterbi threshold bias filter precision bugs (per-window
+t00 computation, double-precision nullsc/invP, correct nullsc_loc subtraction),
+the GPU now has near-exact hit parity with CPU (0-1 hit difference). The remaining
+gap is CUDA init overhead (~0.4s) plus the GPU scanning Viterbi producing ~18%
+more windows than CPU (warp-parallel int16 DP evaluation order differences),
+causing proportionally more CPU worker time.
 
 ## Current Benchmark (RTX 4090, chr22)
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-1 | 1.08s / 465 | 1.33s / 363 | 5.67s / 648 |
-| CPU-4 | 0.31s / 465 | 0.40s / 363 | 1.57s / 648 |
-| GPU-4 FASTA | 1.01s / 462 | 0.99s / 363 | 2.87s / 648 |
-| GPU-4 nucdb | 0.78s / 462 | 0.97s / 363 | 2.50s / 648 |
-| GPU-4 overlap-nucdb | 0.64s / 462 | 1.02s / 363 | 2.23s / 648 |
-| Ratio (GPU-4 FASTA vs CPU-4) | 3.3x | 2.5x | 1.8x |
+| CPU-1 | 0.93s / 154 | 1.27s / 120 | 5.86s / 215 |
+| CPU-4 | 0.30s / 154 | 0.37s / 120 | 1.63s / 215 |
+| GPU-4 nucdb | 0.53s / 153 | 0.68s / 120 | 2.52s / 215 |
+| Ratio (GPU-4 nucdb vs CPU-4) | 1.8x | 1.8x | 1.5x |
 
 ## Aligned per-stage Gantt — query_medium (M=501) on chr22
 

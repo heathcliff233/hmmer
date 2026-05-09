@@ -3,10 +3,10 @@
 #define VIT_LT_MAX_WINDOWS_PER_INPUT 64
 #define VIT_LT_WARPS_PER_BLOCK       8
 
-__device__ static inline float
-esl_gumbel_invsurv_device(float p, float mu, float lambda)
+__device__ static inline double
+esl_gumbel_invsurv_device(double p, double mu, double lambda)
 {
-  return mu - logf(-logf(1.0f - p)) / lambda;
+  return mu - log(-log(1.0 - p)) / lambda;
 }
 
 __global__ static void
@@ -23,19 +23,19 @@ cuda_compute_viterbi_thresholds_kernel(
   int window_len = lengths[i];
   int loc_window_len = (window_len < max_length) ? window_len : max_length;
   float p1_loc = (float)loc_window_len / (float)(loc_window_len + 1);
-  float nullsc_loc = (float)loc_window_len * logf(p1_loc) + logf(1.0f - p1_loc);
+  float nullsc_loc = (float)((double)loc_window_len * log((double)p1_loc) + log(1.0 - (double)p1_loc));
 
   /* bias_scores[i] was computed using the full window_len, so we must subtract
    * null(window_len) — not null(loc_window_len) — to isolate the composition bias,
    * matching what the CPU does in p7_pli_postSSV_LongTarget(). */
   float p1_win = (float)window_len / (float)(window_len + 1);
-  float nullsc_win = (float)window_len * logf(p1_win) + logf(1.0f - p1_win);
+  float nullsc_win = (float)((double)window_len * log((double)p1_win) + log(1.0 - (double)p1_win));
 
   int F2_L = (window_len < B2) ? window_len : B2;
   float filtersc;
 
   if (do_biasfilter) {
-    float bias_filtersc = bias_scores[i] - nullsc_win;
+    float bias_filtersc = bias_scores[i] - nullsc_loc;
     float ratio = (F2_L > window_len) ? 1.0f : (float)F2_L / (float)window_len;
     filtersc = nullsc_loc + bias_filtersc * ratio;
   } else {
@@ -45,9 +45,9 @@ cuda_compute_viterbi_thresholds_kernel(
   float pmove = (2.0f + nj) / ((float)loc_window_len + 2.0f + nj);
   float xw_c_move = roundf(scale_w * logf(pmove));
 
-  float invP = esl_gumbel_invsurv_device(F2, vmu, vlambda);
-  sc_thresholds[i] = (int16_t)ceilf(((filtersc + 0.69314718f * invP + 3.0f) * scale_w)
-                                    - xw_e_move - xw_c_move + base_w);
+  double invP = esl_gumbel_invsurv_device((double)F2, (double)vmu, (double)vlambda);
+  sc_thresholds[i] = (int16_t)ceil(((double)filtersc + 0.69314718055994530942 * invP + 3.0) * (double)scale_w
+                                    - (double)xw_e_move - (double)xw_c_move + (double)base_w);
 }
 
 __device__ static inline int16_t

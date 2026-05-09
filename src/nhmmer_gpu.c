@@ -1443,19 +1443,21 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
           /* Compute actual GPU threshold using GPU bias scores (matches GPU kernel logic) */
           int16_t gpu_actual_thresh = cpu_sc_thresh;
           if (saved_bias_scores && pli->do_biasfilter) {
-            float gpu_nullsc_loc = (float)loc_window_len * logf((float)loc_window_len / (float)(loc_window_len + 1))
-                               + logf(1.0f - (float)loc_window_len / (float)(loc_window_len + 1));
-            float gpu_nullsc_win = (float)window_len * logf((float)window_len / (float)(window_len + 1))
-                               + logf(1.0f - (float)window_len / (float)(window_len + 1));
-            float gpu_bias_filtersc = saved_bias_scores[i] - gpu_nullsc_win;
+            float gpu_p1_loc = (float)loc_window_len / (float)(loc_window_len + 1);
+            float gpu_nullsc_loc = (float)((double)loc_window_len * log((double)gpu_p1_loc)
+                               + log(1.0 - (double)gpu_p1_loc));
+            float gpu_p1_win = (float)window_len / (float)(window_len + 1);
+            float gpu_nullsc_win = (float)((double)window_len * log((double)gpu_p1_win)
+                               + log(1.0 - (double)gpu_p1_win));
+            float gpu_bias_filtersc = saved_bias_scores[i] - gpu_nullsc_loc;
             int F2_L_gpu = ESL_MIN(window_len, pli->B2);
             float gpu_ratio = (F2_L_gpu > window_len) ? 1.0f : (float)F2_L_gpu / (float)window_len;
             float gpu_filtersc = gpu_nullsc_loc + gpu_bias_filtersc * gpu_ratio;
             float gpu_pmove = (2.0f + om->nj) / ((float)loc_window_len + 2.0f + om->nj);
             float gpu_xw_c_move = roundf(om->scale_w * logf(gpu_pmove));
-            float gpu_invP = (float)om->evparam[p7_VMU] - logf(-logf(1.0f - (float)pli->F2)) / (float)om->evparam[p7_VLAMBDA];
-            gpu_actual_thresh = (int16_t)ceilf(((gpu_filtersc + 0.69314718f * gpu_invP + 3.0f) * om->scale_w)
-                                   - (float)om->xw[p7O_E][p7O_MOVE] - gpu_xw_c_move + (float)om->base_w);
+            double gpu_invP = om->evparam[p7_VMU] - log(-log(1.0 - (double)pli->F2)) / om->evparam[p7_VLAMBDA];
+            gpu_actual_thresh = (int16_t)ceil(((double)gpu_filtersc + 0.69314718055994530942 * gpu_invP + 3.0) * (double)om->scale_w
+                                   - (double)om->xw[p7O_E][p7O_MOVE] - (double)gpu_xw_c_move + (double)om->base_w);
           }
 
           fprintf(stderr, "NHMMER_GPU_COMPARE_VIT_WIN win=%d n=%ld len=%d gpu_raw=%d cpu_raw=%d"

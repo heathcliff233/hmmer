@@ -29,33 +29,40 @@ cuda_bias_filter_kernel(const uint8_t *dsq, const int *offsets, const int *lengt
   const uint8_t *sdsq = dsq + offsets[seq];
   int L = lengths[seq];
   float p0, p1s, n0, n1, maxv;
-  float len_p1 = (float) L / (float) (L + 1);
   float sc = 0.0f;
 
   if (L == 0) {
-    filtersc[seq] = logf(pi[2]);
+    filtersc[seq] = (float)log((double)pi[2]);
     return;
   }
+
+  float t00 = (float)L / (float)(L + 1);
+  float t01 = 1.0f / (float)(L + 1);
+  float t10 = t[3];
+  float t11 = t[4];
+  float t02 = t[2];
+  float t12 = t[5];
 
   p0 = eo[(int) sdsq[1] * 2 + 0] * pi[0];
   p1s = eo[(int) sdsq[1] * 2 + 1] * pi[1];
   maxv = fmaxf(fmaxf(p0, p1s), 0.0f);
   p0 /= maxv;
   p1s /= maxv;
-  sc += logf(maxv);
+  sc += (float)log((double)maxv);
 
   for (int i = 2; i <= L; i++) {
     uint8_t x = sdsq[i];
-    n0 = (p0 * t[0] + p1s * t[3]) * eo[(int) x * 2 + 0];
-    n1 = (p0 * t[1] + p1s * t[4]) * eo[(int) x * 2 + 1];
+    n0 = (p0 * t00 + p1s * t10) * eo[(int) x * 2 + 0];
+    n1 = (p0 * t01 + p1s * t11) * eo[(int) x * 2 + 1];
     maxv = fmaxf(fmaxf(n0, n1), 0.0f);
     p0 = n0 / maxv;
     p1s = n1 / maxv;
-    sc += logf(maxv);
+    sc += (float)log((double)maxv);
   }
 
-  sc += logf(p0 * t[2] + p1s * t[5]);
-  filtersc[seq] = sc + (float) L * logf(len_p1) + logf(1.0f - len_p1);
+  sc += (float)log((double)(p0 * t02 + p1s * t12));
+  float len_p1 = (float) L / (float) (L + 1);
+  filtersc[seq] = sc + (float) L * (float)log((double)len_p1) + (float)log(1.0 - (double)len_p1);
 }
 
 __global__ static void
@@ -105,7 +112,7 @@ cuda_bias_filter_survivors_kernel(const uint8_t *dsq, const int *offsets, const 
 
   logsc += (float)log((double)(p0 * t02 + p1s * t12));
   float len_p1 = (float)L / (float)(L + 1);
-  out_filtersc[tid] = logsc + (float)L * logf(len_p1) + logf(1.0f - len_p1);
+  out_filtersc[tid] = logsc + (float)L * (float)log((double)len_p1) + (float)log(1.0 - (double)len_p1);
 }
 extern "C" int
 p7_cuda_NullScoreDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_BG *bg,
