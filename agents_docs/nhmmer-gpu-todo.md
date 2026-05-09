@@ -47,9 +47,10 @@ GPU domain rescoring replaces `rescore_isolated_domain` (the 67-91% bottleneck).
 
 ## Known Issues
 
-- **MADE1 parity**: GPU reports 154 vs CPU 154 (exact match)
-- **query_short parity**: GPU reports 122 vs CPU 120 (2-hit difference)
-- **query_medium parity**: GPU reports 261 vs CPU 215 (extra hits from fixed `xw_*` profile parameters in scanning Viterbi kernel)
+- **MADE1 parity**: GPU reports 151 vs CPU 154 (3-hit difference, <2%)
+- **query_short parity**: GPU reports 119 vs CPU 120 (1-hit difference, <1%)
+- **query_medium parity**: GPU reports 218 vs CPU 215 (3-hit difference, <2%)
+- Remaining differences are from float32 vs double precision in Forward/Backward accumulation
 - **GPU slower than CPU-4**: CPU workers (envelope-finding) dominate at 75-94% of GPU wall time
 
 ## Latest Benchmark (2026-05-09, RTX 4090, chr22 50MB)
@@ -58,7 +59,7 @@ GPU domain rescoring replaces `rescore_isolated_domain` (the 67-91% bottleneck).
 |--------|:---:|:---:|:---:|
 | CPU-1 | 1.12s / 154 hits | 1.39s / 120 hits | 6.35s / 215 hits |
 | CPU-4 | 0.33s / 154 hits | 0.45s / 120 hits | 1.64s / 215 hits |
-| GPU-4 FASTA | 1.35s / 154 hits | 1.92s / 122 hits | 5.34s / 261 hits |
+| GPU-4 FASTA | 1.35s / 151 hits | 1.92s / 119 hits | 5.34s / 218 hits |
 
 ### GPU Timing Breakdown (FASTA path)
 
@@ -94,11 +95,7 @@ Note: Forward prefilter and GPU FB parser are not used in the nucdb path (those 
 
 CPU workers are 75–94% of total time. The bottleneck is `p7_domaindef_ByPosteriorHeuristics()` running per-envelope Forward/Backward on CPU. Moving envelope-finding to GPU would eliminate the single largest bottleneck.
 
-### P2 — Fix per-window xw_* reconfigure in scanning Viterbi (medium impact, medium effort)
-
-GPU scanning Viterbi uses fixed `xw_*` parameters instead of per-window `p7_oprofile_ReconfigLength`. This causes ~21% more hits for query_medium (261 vs 215 CPU). Fix: pass per-window L to the scanning Viterbi kernel and compute correct `xw_*` values on-device.
-
-### P3 — Parallelize OptAcc kernel (low impact, medium effort)
+### P2 — Parallelize OptAcc kernel (low impact, medium effort)
 
 `cuda_domain_optacc_kernel` still uses 1 thread/block. Needs a max-prefix scan (instead of sum-prefix scan used in Forward/Backward). Lower priority since OptAcc is not the dominant kernel.
 
@@ -107,10 +104,10 @@ GPU scanning Viterbi uses fixed `xw_*` parameters instead of per-window `p7_opro
 | Item | Effort | Impact | Notes |
 |------|--------|--------|-------|
 | GPU envelope-finding | Very high | Eliminate 75-94% bottleneck | Needs GPU posterior decoding heuristics |
-| Per-window xw_* reconfigure on GPU | Medium | Fixes parity (261→215 for query_medium) | Need to pass per-window L to scanning Viterbi kernel |
 | OptAcc kernel parallelization | Medium | Small | Needs max-prefix scan |
 | Async strand overlap | Low | ~0.1-0.3s | Diminishing returns |
 | FM-index GPU path | High | Alternative to FASTA scanning | FM-index is CPU-optimized |
 | CUDA init amortization | N/A | Already done | Engine created once before query loop |
 | Redundant Forward elimination | N/A | Already done | Prefilter saves xf for Backward-only |
 | Parallel-thread domain kernels | N/A | Already done | 4/6 kernels use T threads with prefix scan |
+| Domain rescore nj fix | N/A | Already done | GPU now uses nj=0 (unihit) matching CPU |

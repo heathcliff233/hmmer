@@ -620,7 +620,7 @@ nhmmer_gpu_rescore_domains(NHMMER_GPU_WORKER *w, ESL_DSQ *subseq, int window_len
   int           ndom = ddef->ndom;
   int           Q    = p7O_NQF(om->M);
   int           Kp   = om->abc->Kp;
-  float         nj   = om->nj;
+  float         nj   = 0.0f;  /* unihit mode for domain rescoring, matching CPU behavior */
   int           d, status;
   char          errbuf[256];
 
@@ -929,7 +929,7 @@ nhmmer_gpu_worker_process_post_vit_gpu(NHMMER_GPU_WORKER *w)
   int  orig_L = w->om->L;
   int  Q  = p7O_NQF(w->om->M);
   int  Kp = w->om->abc->Kp;
-  float nj = w->om->nj;
+  float nj = 0.0f;  /* unihit mode for domain rescoring, matching CPU behavior */
   size_t rfv_size = (size_t)Kp * Q * 4 * sizeof(float);
   float *orig_rfv = NULL;
   ESL_ALLOC(orig_rfv, rfv_size);

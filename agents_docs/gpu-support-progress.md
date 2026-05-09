@@ -138,7 +138,7 @@ A GPU-accelerated path for `nhmmer` is available via `--gpu`:
 - **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors. Windows below F2 threshold skipped before scanning Viterbi.
 - **Threading**: Post-vit workers distributed across N CPU threads with deep-copied per-thread state.
 - **Engine reuse**: CUDA engine created once before query loop, saves ~250ms per additional query.
-- **Hit parity**: MADE1 153/154 (1-hit FP diff), query_short 120=120, query_medium 226/215 (extra GPU hits from fixed xw_* in scanning Vit).
+- **Hit parity**: MADE1 151/154 (3-hit diff, <2%), query_short 119/120 (1-hit diff), query_medium 218/215 (3-hit diff, <2%). Remaining differences from float32 vs double precision. Domain rescoring uses nj=0 (unihit) matching CPU.
 - **Performance**: GPU-4 FASTA: MADE1 1.49s, query_short 2.22s, query_medium 7.96s. CPU-4: 0.30s, 0.45s, 1.80s. GPU bottleneck: `rescore_isolated_domain` in domaindef (67-91% of pipeline).
 - **Files**: `src/nhmmer_gpu.c`, `src/nhmmer_internal.h`, `src/cuda/p7_cuda_ssv_longtarget.cu`, `src/cuda/p7_cuda_viterbi_longtarget.cu`
 - **Detailed docs**: See `nhmmer-gpu-progress.md` and `nhmmer-gpu-todo.md`.

@@ -125,7 +125,7 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
 | CPU-4 | 0.33s / 154 | 0.45s / 120 | 1.64s / 215 |
-| GPU-4 FASTA | 1.35s / 154 | 1.92s / 122 | 5.34s / 261 |
+| GPU-4 FASTA | 1.35s / 151 | 1.92s / 119 | 5.34s / 218 |
 
 ### GPU Domain Rescoring Performance
 
@@ -141,9 +141,11 @@ Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms
 
 ### Parity Notes
 
-- **MADE1 (M=80)**: 154 vs 154 (exact match)
-- **query_short (M=151)**: 122 vs 120 (2-hit difference)
-- **query_medium (M=501)**: 261 vs 215 (extra hits from fixed `xw_*` parameters in scanning Viterbi)
+- **MADE1 (M=80)**: 151 vs 154 (3-hit difference, <2%)
+- **query_short (M=151)**: 119 vs 120 (1-hit difference, <1%)
+- **query_medium (M=501)**: 218 vs 215 (3-hit difference, <2%)
+
+Remaining differences are from float32 vs double precision in Forward/Backward accumulation. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior.
 
 ## GPU Domain Rescoring Architecture
 
@@ -228,5 +230,4 @@ f0de5475 docs: comprehensive nhmmer GPU documentation and benchmark scripts
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
 | High | Multi-threaded warp-cooperative domain kernels | High | Would parallelize within each domain, reducing kernel time 4-8x |
-| Medium | Fix parity for query_medium (per-window xw_* reconfigure) | Medium | Eliminates false positives (264→215) |
 | Low | Async strand overlap | Low | ~0.1-0.3s savings |

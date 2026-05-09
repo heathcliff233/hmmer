@@ -116,7 +116,7 @@ agents_docs/       Detailed architecture documentation (see index below)
 - **Easel submodule**: Do not edit `easel/` directly for GPU work. The `dsqdata` chunk-sizing change comes from `patches/easel-dsqdata-open-sized.patch` applied at build time.
 - **No CMake**: Keep CUDA in the existing autotools build. Do not add CMake for any reason.
 - **GPU scope**: `hmmsearch --gpu` is protein-only (requires `.gpudb`). `nhmmer --gpu` runs full GPU pipeline (SSV + batch filter + Viterbi + scanning Viterbi + Forward prefilter + FB parser) with threaded CPU downstream (works on plain FASTA or `.nucdb`). `hmmscan`, `phmmer`, `jackhmmer`, and daemon remain CPU-only.
-- **Hit parity**: GPU nhmmer path preserves near-exact hit parity with CPU. MADE1: 156 vs 154 (2-hit difference). query_short: 124 vs 120 (4-hit difference). query_medium: 264 vs 215 (extra GPU hits from fixed `xw_*` parameters in scanning Viterbi kernel).
+- **Hit parity**: GPU nhmmer path preserves near-exact hit parity with CPU. MADE1: 151 vs 154 (3-hit difference). query_short: 119 vs 120 (1-hit difference). query_medium: 218 vs 215 (3-hit difference). Remaining differences are from float32 vs double precision in Forward/Backward accumulation.
 - **Pressed HMM files**: Do not change `.h3m/.h3i/.h3f/.h3p` format as part of GPU work.
 - **Configure requires Easel**: `configure.ac` includes macros from `easel/m4`; Easel must be present before `autoconf`.
 - **Benchmark data**: Use `benchmark-data/` (gitignored) for datasets and run logs, not `tutorial/` inputs for speed claims.
@@ -140,9 +140,9 @@ Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
 | CPU-4 | 0.33s / 154 | 0.45s / 120 | 1.64s / 215 |
-| GPU-4 FASTA | 1.74s / 156 | 2.07s / 124 | 10.3s / 264 |
+| GPU-4 FASTA | 1.74s / 151 | 2.07s / 119 | 10.3s / 218 |
 
-GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Remaining gap vs CPU-4 is from single-thread-per-block kernel design (domains are short, limiting GPU parallelism). query_medium hit count difference (264 vs 215) is from scanning Viterbi xw_* parameter differences.
+GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior. Remaining gap vs CPU-4 is from single-thread-per-block kernel design (domains are short, limiting GPU parallelism). Remaining hit count differences (1-3 hits, <2%) are from float32 vs double precision in Forward/Backward accumulation.
 
 ## GPU Architecture Summary
 

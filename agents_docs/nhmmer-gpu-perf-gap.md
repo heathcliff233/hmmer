@@ -7,7 +7,7 @@ Last updated: 2026-05-09
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
 | CPU-4 | 0.33s / 154 | 0.45s / 120 | 1.64s / 215 |
-| GPU-4 FASTA | 1.35s / 154 | 1.92s / 122 | 5.34s / 261 |
+| GPU-4 FASTA | 1.35s / 151 | 1.92s / 119 | 5.34s / 218 |
 
 **GPU is ~3-4x slower than CPU-4** on single-query benchmarks (improved from 5-6x).
 
@@ -22,9 +22,9 @@ The GPU pipeline stages run serially, and CPU workers (domain definition + hit r
 - CUDA context initialization: ~0.5s first query, ~0s subsequent (engine reuse)
 - Amortized over multi-query workloads
 
-### 3. GPU generates more survivors than CPU (parity issue)
+### 3. Near-exact hit parity achieved
 
-GPU scanning Viterbi uses fixed `xw_*` profile parameters (not reconfigured per window length), making it more permissive than CPU's per-window `p7_oprofile_ReconfigLength`. For query_medium: 261 hits vs 215.
+GPU domain rescoring now uses nj=0 (unihit mode) matching CPU behavior. Remaining hit count differences (1-3 hits, <2%) are from float32 vs double precision in Forward/Backward accumulation.
 
 ## Historical Improvement
 
@@ -43,7 +43,7 @@ GPU scanning Viterbi uses fixed `xw_*` profile parameters (not reconfigured per 
 |-----|---------|--------|-------|
 | Move envelope-finding to GPU | Eliminate 75-94% bottleneck | Very high | Would need GPU posterior decoding heuristics |
 | Pinned memory + async D2H | ~10-20ms per batch | Low | Overlap D2H with CPU work |
-| Fix per-window xw_* reconfigure | ~46 fewer false-positive domains | Medium | Reduces wasted work |
+| Fix per-window xw_* reconfigure | N/A | Done | nj=0 unihit fix resolved parity |
 | OptAcc kernel parallelization | Small | Medium | Needs max-prefix scan |
 | Multi-query amortization | ~0.5s | Done | Engine reuse implemented |
 | Nucdb format | ~0.4s | Done | Eliminates FASTA parsing |
