@@ -50,6 +50,7 @@ src/hmmlogo
 src/hmmpgmd
 src/hmmpgmd_shard
 src/hmmseqdb
+src/hmmnucdb
 src/hmmpress
 src/hmmscan
 src/hmmsearch
