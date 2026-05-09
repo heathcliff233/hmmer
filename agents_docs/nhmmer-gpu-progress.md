@@ -208,21 +208,23 @@ Build-time options: `--chunk-size` (default 65536), `--overlap` (default 0), `--
 
 ## Status Summary
 
-All phases complete including GPU domain rescoring. Branch `worktree-h3-gpu-nhmmer` contains commits on top of `h3-gpu`:
+All phases complete including GPU domain rescoring. Branch `worktree-h3-gpu-nhmmer` is rebased on top of latest `h3-gpu` (fused SSV+null+bias+gate kernel, multi-warp-per-block SSV/Viterbi, templated kernels, ~7.3x protein profmark). Commits:
 
 ```
-(pending) gpu: GPU domain rescoring with cross-window batching for nhmmer
-047ceb63 gpu: GPU ForwardBackward parser for nhmmer domaindef
-2432fbc5 gpu: nhmmer performance optimizations (per-window thresholds, Forward pre-filter, kernel tuning)
-f0de5475 docs: comprehensive nhmmer GPU documentation and benchmark scripts
-98e997c1 gpu: pre-stored RC from nucdb + GPU-resident SSV longtarget path
-2e51ca54 cleanup: remove --gpu-compare debug flag and update nhmmer GPU docs
-221a1fa3 gpu: nucleotide GPU database format (nucdb)
-9f2eee46 gpu: port h3-gpu optimizations to nhmmer
-6fffc72d gpu: GPU scanning Viterbi for nhmmer with GPU threshold computation
-23a203ef gpu: batch MSV/bias filter and Viterbi pre-filter for nhmmer
-4c38dd80 gpu: threaded downstream pipeline for nhmmer with CUDA engine reuse
-(+ base commits from h3-gpu: protein GPU acceleration)
+d1a7a4a6 gpu: fix nhmmer domain rescoring parity by using unihit nj=0
+93c51c5b gpu: eliminate redundant Forward in nhmmer prefilter→FB pipeline
+1e0116e0 gpu: GPU domain rescoring with cross-window batching for nhmmer
+775fa2a5 gpu: GPU ForwardBackward parser for nhmmer domaindef
+8fe7522d gpu: nhmmer performance optimizations (per-window thresholds, Forward pre-filter, kernel tuning)
+8e6eae3d docs: comprehensive nhmmer GPU documentation and benchmark scripts
+97cb6e06 gpu: pre-stored RC from nucdb + GPU-resident SSV longtarget path
+3cd1287a cleanup: remove --gpu-compare debug flag and update nhmmer GPU docs
+c274036f gpu: nucleotide GPU database format (nucdb)
+5d8c80d7 gpu: port h3-gpu optimizations to nhmmer
+fd4c34e3 gpu: GPU scanning Viterbi for nhmmer with GPU threshold computation
+4787499c gpu: batch MSV/bias filter and Viterbi pre-filter for nhmmer
+09e6c38f gpu: threaded downstream pipeline for nhmmer with CUDA engine reuse
+(+ h3-gpu base: fused SSV kernel, multi-warp-per-block, templated Viterbi, Forward prefix M≤2044)
 ```
 
 ## Future Work

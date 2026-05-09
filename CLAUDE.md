@@ -140,9 +140,9 @@ Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
 | CPU-4 | 0.33s / 154 | 0.45s / 120 | 1.64s / 215 |
-| GPU-4 FASTA | 1.74s / 151 | 2.07s / 119 | 10.3s / 218 |
+| GPU-4 FASTA | 1.35s / 151 | 1.92s / 119 | 5.34s / 218 |
 
-GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior. Remaining gap vs CPU-4 is from single-thread-per-block kernel design (domains are short, limiting GPU parallelism). Remaining hit count differences (1-3 hits, <2%) are from float32 vs double precision in Forward/Backward accumulation.
+GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior. Remaining gap vs CPU-4 is from CPU workers (envelope-finding, 75-94% of wall time). Remaining hit count differences (1-3 hits, <2%) are from float32 vs double precision in Forward/Backward accumulation.
 
 ## GPU Architecture Summary
 

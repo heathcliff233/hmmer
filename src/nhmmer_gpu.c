@@ -283,6 +283,7 @@ nhmmer_gpu_viterbi_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
                                               om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
                                               pli->F2,
                                               vit_scores, vit_status, passed,
+                                              1,
                                               errbuf, errbuf_size);
   if (status != eslOK) goto ERROR;
 

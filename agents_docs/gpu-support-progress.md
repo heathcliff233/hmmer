@@ -128,19 +128,21 @@ The fused SSV+null+bias+gate kernel is the default GPU MSV path:
 - Record CPU/GPU wall time, CUDA H2D/kernel/D2H time, batch sizes, CUDA batch counts, pass counts for MSV/bias/Viterbi/Forward, and final hit deltas.
 - Compare each proposed GPU stage against the last accepted GPU baseline, not only against CPU.
 
-## GPU nhmmer (Nucleotide Search) — 2026-05-08
+## GPU nhmmer (Nucleotide Search) — 2026-05-09
 
-A GPU-accelerated path for `nhmmer` is available via `--gpu`:
-- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + batch MSV/bias/F1 filter + GPU Viterbi pre-filter + GPU scanning Viterbi + GPU Forward pre-filter + GPU FB parser + threaded CPU downstream (domaindef).
-- **GPU FB parser** (`nhmmer_gpu_run_fb_parser_batch`): Batch Forward+Backward parser on GPU for all post-Forward-prefilter survivors. Returns xmx arrays for domaindef. Replaces CPU `p7_ForwardParser` + `p7_BackwardParser`. 8-30% CPU worker savings.
+A GPU-accelerated path for `nhmmer` is available via `--gpu`. Rebased on latest `h3-gpu` (fused SSV kernel, multi-warp-per-block, templated Viterbi).
+
+- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + batch MSV/bias/F1 filter + GPU Viterbi pre-filter + GPU scanning Viterbi + GPU Forward pre-filter + GPU FB parser + GPU domain rescoring + threaded CPU hit reporting.
+- **GPU domain rescoring** (`p7_cuda_DomainRescoreBatch`): Cross-window batching of all domains (6 kernels: Fwd/Bck/Decoding/OA/OATrace/Domcorr) + trim batching. Replaces `rescore_isolated_domain` (the 67-91% bottleneck). 4/6 kernels use T-thread-per-block with parallel prefix scan.
+- **GPU FB parser** (`nhmmer_gpu_run_fb_parser_batch`): Batch Forward+Backward parser on GPU. Forward-Backward split: prefilter saves xf, Backward-only for F3 survivors.
 - **Forward pre-filter** (`nhmmer_gpu_forward_prefilter`): GPU Forward score-only with F3*2.0 relaxed gate. Removes 45-60% of sub-windows before FB parser.
 - **Batch filter** (`--gpu-batch`): Packs merged windows as synthetic ESL_DSQDATA_CHUNK (zero-copy), runs GPU MSV + null + bias batch scoring, applies F1 gating.
-- **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors. Windows below F2 threshold skipped before scanning Viterbi.
+- **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors (warps_per_block=1 for short windows). Windows below F2 threshold skipped before scanning Viterbi.
 - **Threading**: Post-vit workers distributed across N CPU threads with deep-copied per-thread state.
 - **Engine reuse**: CUDA engine created once before query loop, saves ~250ms per additional query.
 - **Hit parity**: MADE1 151/154 (3-hit diff, <2%), query_short 119/120 (1-hit diff), query_medium 218/215 (3-hit diff, <2%). Remaining differences from float32 vs double precision. Domain rescoring uses nj=0 (unihit) matching CPU.
-- **Performance**: GPU-4 FASTA: MADE1 1.49s, query_short 2.22s, query_medium 7.96s. CPU-4: 0.30s, 0.45s, 1.80s. GPU bottleneck: `rescore_isolated_domain` in domaindef (67-91% of pipeline).
-- **Files**: `src/nhmmer_gpu.c`, `src/nhmmer_internal.h`, `src/cuda/p7_cuda_ssv_longtarget.cu`, `src/cuda/p7_cuda_viterbi_longtarget.cu`
+- **Performance**: GPU-4 FASTA: MADE1 1.35s, query_short 1.92s, query_medium 5.34s. CPU-4: 0.33s, 0.45s, 1.64s. GPU bottleneck: CPU workers (envelope-finding, 75-94% of wall time).
+- **Files**: `src/nhmmer_gpu.c`, `src/nhmmer_internal.h`, `src/cuda/p7_cuda_ssv_longtarget.cu`, `src/cuda/p7_cuda_viterbi_longtarget.cu`, `src/cuda/p7_cuda_domain_rescore.cu`, `src/cuda/p7_cuda_fb_parser.cu`
 - **Detailed docs**: See `nhmmer-gpu-progress.md` and `nhmmer-gpu-todo.md`.
 
 ## History
