@@ -169,3 +169,19 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - Outcome: aggregate speedup on the 13-query profmark held at ~7.3× vs CPU-1 — within run-to-run noise of the W=1 (old shape) baseline. Per-W wall-time medians (one query, 3 trials each): W=1 1.29s, W=2 1.29s, W=3 1.26s, W=4 1.24s, W=6 1.25s, W=8 1.39s. Per-kernel time totals across 13 queries are essentially flat between W=1 and W=4 (SSV ~0.355s, Viterbi ~0.20s, Forward ~0.18s).
 - Honest read: the warp-shuffle DP already saturates SM compute pipes at W=1 despite low theoretical occupancy. Multi-warp packing did not produce a measurable kernel-time win on this workload. Infrastructure retained because (a) it costs nothing on this workload (parity preserved, no slowdown), (b) it should help when M is large or batches are small enough that the SM is genuinely empty, and (c) the dispatch pattern is shared with future kernels.
 - Files: `src/cuda/p7_cuda_ssv.cu`, `src/cuda/p7_cuda_viterbi.cu`, `src/cuda/p7_cuda_runtime.cu`, `src/cuda/p7_cuda.h`, `src/cuda/p7_cuda_stub.c`, `src/hmmsearch.c`, `src/hmmsearch_internal.h`, `src/hmmsearch_gpu.c`.
+
+### 16) GPU profile reuse (grow-only reallocation) — REVERTED (2026-05-09)
+- Problem: 0.39s of the 1.34s multi-query GPU wall time was process-level overhead, hypothesized to be primarily per-query `cudaMalloc`/`cudaFree` (6 pairs × 13 queries = 78 malloc+free calls).
+- Attempt: implemented `p7_cuda_msvprofile_Reconfigure()` — reuses device allocations across queries with grow-only reallocation. Only re-uploads data via `cudaMemcpy` on subsequent queries; avoids malloc/free except when the new model is larger.
+- Verification: parity preserved (`cpu_only=0 gpu_only=0`), zero compare mismatches.
+- Outcome: **no speedup**; process wall time unchanged or slightly worse (1.43–1.51s vs 1.34–1.40s baseline, within thermal noise). The inter-query overhead did decrease by ~0.06s, but per-query work increased by a similar amount.
+- Root cause of failure: the `cudaMalloc`/`cudaFree` overhead is negligible compared to the `cudaMemcpy` transfers (which remain the same). The 0.39s gap is dominated by: (1) one-time CUDA context init (~100–200ms, unavoidable), and (2) time between queries outside the per-query stopwatch (HMM file reads, `esl_dsqdata_Close` thread joins). Neither is addressable by profile buffer reuse.
+- Lesson: `cudaMalloc` on sm_89 is fast (sub-millisecond bookkeeping); the expensive part is the data transfer, not the allocation. Process-level startup overhead is dominated by CUDA driver initialization, not per-query GPU memory management.
+- Decision: reverted. Do not pursue this direction further.
+
+### 17) Forward kernel multi-group packing — REVERTED (2026-05-09)
+- Problem: for short-M queries (M≈100–300), `cuda_forward_score_prefix_kernel` uses 128–512 threads/block. Multiple sequences packed per block via named barriers (`bar.sync b, n`) could improve SM utilization.
+- Attempt: templatized kernel on `GROUPS ∈ {1, 2, 4, 8}`, named barriers for per-group sync, per-group shared memory slabs.
+- Outcome: **18% slower** at G=2/4/8 vs G=1 baseline.
+- Root cause: named-barrier synchronization overhead exceeded any occupancy gain. The kernel is instruction-throughput-bound, not occupancy-bound.
+- Decision: reverted per plan's explicit ≥5% improvement gate. Do not pursue multi-group packing for the Forward prefix kernel.

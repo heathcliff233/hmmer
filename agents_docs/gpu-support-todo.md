@@ -45,9 +45,6 @@ The fused SSV+null+bias+gate kernel (`src/cuda/p7_cuda_ssv.cu`) is now the defau
 - **Double-precision bias fusion**: integrate the survivor double-precision bias recompute directly into the fused kernel, eliminating the separate `cuda_bias_filter_survivors_kernel` launch.
 - **In-kernel null/bias precision**: current in-kernel bias uses float32 `expf`/`logf` which diverges slightly from the double-precision survivor recompute. Explore whether the survivor bias kernel can be eliminated entirely by computing exact-enough bias in the fused kernel.
 
-### Forward prefix kernel multi-group packing
-`cuda_forward_score_prefix_kernel` (`src/cuda/p7_cuda_forward.cu`) currently launches one sequence per block with `prefix_threads = next_pow2(Qf*4/2, 32)` (≤1024) cooperating on a block-wide parallel prefix scan. For short-M queries (M≈100–300, prefix_threads = 128–512), each block holds only 4–16 warps — well below the sm_89 48-warp/SM budget. Pack G sequences per block, each handled by its own group of T threads, with named-barrier (`bar.sync b, n`) group-scoped synchronization. Template the kernel on `GROUPS ∈ {1,2,4,8}`; auto-tune G from `cudaGetDeviceProperties` with shmem and thread-budget clamps; hidden flag `--gpu-fwd-groups` for override. Honest expectation: gain not guaranteed (the SSV/Viterbi packing was kernel-time neutral). Keep only if kernel time drops by ≥5% on the 13-query profmark; otherwise revert.
-
 ### Medium-priority work
 - Consider larger batch sizes (>32K seqs) to reduce per-batch CUDA API call count.
 - Profile/candidate-shape auto-gating for short queries where CUDA launches regress wall time.
@@ -77,7 +74,8 @@ The fused SSV+null+bias+gate kernel (`src/cuda/p7_cuda_ssv.cu`) is now the defau
 ### Lower-priority / deferred
 - `dsqdata` v2 length-index extension for GPU batch planning without chunk unpacking.
 - Broaden parser-state validation beyond raw `p7X_SCALE` row differences.
-- CUDA context init reduction (~0.51s): explore `cudaSetDevice` lazy init, persistent context across process invocations, or CUDA MPS.
+- CUDA context init reduction (~100–200ms one-time): explore `cudaSetDevice` lazy init, persistent context across process invocations, or CUDA MPS.
+- GPU profile buffer reuse across queries was tried and reverted — `cudaMalloc` is sub-ms, the real per-query cost is `cudaMemcpy` which is unavoidable when the model changes. See history entry #16.
 
 ## Validation Checklist
 
