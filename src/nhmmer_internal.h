@@ -42,6 +42,8 @@ typedef struct {
   int               do_gpu_vit;         /* --gpu-vit-prefilter */
   int               do_gpu_vit_lt;      /* --gpu-vit-longtarget: scanning Viterbi on GPU */
   int               do_gpu_fwd;         /* --gpu-fwd-prefilter */
+  int               do_cpu_postmsv;     /* --gpu-cpu-postmsv: bypass GPU Vit+Fwd, use CPU postSSV */
+  int               do_compare;         /* --gpu-compare: print GPU vs CPU score mismatches */
   /* Persistent scratch arrays (grow-only, freed at end) */
   float            *h_ssv_scores;
   int              *h_ssv_status;
@@ -59,7 +61,13 @@ typedef struct {
   double            t_vit_lt;        /* GPU scanning Viterbi longtarget */
   double            t_fwd_prefilter; /* GPU Forward pre-filter */
   double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
-  double            t_cpu_workers;   /* CPU domaindef + hit reporting */
+  double            t_cpu_workers;   /* CPU domaindef + hit reporting (wallclock around threaded section) */
+  /* Sub-bucket breakdown of t_cpu_workers (wall-clock = max across worker threads) */
+  double            t_envfind;       /* Phase 1: p7_domaindef envelope-finding heuristics */
+  double            t_phase1_other;  /* Phase 1: F3 gate, reparameterize, bookkeeping */
+  double            t_dom_rescore_gpu; /* Phase 2: GPU domain rescore main batch (host wall) */
+  double            t_trim_gpu;        /* Phase 3b: GPU trim batch (host wall) */
+  double            t_hit_report;      /* Phase 3a+3c: alidisplay build + tophits */
 #ifdef HMMER_THREADS
   pthread_mutex_t   gpu_domain_mutex; /* serialize GPU domain rescore across threads */
 #endif

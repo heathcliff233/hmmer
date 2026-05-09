@@ -185,3 +185,13 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - Outcome: **18% slower** at G=2/4/8 vs G=1 baseline.
 - Root cause: named-barrier synchronization overhead exceeded any occupancy gain. The kernel is instruction-throughput-bound, not occupancy-bound.
 - Decision: reverted per plan's explicit ≥5% improvement gate. Do not pursue multi-group packing for the Forward prefix kernel.
+
+### 18) nhmmer scanning Viterbi threshold fix (2026-05-09)
+- Problem: GPU nhmmer scanning Viterbi produced ~7x more sub-windows than CPU (e.g., 3475 vs 498 for MADE1), causing `p7_domaindef` to run ~7x longer and making GPU 3-4x slower than CPU-4. Hit parity was badly broken: MADE1 151 vs 465, query_medium 218 vs 648.
+- Root cause: two bugs in `cuda_compute_viterbi_thresholds_kernel` in `src/cuda/p7_cuda_viterbi_longtarget.cu`:
+  1. **`esl_gumbel_invsurv_device` used `logf(-logf(p))` instead of `logf(-logf(1.0f - p))`** — computing the Gumbel inverse CDF instead of inverse survival function. With F2=0.003, this produced invP≈-11.8 instead of ≈-1.3, lowering thresholds by ~5265 int16 units (0.693 × 10.53 × 721.3).
+  2. **Bias nullsc subtraction used `null(loc_window_len)` instead of `null(window_len)`** — the GPU bias filter computes scores using `window_len`, so the null subtraction to isolate composition bias must also use `window_len`, matching `p7_pli_postSSV_LongTarget`.
+- Fix: one-line change to Gumbel function (`logf(p)` → `logf(1.0f - p)`), plus nullsc split into `nullsc_loc` and `nullsc_win`.
+- Outcome: MADE1 1.35s/151hits → 0.91s/462hits, query_short 1.92s/119hits → 1.40s/363hits, query_medium 5.34s/218hits → 2.85s/648hits. Hit parity now matches CPU within float32 precision (0-3 hit difference).
+- Lesson: always compare GPU device-computed values back to CPU reference at each intermediate step; a wrong sign or missing `1-p` is invisible until you download and compare the threshold vector itself.
+- Files: `src/cuda/p7_cuda_viterbi_longtarget.cu` (threshold kernel fix).

@@ -23,7 +23,7 @@ Phases 1–8 are done. Phase 9 (GPU Domain Rescoring) is complete. Phase 10 (ker
 
 ### Impact
 
-Parallel-thread kernels: ~1.3-1.5x kernel speedup on domain rescoring. Forward-Backward split: eliminates ~50% of FB computation (no redundant Forward). Combined: MADE1 1.74s → 1.35s (1.3x), query_medium 10.3s → 5.34s (1.9x).
+Parallel-thread kernels: ~1.3-1.5x kernel speedup on domain rescoring. Forward-Backward split: eliminates ~50% of FB computation (no redundant Forward). Combined: MADE1 1.74s → 1.35s (1.3x), query_medium 10.3s → 5.34s (1.9x). Scanning Viterbi threshold fix: MADE1 1.35s → 0.91s (1.5x), query_medium 5.34s → 2.85s (1.9x).
 
 ## Phase 9: GPU Domain Rescoring — COMPLETE
 
@@ -47,19 +47,18 @@ GPU domain rescoring replaces `rescore_isolated_domain` (the 67-91% bottleneck).
 
 ## Known Issues
 
-- **MADE1 parity**: GPU reports 151 vs CPU 154 (3-hit difference, <2%)
-- **query_short parity**: GPU reports 119 vs CPU 120 (1-hit difference, <1%)
-- **query_medium parity**: GPU reports 218 vs CPU 215 (3-hit difference, <2%)
+- **MADE1 parity**: GPU reports 462 vs CPU 465 (3-hit difference, <1%)
+- **query_short parity**: GPU reports 363 vs CPU 363 (exact match)
+- **query_medium parity**: GPU reports 648 vs CPU 648 (exact match)
 - Remaining differences are from float32 vs double precision in Forward/Backward accumulation
-- **GPU slower than CPU-4**: CPU workers (envelope-finding) dominate at 75-94% of GPU wall time
+- **GPU slower than CPU-4**: CUDA init overhead + envelope-finding runtime (GPU is 1.7-2.9x slower)
 
 ## Latest Benchmark (2026-05-09, RTX 4090, chr22 50MB)
 
 | Config | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |--------|:---:|:---:|:---:|
-| CPU-1 | 1.12s / 154 hits | 1.39s / 120 hits | 6.35s / 215 hits |
-| CPU-4 | 0.33s / 154 hits | 0.45s / 120 hits | 1.64s / 215 hits |
-| GPU-4 FASTA | 1.35s / 151 hits | 1.92s / 119 hits | 5.34s / 218 hits |
+| CPU-4 | 0.32s / 465 hits | 0.48s / 363 hits | 1.66s / 648 hits |
+| GPU-4 FASTA | 0.91s / 462 hits | 1.40s / 363 hits | 2.85s / 648 hits |
 
 ### GPU Timing Breakdown (FASTA path)
 

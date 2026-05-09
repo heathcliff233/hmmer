@@ -1254,6 +1254,7 @@ typedef struct p7_pipeline_s {
   double        time_domain;     /* domain definition workflow                 */
   double        time_null2;      /* null2/reconstruction scoring               */
   double        time_output;     /* hit object construction/threshold prep     */
+  double        time_ssv;        /* SSV longtarget scan (nhmmer LT path)       */
   double        time_gpu_read;   /* dsqdata read/unpack wall time for GPU path */
   double        time_gpu_meta;   /* ESL_SQ metadata setup in GPU path          */
   double        time_gpu_survivor; /* CPU post-MSV continuation in GPU path     */

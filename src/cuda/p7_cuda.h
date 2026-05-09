@@ -258,5 +258,7 @@ extern int  p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVP
                                       float base_w, int max_length,
                                       P7_CUDA_VIT_LT_WINDOW **ret_windows, int *ret_nwindows,
                                       char *errbuf, int errbuf_size);
+extern int  p7_cuda_ViterbiLongtarget_GetThresholds(P7_CUDA_ENGINE *engine,
+                                                     int16_t *h_thresholds, int nwindows);
 
 #endif /*P7_CUDA_INCLUDED*/

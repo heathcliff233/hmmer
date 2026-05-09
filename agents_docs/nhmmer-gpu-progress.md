@@ -124,8 +124,8 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-4 | 0.33s / 154 | 0.45s / 120 | 1.64s / 215 |
-| GPU-4 FASTA | 1.35s / 151 | 1.92s / 119 | 5.34s / 218 |
+| CPU-4 | 0.32s / 465 | 0.48s / 363 | 1.66s / 648 |
+| GPU-4 FASTA | 0.91s / 462 | 1.40s / 363 | 2.85s / 648 |
 
 ### GPU Domain Rescoring Performance
 
@@ -137,13 +137,13 @@ Cross-window batching + trim batching replaces per-domain GPU calls with two bat
 | query_short | ~600 | varies | ~300 | varies |
 | query_medium | ~300 | varies | ~100 | varies |
 
-Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms each). Cross-window batching: **1.74s** (18x improvement). Forward-Backward split (prefilter saves xf, Backward-only): **1.35s** (further 1.3x).
+Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms each). Cross-window batching: **1.74s** (18x improvement). Forward-Backward split (prefilter saves xf, Backward-only): **1.35s** (further 1.3x). Scanning Viterbi threshold fix: **0.91s** (further 1.5x).
 
 ### Parity Notes
 
-- **MADE1 (M=80)**: 151 vs 154 (3-hit difference, <2%)
-- **query_short (M=151)**: 119 vs 120 (1-hit difference, <1%)
-- **query_medium (M=501)**: 218 vs 215 (3-hit difference, <2%)
+- **MADE1 (M=80)**: 462 vs 465 (3-hit difference, <1%)
+- **query_short (M=151)**: 363 vs 363 (exact match)
+- **query_medium (M=501)**: 648 vs 648 (exact match)
 
 Remaining differences are from float32 vs double precision in Forward/Backward accumulation. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior.
 

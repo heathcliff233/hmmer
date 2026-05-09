@@ -191,6 +191,8 @@ static ESL_OPTIONS options[] = {
   { "--gpu-vit-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Viterbi as pre-filter before scanning Viterbi",         99 },
   { "--gpu-vit-longtarget",eslARG_NONE, FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU scanning Viterbi for longtarget sub-window detection",   99 },
   { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Forward as pre-filter for sub-windows",                 12 },
+  { "--gpu-cpu-postmsv", eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "bypass GPU scanning Viterbi/Fwd; use CPU postSSV for alignment testing", 99 },
+  { "--gpu-compare",     eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "debug: compare GPU filter scores to CPU at each pipeline stage", 99 },
 #endif
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
@@ -1139,6 +1141,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.do_gpu_vit     = TRUE;
         gpu_info.do_gpu_vit_lt  = TRUE;
         gpu_info.do_gpu_fwd     = esl_opt_GetBoolean(go, "--gpu-fwd-prefilter");
+        gpu_info.do_cpu_postmsv = esl_opt_GetBoolean(go, "--gpu-cpu-postmsv");
+        gpu_info.do_compare     = esl_opt_GetBoolean(go, "--gpu-compare");
         gpu_info.h_ssv_scores   = NULL;
         gpu_info.h_ssv_status   = NULL;
         gpu_info.h_null_scores  = NULL;
@@ -1154,6 +1158,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_fwd_prefilter = 0;
         gpu_info.t_gpu_fb_parser = 0;
         gpu_info.t_cpu_workers   = 0;
+        gpu_info.t_envfind         = 0;
+        gpu_info.t_phase1_other    = 0;
+        gpu_info.t_dom_rescore_gpu = 0;
+        gpu_info.t_trim_gpu        = 0;
+        gpu_info.t_hit_report      = 0;
 #ifdef HMMER_THREADS
         pthread_mutex_init(&gpu_info.gpu_domain_mutex, NULL);
 #endif
@@ -1199,6 +1208,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
             fprintf(stderr, "  Forward prefilter: %7.3fs  (%4.1f%%)\n", gpu_info.t_fwd_prefilter, 100.0*gpu_info.t_fwd_prefilter/t_total);
             fprintf(stderr, "  GPU FB parser:     %7.3fs  (%4.1f%%)\n", gpu_info.t_gpu_fb_parser, 100.0*gpu_info.t_gpu_fb_parser/t_total);
             fprintf(stderr, "  CPU workers:       %7.3fs  (%4.1f%%)\n", gpu_info.t_cpu_workers, 100.0*gpu_info.t_cpu_workers/t_total);
+            fprintf(stderr, "    envelope find:   %7.3fs  (%4.1f%%)\n", gpu_info.t_envfind, 100.0*gpu_info.t_envfind/t_total);
+            fprintf(stderr, "    phase1 other:    %7.3fs  (%4.1f%%)\n", gpu_info.t_phase1_other, 100.0*gpu_info.t_phase1_other/t_total);
+            fprintf(stderr, "    dom rescore GPU: %7.3fs  (%4.1f%%)\n", gpu_info.t_dom_rescore_gpu, 100.0*gpu_info.t_dom_rescore_gpu/t_total);
+            fprintf(stderr, "    trim GPU:        %7.3fs  (%4.1f%%)\n", gpu_info.t_trim_gpu, 100.0*gpu_info.t_trim_gpu/t_total);
+            fprintf(stderr, "    hit reporting:   %7.3fs  (%4.1f%%)\n", gpu_info.t_hit_report, 100.0*gpu_info.t_hit_report/t_total);
           } else {
             fprintf(stderr, "GPU timing: all zeros (t_ssv=%.6f t_merge=%.6f t_batch=%.6f t_vit=%.6f t_fwd=%.6f t_cpu=%.6f)\n",
                     gpu_info.t_ssv, gpu_info.t_merge, gpu_info.t_batch_filter,

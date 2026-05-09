@@ -254,6 +254,7 @@ p7_pipeline_Create(const ESL_GETOPTS *go, int M_hint, int L_hint, int long_targe
   pli->time_domain     = 0.0;
   pli->time_null2      = 0.0;
   pli->time_output     = 0.0;
+  pli->time_ssv        = 0.0;
   pli->time_gpu_read   = 0.0;
   pli->time_gpu_meta   = 0.0;
   pli->time_gpu_survivor = 0.0;
@@ -695,6 +696,7 @@ p7_pipeline_Merge(P7_PIPELINE *p1, P7_PIPELINE *p2)
   p1->time_domain     += p2->time_domain;
   p1->time_null2      += p2->time_null2;
   p1->time_output     += p2->time_output;
+  p1->time_ssv        += p2->time_ssv;
   p1->time_gpu_read   += p2->time_gpu_read;
   p1->time_gpu_meta   += p2->time_gpu_meta;
   p1->time_gpu_survivor += p2->time_gpu_survivor;
@@ -1265,10 +1267,16 @@ p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_T
   int F3_L = ESL_MIN( window_len,  pli->B3);
 
   p7_bg_SetLength(bg, window_len);
-  p7_bg_NullOne  (bg, subseq, window_len, &nullsc);
+  {
+    double _t0 = p7_pipeline_WallTime();
+    p7_bg_NullOne  (bg, subseq, window_len, &nullsc);
+    pli->time_null += p7_pipeline_WallTime() - _t0;
+  }
   if (pli->do_biasfilter)
   {
+    double _t0 = p7_pipeline_WallTime();
     p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
+    pli->time_bias += p7_pipeline_WallTime() - _t0;
     bias_filtersc -= nullsc;  //remove nullsc, so bias scaling can be done, then add it back on later
   } else {
     bias_filtersc = 0;
@@ -1277,7 +1285,11 @@ p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_T
   p7_oprofile_ReconfigRestLength(om, window_len);
 
   /* Parse with Forward and obtain its real Forward score. */
-  p7_ForwardParser(subseq, window_len, om, pli->oxf, &fwdsc);
+  {
+    double _t0 = p7_pipeline_WallTime();
+    p7_ForwardParser(subseq, window_len, om, pli->oxf, &fwdsc);
+    pli->time_fwd += p7_pipeline_WallTime() - _t0;
+  }
   filtersc =  nullsc + (bias_filtersc * ( F3_L>window_len ? 1.0 : (float)F3_L/window_len) );
   seq_score = (fwdsc - filtersc) / eslCONST_LOG2;
   P = esl_exp_surv(seq_score,  om->evparam[p7_FTAU],  om->evparam[p7_FLAMBDA]);
@@ -1300,11 +1312,19 @@ p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_T
   /* Now a Backwards parser pass, and hand it to domain definition workflow
    * In this case "domains" will end up being translated as independent "hits" */
   p7_omx_GrowTo(pli->oxb, om->M, 0, window_len);
-  p7_BackwardParser(subseq, window_len, om, pli->oxf, pli->oxb, NULL);
+  {
+    double _t0 = p7_pipeline_WallTime();
+    p7_BackwardParser(subseq, window_len, om, pli->oxf, pli->oxb, NULL);
+    pli->time_bck += p7_pipeline_WallTime() - _t0;
+  }
 
   //if we're asked to not do null correction, pass a NULL instead of a temp scores variable - domaindef knows what to do
-  status = p7_domaindef_ByPosteriorHeuristics(pli_tmp->tmpseq, NULL, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, TRUE,
-                                              pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE);
+  {
+    double _t0 = p7_pipeline_WallTime();
+    status = p7_domaindef_ByPosteriorHeuristics(pli_tmp->tmpseq, NULL, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, TRUE,
+                                                pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE);
+    pli->time_domain += p7_pipeline_WallTime() - _t0;
+  }
 
   pli_tmp->tmpseq->dsq = dsq_holder;
   if (status != eslOK) ESL_FAIL(status, pli->errbuf, "domain definition workflow failure"); /* eslERANGE can happen */
@@ -1326,7 +1346,7 @@ p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_T
    */
   for (d = 0; d < pli->ddef->ndom; d++)
   {
-
+      double _t_out0 = p7_pipeline_WallTime();
       dom = pli->ddef->dcl + d;
 
       //adjust the score of a hit to account for the full length model - the characters outside the envelope but in the window
@@ -1337,6 +1357,7 @@ p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_T
 
       if (ali_len < 8) {
         p7_alidisplay_Destroy(dom->ad);
+        pli->time_output += p7_pipeline_WallTime() - _t_out0;
         continue; // anything less than this is a funny byproduct of the Forward score passing a very low threshold, but no reliable alignment existing that supports it
       }
 
@@ -1441,7 +1462,7 @@ p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_T
         }
 
       }
-
+      pli->time_output += p7_pipeline_WallTime() - _t_out0;
   }
 
   return eslOK;
@@ -1530,7 +1551,11 @@ p7_pli_postSSV_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHI
   //initial bias filter, based on the input window_len
   if (pli->do_biasfilter) {
       p7_bg_SetLength(bg, window_len);
-      p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
+      {
+        double _t0 = p7_pipeline_WallTime();
+        p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
+        pli->time_bias += p7_pipeline_WallTime() - _t0;
+      }
       bias_filtersc -= nullsc; // doing this because I'll be modifying the bias part of filtersc based on length, then adding nullsc back in.
       filtersc =  nullsc + (bias_filtersc * (float)(( F1_L>window_len ? 1.0 : (float)F1_L/window_len)));
       seq_score = (usc - filtersc) / eslCONST_LOG2;
@@ -1560,7 +1585,11 @@ p7_pli_postSSV_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHI
   p7_omx_GrowTo(pli->oxf, om->M, 0, window_len);
 
   //use window_len instead of loc_window_len, because length parameterization is done, just need to loop over subseq
-  p7_ViterbiFilter_longtarget(subseq, window_len, om, pli->oxf, filtersc, pli->F2, vit_windowlist);
+  {
+    double _t0 = p7_pipeline_WallTime();
+    p7_ViterbiFilter_longtarget(subseq, window_len, om, pli->oxf, filtersc, pli->F2, vit_windowlist);
+    pli->time_vit += p7_pipeline_WallTime() - _t0;
+  }
 
   p7_pli_ExtendAndMergeWindows (om, data, vit_windowlist, 0.5);
 
@@ -1718,10 +1747,14 @@ p7_Pipeline_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_SCOREDATA *data,
    * This variant of SSV will scan a long sequence and find
    * short high-scoring regions.
    */
-  if (fmf) // using an FM-index
-    p7_SSVFM_longlarget(om, 2.0, bg, pli->F1, fmf, fmb, fm_cfg, data, pli->strands, pli->r, &msv_windowlist );
-  else // compare directly to sequence
-    p7_SSVFilter_longtarget(sq->dsq, sq->n, om, pli->oxf, data, bg, pli->F1, &msv_windowlist);
+  {
+    double _t0 = p7_pipeline_WallTime();
+    if (fmf) // using an FM-index
+      p7_SSVFM_longlarget(om, 2.0, bg, pli->F1, fmf, fmb, fm_cfg, data, pli->strands, pli->r, &msv_windowlist );
+    else // compare directly to sequence
+      p7_SSVFilter_longtarget(sq->dsq, sq->n, om, pli->oxf, data, bg, pli->F1, &msv_windowlist);
+    pli->time_ssv += p7_pipeline_WallTime() - _t0;
+  }
 
 
   /* convert hits to windows, merging neighboring windows
@@ -1805,13 +1838,25 @@ p7_Pipeline_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_SCOREDATA *data,
       }
 
       p7_bg_SetLength(bg, window->length);
-      p7_bg_NullOne  (bg, subseq, window->length, &nullsc);
+      {
+        double _t0 = p7_pipeline_WallTime();
+        p7_bg_NullOne  (bg, subseq, window->length, &nullsc);
+        pli->time_null += p7_pipeline_WallTime() - _t0;
+      }
 
-      p7_bg_FilterScore(bg, subseq, window->length, &bias_filtersc);
+      {
+        double _t0 = p7_pipeline_WallTime();
+        p7_bg_FilterScore(bg, subseq, window->length, &bias_filtersc);
+        pli->time_bias += p7_pipeline_WallTime() - _t0;
+      }
       // Compute standard MSV to ensure that bias doesn't overcome SSV score when MSV
       // would have survived it
       p7_oprofile_ReconfigMSVLength(om, window->length);
-      p7_MSVFilter(subseq, window->length, om, pli->oxf, &usc);
+      {
+        double _t0 = p7_pipeline_WallTime();
+        p7_MSVFilter(subseq, window->length, om, pli->oxf, &usc);
+        pli->time_msv += p7_pipeline_WallTime() - _t0;
+      }
       P = esl_gumbel_surv( (usc-nullsc)/eslCONST_LOG2,  om->evparam[p7_MMU],  om->evparam[p7_MLAMBDA]);
 
       if (P > pli->F1 ) continue;
@@ -2095,6 +2140,7 @@ p7_pli_Statistics(FILE *ofp, P7_PIPELINE *pli, ESL_STOPWATCH *w)
     fprintf(ofp, "# Exact delta_vs_wall: %.9f sec %s\n", exact_delta, (fabs(exact_delta) <= 1e-6 ? "[OK]" : "[WARN]"));
   }
   fprintf(ofp, "# Stage null time: %.6f sec\n", pli->time_null);
+  fprintf(ofp, "# Stage SSV time: %.6f sec\n", pli->time_ssv);
   fprintf(ofp, "# Stage MSV host time: %.6f sec\n", pli->time_msv);
   fprintf(ofp, "# Stage bias time: %.6f sec\n", pli->time_bias);
   fprintf(ofp, "# Stage Viterbi time: %.6f sec\n", pli->time_vit);

@@ -182,6 +182,56 @@ nhmmer_gpu_batch_filter(NHMMER_GPU_INFO *info, NHMMER_GPU_WINDOW_BATCH *wb,
     if (status != eslOK) return status;
   }
 
+  /* --gpu-compare Stage A: compare GPU batch MSV/null/bias scores to CPU */
+  if (info->do_compare) {
+    P7_BG *bg = info->bg;
+    for (i = 0; i < N; i++) {
+      if (ssv_status[i] != eslOK && ssv_status[i] != eslERANGE) continue;
+      int    window_len = (int)wb->lengths[i];
+      ESL_DSQ *subseq   = wb->chu.dsq[i];
+      float  cpu_usc, cpu_nullsc, cpu_bias_filtersc, cpu_filtersc, cpu_seq_score;
+      double cpu_P;
+
+      p7_omx_GrowTo(pli->oxf, om->M, 0, window_len);
+      p7_oprofile_ReconfigMSVLength(om, window_len);
+      p7_MSVFilter(subseq, window_len, om, pli->oxf, &cpu_usc);
+      p7_bg_SetLength(bg, window_len);
+      p7_bg_NullOne(bg, subseq, window_len, &cpu_nullsc);
+
+      int gpu_pass = (ssv_status[i] == eslERANGE) ? 1 : 0;
+      int cpu_pass = 0;
+      float gpu_seq_score = 0;
+      if (ssv_status[i] == eslOK) {
+        int F1_L = ESL_MIN(window_len, pli->B1);
+        if (pli->do_biasfilter) {
+          float gpu_bias = bias_scores[i] - null_scores[i];
+          float gpu_fs = null_scores[i] + (gpu_bias * ((F1_L > window_len) ? 1.0f : (float)F1_L / window_len));
+          gpu_seq_score = (ssv_scores[i] - gpu_fs) / eslCONST_LOG2;
+        } else {
+          gpu_seq_score = (ssv_scores[i] - null_scores[i]) / eslCONST_LOG2;
+        }
+        double gpu_P = esl_gumbel_surv(gpu_seq_score, om->evparam[p7_MMU], om->evparam[p7_MLAMBDA]);
+        gpu_pass = (gpu_P <= pli->F1) ? 1 : 0;
+      }
+
+      if (pli->do_biasfilter) {
+        p7_bg_FilterScore(bg, subseq, window_len, &cpu_bias_filtersc);
+        cpu_bias_filtersc -= cpu_nullsc;
+        int F1_L = ESL_MIN(window_len, pli->B1);
+        cpu_filtersc = cpu_nullsc + (cpu_bias_filtersc * ((F1_L > window_len) ? 1.0f : (float)F1_L / window_len));
+        cpu_seq_score = (cpu_usc - cpu_filtersc) / eslCONST_LOG2;
+      } else {
+        cpu_seq_score = (cpu_usc - cpu_nullsc) / eslCONST_LOG2;
+      }
+      cpu_P = esl_gumbel_surv(cpu_seq_score, om->evparam[p7_MMU], om->evparam[p7_MLAMBDA]);
+      cpu_pass = (cpu_P <= pli->F1) ? 1 : 0;
+
+      if (gpu_pass != cpu_pass || (gpu_pass && cpu_pass && fabsf(gpu_seq_score - cpu_seq_score) > 0.01f))
+        fprintf(stderr, "NHMMER_GPU_COMPARE_BATCH win=%d n=%" PRId64 " len=%d gpu_usc=%.4f cpu_usc=%.4f gpu_null=%.4f cpu_null=%.4f gpu_ss=%.4f cpu_ss=%.4f gpu_pass=%d cpu_pass=%d\n",
+                i, (int64_t)wl->windows[i].n, window_len, ssv_scores[i], cpu_usc, null_scores[i], cpu_nullsc, gpu_seq_score, cpu_seq_score, gpu_pass, cpu_pass);
+    }
+  }
+
   for (i = 0; i < N; i++) {
     if (ssv_status[i] == eslERANGE) {
       if (nsurv != i)
@@ -347,6 +397,12 @@ typedef struct {
 #ifdef HMMER_THREADS
   pthread_mutex_t  *gpu_domain_mutex;
 #endif
+  /* Per-worker timing buckets for post_vit_gpu (seconds, accumulated across windows). */
+  double  t_envfind;
+  double  t_phase1_other;
+  double  t_dom_rescore_gpu;
+  double  t_trim_gpu;
+  double  t_hit_report;
 } NHMMER_GPU_WORKER;
 
 static int
@@ -396,6 +452,11 @@ nhmmer_gpu_worker_init(NHMMER_GPU_WORKER *w, const NHMMER_GPU_INFO *info)
 #ifdef HMMER_THREADS
   w->gpu_domain_mutex = &((NHMMER_GPU_INFO *)info)->gpu_domain_mutex;
 #endif
+  w->t_envfind         = 0.0;
+  w->t_phase1_other    = 0.0;
+  w->t_dom_rescore_gpu = 0.0;
+  w->t_trim_gpu        = 0.0;
+  w->t_hit_report      = 0.0;
   return eslOK;
 
 ERROR:
@@ -611,902 +672,6 @@ nhmmer_gpu_trace_from_gpu(P7_TRACE *tr, int8_t *st, int *tk, int *ti, float *tp,
   return eslOK;
 }
 
-static int
-nhmmer_gpu_rescore_domains(NHMMER_GPU_WORKER *w, ESL_DSQ *subseq, int window_len,
-                           int ienv_base)
-{
-  P7_DOMAINDEF *ddef = w->pli->ddef;
-  P7_OPROFILE  *om   = w->om;
-  P7_BG        *bg   = w->bg;
-  int           ndom = ddef->ndom;
-  int           Q    = p7O_NQF(om->M);
-  int           Kp   = om->abc->Kp;
-  float         nj   = 0.0f;  /* unihit mode for domain rescoring, matching CPU behavior */
-  int           d, status;
-  char          errbuf[256];
-
-  const uint8_t **h_dsq_ptrs = NULL;
-  int            *h_lengths  = NULL;
-  const float   **h_rfv_ptrs = NULL;
-  float          *h_orig_rfv = NULL;
-  float          *h_envsc = NULL, *h_domcorr = NULL, *h_oasc = NULL;
-  int8_t         *h_trace_st = NULL;
-  int            *h_trace_k = NULL, *h_trace_i = NULL, *h_trace_N = NULL;
-  float          *h_trace_pp = NULL;
-  int            *h_statuses = NULL;
-  float         **rfv_copies = NULL;
-  int             max_trace_len;
-  int             max_Ld = 0;
-  int             orig_L = om->L;
-  size_t          rfv_size = (size_t)Kp * Q * 4 * sizeof(float);
-
-  if (ndom == 0) return eslOK;
-
-  for (d = 0; d < ndom; d++) {
-    int Ld = ddef->dcl[d].jenv - ddef->dcl[d].ienv + 1;
-    if (Ld > max_Ld) max_Ld = Ld;
-  }
-  max_trace_len = max_Ld * 4 + 20;
-
-  ESL_ALLOC(h_dsq_ptrs, sizeof(uint8_t *) * ndom);
-  ESL_ALLOC(h_lengths,  sizeof(int)       * ndom);
-  ESL_ALLOC(h_rfv_ptrs, sizeof(float *)   * ndom);
-  ESL_ALLOC(rfv_copies, sizeof(float *)   * ndom);
-  ESL_ALLOC(h_envsc,    sizeof(float)     * ndom);
-  ESL_ALLOC(h_domcorr,  sizeof(float)     * ndom);
-  ESL_ALLOC(h_oasc,     sizeof(float)     * ndom);
-  ESL_ALLOC(h_statuses, sizeof(int)       * ndom);
-  ESL_ALLOC(h_trace_st, sizeof(int8_t)    * ndom * max_trace_len);
-  ESL_ALLOC(h_trace_k,  sizeof(int)       * ndom * max_trace_len);
-  ESL_ALLOC(h_trace_i,  sizeof(int)       * ndom * max_trace_len);
-  ESL_ALLOC(h_trace_pp, sizeof(float)     * ndom * max_trace_len);
-  ESL_ALLOC(h_trace_N,  sizeof(int)       * ndom);
-  ESL_ALLOC(h_orig_rfv, rfv_size);
-
-  for (d = 0; d < ndom; d++) rfv_copies[d] = NULL;
-
-  memcpy(h_orig_rfv, om->rfv[0], rfv_size);
-
-  for (d = 0; d < ndom; d++) {
-    int ienv = ddef->dcl[d].ienv;
-    int jenv = ddef->dcl[d].jenv;
-    int Ld   = jenv - ienv + 1;
-
-    p7_oprofile_ReconfigRestLength(om, Ld);
-
-    if (w->pli_tmp->scores != NULL) {
-      reparameterize_model(bg, om, w->pli_tmp->tmpseq, ienv, Ld,
-                           w->pli_tmp->fwd_emissions_arr, w->pli_tmp->bg->f, w->pli_tmp->scores);
-    }
-
-    ESL_ALLOC(rfv_copies[d], rfv_size);
-    memcpy(rfv_copies[d], om->rfv[0], rfv_size);
-
-    h_dsq_ptrs[d] = subseq + ienv - 1;
-    h_lengths[d]  = Ld;
-    h_rfv_ptrs[d] = rfv_copies[d];
-
-    if (w->pli_tmp->scores != NULL) {
-      reparameterize_model(bg, om, NULL, 0, 0,
-                           w->pli_tmp->fwd_emissions_arr, w->pli_tmp->bg->f, w->pli_tmp->scores);
-    }
-  }
-
-#ifdef HMMER_THREADS
-  if (w->gpu_domain_mutex) pthread_mutex_lock(w->gpu_domain_mutex);
-#endif
-  status = p7_cuda_DomainRescoreBatch(w->cuda_engine, w->cuda_msv,
-                                       ndom, h_dsq_ptrs, h_lengths,
-                                       h_rfv_ptrs, h_orig_rfv,
-                                       Q, Kp, nj,
-                                       h_envsc, h_domcorr, h_oasc,
-                                       h_trace_st, h_trace_k, h_trace_i,
-                                       h_trace_pp, h_trace_N, max_trace_len,
-                                       h_statuses, errbuf, sizeof(errbuf));
-#ifdef HMMER_THREADS
-  if (w->gpu_domain_mutex) pthread_mutex_unlock(w->gpu_domain_mutex);
-#endif
-  if (status != eslOK) goto ERROR;
-
-  for (d = 0; d < ndom; d++) {
-    P7_DOMAIN *dom = &ddef->dcl[d];
-    int ienv = dom->ienv;
-    int jenv = dom->jenv;
-    int Ld   = jenv - ienv + 1;
-
-    if (Ld <= 0 || ienv <= 0 || jenv <= 0) {
-      dom->ad = NULL; dom->scores_per_pos = NULL;
-      dom->envsc = 0.0; dom->domcorrection = 0.0; dom->oasc = 0.0;
-      continue;
-    }
-
-    if (h_statuses[d] != eslOK) {
-      /* GPU overflow (eslERANGE): domain is dropped, matching CPU behavior
-       * where p7_Decoding overflow causes rescore_isolated_domain to return eslFAIL */
-      dom->ad             = NULL;
-      dom->scores_per_pos = NULL;
-      dom->envsc          = 0.0;
-      dom->domcorrection  = 0.0;
-      dom->oasc           = 0.0;
-      continue;
-    }
-
-    if (h_trace_N[d] <= 0 || h_trace_N[d] > max_trace_len) {
-      dom->ad = NULL; dom->scores_per_pos = NULL;
-      dom->envsc = 0.0; dom->domcorrection = 0.0; dom->oasc = 0.0;
-      continue;
-    }
-
-    p7_trace_Reuse(ddef->tr);
-    nhmmer_gpu_trace_from_gpu(ddef->tr,
-                              h_trace_st + (size_t)d * max_trace_len,
-                              h_trace_k  + (size_t)d * max_trace_len,
-                              h_trace_i  + (size_t)d * max_trace_len,
-                              h_trace_pp + (size_t)d * max_trace_len,
-                              h_trace_N[d], om->M, Ld);
-
-    /* Point tmpseq at envelope subsequence for alidisplay creation (envelope-relative trace) */
-    ESL_DSQ *saved_dsq = w->pli_tmp->tmpseq->dsq;
-    int64_t  saved_n   = w->pli_tmp->tmpseq->n;
-    w->pli_tmp->tmpseq->dsq = subseq + ienv - 1;
-    w->pli_tmp->tmpseq->n = Ld;
-    p7_oprofile_ReconfigRestLength(om, Ld);
-    dom->ad = p7_alidisplay_Create(ddef->tr, 0, om, w->pli_tmp->tmpseq, NULL);
-    w->pli_tmp->tmpseq->dsq = saved_dsq;
-    w->pli_tmp->tmpseq->n = saved_n;
-    if (dom->ad == NULL) {
-      continue;
-    }
-    dom->scores_per_pos = NULL;
-
-    float envsc = h_envsc[d];
-    float domcorrection;
-
-    if (dom->ad->sqfrom <= 0 || dom->ad->sqto <= 0 || dom->ad->sqfrom > Ld || dom->ad->sqto > Ld) {
-      p7_alidisplay_Destroy(dom->ad);
-      dom->ad = NULL;
-      continue;
-    }
-
-    /* Envelope trimming: if alignment is much smaller than envelope, re-run on tighter bounds.
-     * sqfrom/sqto are envelope-relative (1..Ld). Trim if envelope extends >20 past alignment. */
-    if (1 < dom->ad->sqfrom - 20 || Ld > dom->ad->sqto + 20) {
-      /* Compute new envelope in envelope-relative coords, then convert to window-relative */
-      int new_env_start = ESL_MAX(1, (int)dom->ad->sqfrom - 20);
-      int new_env_end   = ESL_MIN(Ld, (int)dom->ad->sqto + 20);
-      int new_ienv = ienv + new_env_start - 1;  /* window-relative */
-      int new_jenv = ienv + new_env_end - 1;     /* window-relative */
-      int new_Ld = new_jenv - new_ienv + 1;
-      const uint8_t *trim_dsq = subseq + new_ienv - 1;
-      int trim_len = new_Ld;
-      float trim_envsc, trim_domcorr, trim_oasc;
-      int   trim_status;
-      int8_t *trim_st;
-      int    *trim_k, *trim_i, *trim_N_val;
-      float  *trim_pp_val;
-      int     trim_max_trace = new_Ld * 4 + 20;
-      float  *trim_rfv = NULL;
-
-      ESL_ALLOC(trim_st,    sizeof(int8_t) * trim_max_trace);
-      ESL_ALLOC(trim_k,     sizeof(int)    * trim_max_trace);
-      ESL_ALLOC(trim_i,     sizeof(int)    * trim_max_trace);
-      ESL_ALLOC(trim_pp_val,sizeof(float)  * trim_max_trace);
-      ESL_ALLOC(trim_N_val, sizeof(int));
-      ESL_ALLOC(trim_rfv,   rfv_size);
-
-      p7_oprofile_ReconfigRestLength(om, new_Ld);
-      if (w->pli_tmp->scores != NULL) {
-        reparameterize_model(bg, om, w->pli_tmp->tmpseq, new_ienv, new_Ld,
-                             w->pli_tmp->fwd_emissions_arr, w->pli_tmp->bg->f, w->pli_tmp->scores);
-      }
-      memcpy(trim_rfv, om->rfv[0], rfv_size);
-      if (w->pli_tmp->scores != NULL) {
-        reparameterize_model(bg, om, NULL, 0, 0,
-                             w->pli_tmp->fwd_emissions_arr, w->pli_tmp->bg->f, w->pli_tmp->scores);
-      }
-
-      const float *trim_rfv_const = trim_rfv;
-#ifdef HMMER_THREADS
-      if (w->gpu_domain_mutex) pthread_mutex_lock(w->gpu_domain_mutex);
-#endif
-      status = p7_cuda_DomainRescoreBatch(w->cuda_engine, w->cuda_msv,
-                                           1, &trim_dsq, &trim_len,
-                                           &trim_rfv_const, h_orig_rfv,
-                                           Q, Kp, nj,
-                                           &trim_envsc, &trim_domcorr, &trim_oasc,
-                                           trim_st, trim_k, trim_i,
-                                           trim_pp_val, trim_N_val, trim_max_trace,
-                                           &trim_status, errbuf, sizeof(errbuf));
-#ifdef HMMER_THREADS
-      if (w->gpu_domain_mutex) pthread_mutex_unlock(w->gpu_domain_mutex);
-#endif
-
-      if (status == eslOK && trim_status == eslOK) {
-        envsc = trim_envsc;
-        p7_trace_Reuse(ddef->tr);
-        nhmmer_gpu_trace_from_gpu(ddef->tr, trim_st, trim_k, trim_i,
-                                  trim_pp_val, *trim_N_val, om->M, new_Ld);
-        w->pli_tmp->tmpseq->dsq = subseq + new_ienv - 1;
-        w->pli_tmp->tmpseq->n = new_Ld;
-        p7_oprofile_ReconfigRestLength(om, new_Ld);
-        P7_ALIDISPLAY *trim_ad = p7_alidisplay_Create(ddef->tr, 0, om, w->pli_tmp->tmpseq, NULL);
-        w->pli_tmp->tmpseq->dsq = saved_dsq;
-        w->pli_tmp->tmpseq->n = saved_n;
-        if (trim_ad != NULL) {
-          p7_alidisplay_Destroy(dom->ad);
-          dom->ad = trim_ad;
-          dom->ienv = new_ienv;
-          dom->jenv = new_jenv;
-          domcorrection = trim_domcorr;
-        } else {
-          domcorrection = h_domcorr[d];
-        }
-      } else {
-        domcorrection = h_domcorr[d];
-      }
-
-      free(trim_st); free(trim_k); free(trim_i); free(trim_pp_val);
-      free(trim_N_val); free(trim_rfv);
-    } else {
-      domcorrection = h_domcorr[d];
-    }
-
-    if (domcorrection < envsc)
-      envsc = domcorrection;
-
-    if (dom->ad == NULL) continue;
-
-    dom->domcorrection = domcorrection - envsc;
-    dom->envsc         = envsc;
-    dom->oasc          = h_oasc[d];
-    dom->iali          = dom->ad->sqfrom;
-    dom->jali          = dom->ad->sqto;
-    dom->dombias       = 0.0;
-    dom->bitscore      = 0.0;
-    dom->lnP           = 0.0;
-    dom->is_reported   = FALSE;
-    dom->is_included   = FALSE;
-  }
-
-  p7_oprofile_ReconfigRestLength(om, orig_L);
-  p7_trace_Reuse(ddef->tr);
-  status = eslOK;
-
- ERROR:
-  if (h_dsq_ptrs)  free(h_dsq_ptrs);
-  if (h_lengths)   free(h_lengths);
-  if (h_rfv_ptrs)  free(h_rfv_ptrs);
-  if (h_orig_rfv)  free(h_orig_rfv);
-  if (h_envsc)     free(h_envsc);
-  if (h_domcorr)   free(h_domcorr);
-  if (h_oasc)      free(h_oasc);
-  if (h_statuses)  free(h_statuses);
-  if (h_trace_st)  free(h_trace_st);
-  if (h_trace_k)   free(h_trace_k);
-  if (h_trace_i)   free(h_trace_i);
-  if (h_trace_pp)  free(h_trace_pp);
-  if (h_trace_N)   free(h_trace_N);
-  if (rfv_copies) {
-    for (d = 0; d < ndom; d++) if (rfv_copies[d]) free(rfv_copies[d]);
-    free(rfv_copies);
-  }
-  return status;
-}
-
-/* Per-domain context saved during Phase 1 (envelope collection) */
-typedef struct {
-  int       win_ctx_idx;    /* index into win_ctx array */
-  ESL_DSQ  *subseq;         /* window start pointer (for coordinate fixups) */
-  int       ienv;           /* envelope start (window-relative) */
-  int       jenv;           /* envelope end (window-relative) */
-  int       Ld;
-  float    *rfv_copy;       /* reparameterized rfv (owned) */
-} NHMMER_GPU_PDOM;
-
-/* Per-window context saved during Phase 1 for hit reporting in Phase 3 */
-typedef struct {
-  P7_HMM_WINDOW *window;
-  ESL_DSQ       *subseq;
-  int            window_len;
-  int            ndom;
-  int            first_dom;   /* index into pdom array */
-  int            L_eff;
-} NHMMER_GPU_WCTX;
-
-static void
-nhmmer_gpu_worker_process_post_vit_gpu(NHMMER_GPU_WORKER *w)
-{
-  int          status = eslOK;
-  int          i, d;
-  int          overlap = 0;
-  P7_HMM_WINDOW *window;
-  NHMMER_OMX_BINDING saved_oxf, saved_oxb;
-
-  /* Phase 1 collection arrays (grow as needed) */
-  NHMMER_GPU_PDOM *pdoms = NULL;
-  NHMMER_GPU_WCTX *wctxs = NULL;
-  int  npdoms = 0, pdom_alloc = 0;
-  int  nwctxs = 0, wctx_alloc = 0;
-  int  orig_L = w->om->L;
-  int  Q  = p7O_NQF(w->om->M);
-  int  Kp = w->om->abc->Kp;
-  float nj = 0.0f;  /* unihit mode for domain rescoring, matching CPU behavior */
-  size_t rfv_size = (size_t)Kp * Q * 4 * sizeof(float);
-  float *orig_rfv = NULL;
-  ESL_ALLOC(orig_rfv, rfv_size);
-  memcpy(orig_rfv, w->om->rfv[0], rfv_size);
-
-  /* ==== PHASE 1: Envelope collection ==== */
-  for (i = 0; i < w->nwindows; i++) {
-    window = w->windows + i;
-    ESL_DSQ *subseq = w->sq->dsq + window->n - 1;
-    int window_len = (int)window->length;
-    int L_eff = w->gpu_L_eff[i];
-
-    w->pli->pos_past_msv  += window_len;
-    w->pli->pos_past_bias += window_len;
-    w->pli->pos_past_vit  += window_len;
-    if (i > 0)
-      w->pli->pos_past_vit -= ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n);
-
-    int fwd_status = w->gpu_statuses[i * 2 + 0];
-    if (fwd_status != eslOK) {
-      p7_omx_GrowTo(w->pli->oxf, w->om->M, 0, window_len);
-      w->status = p7_pli_postViterbi_LongTarget(w->pli, w->om, w->bg, w->th, w->scoredata,
-                      w->seq_id, (int)window->n, window_len, subseq,
-                      (int64_t)w->sq->start, w->sq->name, w->sq->source,
-                      w->sq->acc, w->sq->desc, -1, w->complementarity, &overlap, w->pli_tmp);
-      if (w->status != eslOK) goto CLEANUP;
-      if (overlap == -1 && i < w->nwindows - 1)
-        overlap = ESL_MAX(0, (int)(window->n + window->length) - (int)w->windows[i+1].n);
-      else
-        overlap = 0;
-      w->pli->ddef->ndom = 0;
-      continue;
-    }
-
-    /* F3 gate */
-    float fwdsc = w->gpu_scores[i * 2 + 0];
-    float nullsc, bias_filtersc, filtersc, seq_score;
-    double P;
-    int F3_L = ESL_MIN(window_len, w->pli->B3);
-
-    p7_bg_SetLength(w->bg, window_len);
-    p7_bg_NullOne(w->bg, subseq, window_len, &nullsc);
-    if (w->pli->do_biasfilter) {
-      p7_bg_FilterScore(w->bg, subseq, window_len, &bias_filtersc);
-      bias_filtersc -= nullsc;
-    } else {
-      bias_filtersc = 0.0f;
-    }
-    filtersc = nullsc + bias_filtersc * (F3_L > window_len ? 1.0f : (float)F3_L / window_len);
-    seq_score = (fwdsc - filtersc) / eslCONST_LOG2;
-    P = esl_exp_surv(seq_score, w->om->evparam[p7_FTAU], w->om->evparam[p7_FLAMBDA]);
-    if (P > w->pli->F3) {
-      overlap = 0;
-      continue;
-    }
-
-    w->pli->pos_past_fwd += window_len - (overlap == -1 ? 0 : overlap);
-    overlap = -1;
-
-    p7_oprofile_ReconfigRestLength(w->om, window_len);
-
-    ESL_DSQ *dsq_holder = w->pli_tmp->tmpseq->dsq;
-    esl_sq_SetName(w->pli_tmp->tmpseq, w->sq->name);
-    esl_sq_SetSource(w->pli_tmp->tmpseq, w->sq->source);
-    esl_sq_SetAccession(w->pli_tmp->tmpseq, w->sq->acc);
-    esl_sq_SetDesc(w->pli_tmp->tmpseq, w->sq->desc);
-    w->pli_tmp->tmpseq->L = -1;
-    w->pli_tmp->tmpseq->n = window_len;
-    w->pli_tmp->tmpseq->dsq = subseq;
-
-    float *xf_ptr = w->gpu_xf + w->gpu_x_offsets[i];
-    float *xb_ptr = w->gpu_xb + w->gpu_x_offsets[i];
-    float  bcksc  = w->gpu_scores[i * 2 + 1];
-
-    nhmmer_gpu_BindOmxXmx(w->pli->oxf, xf_ptr, w->om->M, L_eff, 1, fwdsc, &saved_oxf);
-    nhmmer_gpu_BindOmxXmx(w->pli->oxb, xb_ptr, w->om->M, L_eff, 0, bcksc, &saved_oxb);
-
-    w->status = p7_domaindef_ByPosteriorHeuristics(w->pli_tmp->tmpseq, NULL, w->om,
-                    w->pli->oxf, w->pli->oxb, w->pli->fwd, w->pli->bck, w->pli->ddef,
-                    w->bg, TRUE,
-                    w->pli_tmp->bg,
-                    (w->pli->do_null2 ? w->pli_tmp->scores : NULL),
-                    w->pli_tmp->fwd_emissions_arr, TRUE);
-
-    nhmmer_gpu_RestoreOmxXmx(w->pli->oxf, &saved_oxf);
-    nhmmer_gpu_RestoreOmxXmx(w->pli->oxb, &saved_oxb);
-    w->pli_tmp->tmpseq->dsq = dsq_holder;
-
-    if (w->status != eslOK) goto CLEANUP;
-    if (w->pli->ddef->nregions == 0 || w->pli->ddef->nenvelopes == 0 || w->pli->ddef->ndom == 0) {
-      if (overlap == -1 && i < w->nwindows - 1)
-        overlap = ESL_MAX(0, (int)(window->n + window->length) - (int)w->windows[i+1].n);
-      else
-        overlap = 0;
-      w->pli->ddef->ndom = 0;
-      continue;
-    }
-
-    /* Save window context */
-    if (nwctxs >= wctx_alloc) {
-      wctx_alloc = wctx_alloc ? wctx_alloc * 2 : 256;
-      ESL_REALLOC(wctxs, sizeof(NHMMER_GPU_WCTX) * wctx_alloc);
-    }
-    NHMMER_GPU_WCTX *wc = &wctxs[nwctxs];
-    wc->window     = window;
-    wc->subseq     = subseq;
-    wc->window_len = window_len;
-    wc->ndom       = w->pli->ddef->ndom;
-    wc->first_dom  = npdoms;
-    wc->L_eff      = L_eff;
-    nwctxs++;
-
-    /* Collect domains from this window */
-    w->pli_tmp->tmpseq->dsq = subseq;  /* reparameterize_model needs window-relative dsq */
-    w->pli_tmp->tmpseq->n = window_len;
-    for (d = 0; d < w->pli->ddef->ndom; d++) {
-      int ienv = w->pli->ddef->dcl[d].ienv;
-      int jenv = w->pli->ddef->dcl[d].jenv;
-      int Ld = jenv - ienv + 1;
-      if (Ld <= 0 || ienv <= 0 || jenv <= 0 || ienv > window_len || jenv > window_len) continue;
-
-      if (npdoms >= pdom_alloc) {
-        pdom_alloc = pdom_alloc ? pdom_alloc * 2 : 1024;
-        ESL_REALLOC(pdoms, sizeof(NHMMER_GPU_PDOM) * pdom_alloc);
-      }
-
-      NHMMER_GPU_PDOM *pd = &pdoms[npdoms];
-      pd->win_ctx_idx = nwctxs - 1;
-      pd->subseq  = subseq;
-      pd->ienv    = ienv;
-      pd->jenv    = jenv;
-      pd->Ld      = Ld;
-      pd->rfv_copy = NULL;
-
-      p7_oprofile_ReconfigRestLength(w->om, Ld);
-      if (w->pli_tmp->scores != NULL) {
-        reparameterize_model(w->bg, w->om, w->pli_tmp->tmpseq, ienv, Ld,
-                             w->pli_tmp->fwd_emissions_arr, w->pli_tmp->bg->f, w->pli_tmp->scores);
-      }
-      ESL_ALLOC(pd->rfv_copy, rfv_size);
-      memcpy(pd->rfv_copy, w->om->rfv[0], rfv_size);
-
-      if (w->pli_tmp->scores != NULL) {
-        reparameterize_model(w->bg, w->om, NULL, 0, 0,
-                             w->pli_tmp->fwd_emissions_arr, w->pli_tmp->bg->f, w->pli_tmp->scores);
-      }
-      npdoms++;
-    }
-    w->pli_tmp->tmpseq->dsq = dsq_holder;  /* restore after reparameterize loop */
-    /* Update wctx ndom to actual count (after filtering Ld<=0) */
-    wctxs[nwctxs-1].ndom = npdoms - wctxs[nwctxs-1].first_dom;
-
-    if (overlap == -1 && i < w->nwindows - 1)
-      overlap = ESL_MAX(0, (int)(window->n + window->length) - (int)w->windows[i+1].n);
-    else
-      overlap = 0;
-    w->pli->ddef->ndom = 0;
-  }
-
-  if (npdoms == 0) goto CLEANUP;
-
-  /* ==== PHASE 2: One GPU batch call ==== */
-  {
-    const uint8_t **h_dsq_ptrs = NULL;
-    int            *h_lengths = NULL;
-    const float   **h_rfv_ptrs = NULL;
-    float          *h_envsc = NULL, *h_domcorr = NULL, *h_oasc = NULL;
-    int8_t         *h_trace_st = NULL;
-    int            *h_trace_k = NULL, *h_trace_i = NULL, *h_trace_N = NULL;
-    float          *h_trace_pp = NULL;
-    int            *h_statuses = NULL;
-    int             max_Ld = 0, max_trace_len;
-    char            errbuf[256];
-
-    for (d = 0; d < npdoms; d++)
-      if (pdoms[d].Ld > max_Ld) max_Ld = pdoms[d].Ld;
-    max_trace_len = max_Ld * 4 + 20;
-
-    ESL_ALLOC(h_dsq_ptrs, sizeof(uint8_t *) * npdoms);
-    ESL_ALLOC(h_lengths,  sizeof(int)       * npdoms);
-    ESL_ALLOC(h_rfv_ptrs, sizeof(float *)   * npdoms);
-    ESL_ALLOC(h_envsc,    sizeof(float)     * npdoms);
-    ESL_ALLOC(h_domcorr,  sizeof(float)     * npdoms);
-    ESL_ALLOC(h_oasc,     sizeof(float)     * npdoms);
-    ESL_ALLOC(h_statuses, sizeof(int)       * npdoms);
-    ESL_ALLOC(h_trace_st, sizeof(int8_t)    * npdoms * max_trace_len);
-    ESL_ALLOC(h_trace_k,  sizeof(int)       * npdoms * max_trace_len);
-    ESL_ALLOC(h_trace_i,  sizeof(int)       * npdoms * max_trace_len);
-    ESL_ALLOC(h_trace_pp, sizeof(float)     * npdoms * max_trace_len);
-    ESL_ALLOC(h_trace_N,  sizeof(int)       * npdoms);
-
-    for (d = 0; d < npdoms; d++) {
-      h_dsq_ptrs[d] = pdoms[d].subseq + pdoms[d].ienv - 1;
-      h_lengths[d]  = pdoms[d].Ld;
-      h_rfv_ptrs[d] = pdoms[d].rfv_copy;
-    }
-
-#ifdef HMMER_THREADS
-    if (w->gpu_domain_mutex) pthread_mutex_lock(w->gpu_domain_mutex);
-#endif
-    status = p7_cuda_DomainRescoreBatch(w->cuda_engine, w->cuda_msv,
-                                         npdoms, h_dsq_ptrs, h_lengths,
-                                         h_rfv_ptrs, orig_rfv,
-                                         Q, Kp, nj,
-                                         h_envsc, h_domcorr, h_oasc,
-                                         h_trace_st, h_trace_k, h_trace_i,
-                                         h_trace_pp, h_trace_N, max_trace_len,
-                                         h_statuses, errbuf, sizeof(errbuf));
-#ifdef HMMER_THREADS
-    if (w->gpu_domain_mutex) pthread_mutex_unlock(w->gpu_domain_mutex);
-#endif
-    if (status != eslOK) {
-      free(h_dsq_ptrs); free(h_lengths); free(h_rfv_ptrs);
-      free(h_envsc); free(h_domcorr); free(h_oasc); free(h_statuses);
-      free(h_trace_st); free(h_trace_k); free(h_trace_i); free(h_trace_pp); free(h_trace_N);
-      goto CLEANUP;
-    }
-
-    /* ==== PHASE 3: Unpack results, batch trim, report hits ==== */
-
-    /* Phase 3a: Build traces/alidisplays, identify trim candidates */
-    typedef struct {
-      P7_ALIDISPLAY *ad;
-      int            ienv, jenv, Ld;
-      float          envsc, domcorr;
-      int            wi_idx;           /* index into wctxs */
-      int            gd;               /* global domain index */
-      int            needs_trim;
-      int            trim_ienv, trim_jenv, trim_Ld;
-      float         *trim_rfv;         /* reparameterized rfv for trim envelope */
-    } NHMMER_GPU_DOM_RESULT;
-
-    NHMMER_GPU_DOM_RESULT *dom_results = NULL;
-    int nresults = 0, result_alloc = 0;
-
-    for (int wi = 0; wi < nwctxs; wi++) {
-      NHMMER_GPU_WCTX *wc = &wctxs[wi];
-      ESL_DSQ *subseq2 = wc->subseq;
-      int window_len2 = wc->window_len;
-
-      for (int dd = 0; dd < wc->ndom; dd++) {
-        int gd = wc->first_dom + dd;
-        NHMMER_GPU_PDOM *pd = &pdoms[gd];
-        int Ld = pd->Ld;
-        int ienv = pd->ienv;
-        int jenv = pd->jenv;
-
-        if (h_statuses[gd] != eslOK) continue;
-        if (h_trace_N[gd] <= 0 || h_trace_N[gd] > max_trace_len) continue;
-
-        p7_trace_Reuse(w->pli->ddef->tr);
-        nhmmer_gpu_trace_from_gpu(w->pli->ddef->tr,
-                                  h_trace_st + (size_t)gd * max_trace_len,
-                                  h_trace_k  + (size_t)gd * max_trace_len,
-                                  h_trace_i  + (size_t)gd * max_trace_len,
-                                  h_trace_pp + (size_t)gd * max_trace_len,
-                                  h_trace_N[gd], w->om->M, Ld);
-
-        ESL_DSQ *dsq_save = w->pli_tmp->tmpseq->dsq;
-        int64_t  n_save   = w->pli_tmp->tmpseq->n;
-        w->pli_tmp->tmpseq->dsq = subseq2 + ienv - 1;
-        w->pli_tmp->tmpseq->n = Ld;
-        p7_oprofile_ReconfigRestLength(w->om, Ld);
-        P7_ALIDISPLAY *ad = p7_alidisplay_Create(w->pli->ddef->tr, 0, w->om, w->pli_tmp->tmpseq, NULL);
-        w->pli_tmp->tmpseq->dsq = dsq_save;
-        w->pli_tmp->tmpseq->n = n_save;
-
-        if (ad == NULL) continue;
-        if (ad->sqfrom <= 0 || ad->sqto <= 0 || ad->sqfrom > Ld || ad->sqto > Ld) {
-          p7_alidisplay_Destroy(ad);
-          continue;
-        }
-
-        if (nresults >= result_alloc) {
-          result_alloc = result_alloc ? result_alloc * 2 : 1024;
-          ESL_REALLOC(dom_results, sizeof(NHMMER_GPU_DOM_RESULT) * result_alloc);
-        }
-        NHMMER_GPU_DOM_RESULT *dr = &dom_results[nresults];
-        dr->ad       = ad;
-        dr->ienv     = ienv;
-        dr->jenv     = jenv;
-        dr->Ld       = Ld;
-        dr->envsc    = h_envsc[gd];
-        dr->domcorr  = h_domcorr[gd];
-        dr->wi_idx   = wi;
-        dr->gd       = gd;
-        dr->needs_trim = 0;
-        dr->trim_rfv = NULL;
-
-        if (1 < (int)ad->sqfrom - 20 || Ld > (int)ad->sqto + 20) {
-          int new_env_start = ESL_MAX(1, (int)ad->sqfrom - 20);
-          int new_env_end   = ESL_MIN(Ld, (int)ad->sqto + 20);
-          dr->trim_ienv = ienv + new_env_start - 1;
-          dr->trim_jenv = ienv + new_env_end - 1;
-          dr->trim_Ld   = dr->trim_jenv - dr->trim_ienv + 1;
-          dr->needs_trim = 1;
-
-          p7_oprofile_ReconfigRestLength(w->om, dr->trim_Ld);
-          if (w->pli_tmp->scores != NULL) {
-            w->pli_tmp->tmpseq->dsq = subseq2;
-            w->pli_tmp->tmpseq->n   = window_len2;
-            reparameterize_model(w->bg, w->om, w->pli_tmp->tmpseq, dr->trim_ienv, dr->trim_Ld,
-                                 w->pli_tmp->fwd_emissions_arr, w->pli_tmp->bg->f, w->pli_tmp->scores);
-            w->pli_tmp->tmpseq->dsq = dsq_save;
-          }
-          ESL_ALLOC(dr->trim_rfv, rfv_size);
-          memcpy(dr->trim_rfv, w->om->rfv[0], rfv_size);
-          if (w->pli_tmp->scores != NULL) {
-            reparameterize_model(w->bg, w->om, NULL, 0, 0,
-                                 w->pli_tmp->fwd_emissions_arr, w->pli_tmp->bg->f, w->pli_tmp->scores);
-          }
-        }
-        nresults++;
-      }
-    }
-
-    /* Phase 3b: Single GPU batch call for all trim domains */
-    int ntrim = 0;
-    for (int r = 0; r < nresults; r++) if (dom_results[r].needs_trim) ntrim++;
-
-    if (ntrim > 0) {
-      const uint8_t **trim_dsq_ptrs = NULL;
-      int            *trim_lengths  = NULL;
-      const float   **trim_rfv_ptrs = NULL;
-      float          *trim_envsc    = NULL;
-      float          *trim_domcorr  = NULL;
-      float          *trim_oasc     = NULL;
-      int            *trim_statuses = NULL;
-      int8_t         *trim_trace_st = NULL;
-      int            *trim_trace_k  = NULL;
-      int            *trim_trace_i  = NULL;
-      float          *trim_trace_pp = NULL;
-      int            *trim_trace_N  = NULL;
-      int            *trim_map      = NULL;  /* maps trim index -> dom_results index */
-
-      int trim_max_Ld = 0;
-      for (int r = 0; r < nresults; r++)
-        if (dom_results[r].needs_trim && dom_results[r].trim_Ld > trim_max_Ld)
-          trim_max_Ld = dom_results[r].trim_Ld;
-      int trim_max_trace = trim_max_Ld * 4 + 20;
-
-      ESL_ALLOC(trim_dsq_ptrs, sizeof(uint8_t *) * ntrim);
-      ESL_ALLOC(trim_lengths,  sizeof(int)       * ntrim);
-      ESL_ALLOC(trim_rfv_ptrs, sizeof(float *)   * ntrim);
-      ESL_ALLOC(trim_envsc,    sizeof(float)     * ntrim);
-      ESL_ALLOC(trim_domcorr,  sizeof(float)     * ntrim);
-      ESL_ALLOC(trim_oasc,     sizeof(float)     * ntrim);
-      ESL_ALLOC(trim_statuses, sizeof(int)       * ntrim);
-      ESL_ALLOC(trim_trace_st, sizeof(int8_t)    * (size_t)ntrim * trim_max_trace);
-      ESL_ALLOC(trim_trace_k,  sizeof(int)       * (size_t)ntrim * trim_max_trace);
-      ESL_ALLOC(trim_trace_i,  sizeof(int)       * (size_t)ntrim * trim_max_trace);
-      ESL_ALLOC(trim_trace_pp, sizeof(float)     * (size_t)ntrim * trim_max_trace);
-      ESL_ALLOC(trim_trace_N,  sizeof(int)       * ntrim);
-      ESL_ALLOC(trim_map,      sizeof(int)       * ntrim);
-
-      int ti = 0;
-      for (int r = 0; r < nresults; r++) {
-        if (!dom_results[r].needs_trim) continue;
-        NHMMER_GPU_DOM_RESULT *dr = &dom_results[r];
-        NHMMER_GPU_WCTX *wc = &wctxs[dr->wi_idx];
-        trim_dsq_ptrs[ti] = wc->subseq + dr->trim_ienv - 1;
-        trim_lengths[ti]  = dr->trim_Ld;
-        trim_rfv_ptrs[ti] = dr->trim_rfv;
-        trim_map[ti]      = r;
-        ti++;
-      }
-
-#ifdef HMMER_THREADS
-      if (w->gpu_domain_mutex) pthread_mutex_lock(w->gpu_domain_mutex);
-#endif
-      int trim_status = p7_cuda_DomainRescoreBatch(w->cuda_engine, w->cuda_msv,
-                                                    ntrim, trim_dsq_ptrs, trim_lengths,
-                                                    trim_rfv_ptrs, orig_rfv,
-                                                    Q, Kp, nj,
-                                                    trim_envsc, trim_domcorr, trim_oasc,
-                                                    trim_trace_st, trim_trace_k, trim_trace_i,
-                                                    trim_trace_pp, trim_trace_N, trim_max_trace,
-                                                    trim_statuses, errbuf, sizeof(errbuf));
-#ifdef HMMER_THREADS
-      if (w->gpu_domain_mutex) pthread_mutex_unlock(w->gpu_domain_mutex);
-#endif
-
-      /* Apply trim results */
-      if (trim_status == eslOK) {
-        for (ti = 0; ti < ntrim; ti++) {
-          if (trim_statuses[ti] != eslOK) continue;
-          if (trim_trace_N[ti] <= 0 || trim_trace_N[ti] > trim_max_trace) continue;
-
-          int r = trim_map[ti];
-          NHMMER_GPU_DOM_RESULT *dr = &dom_results[r];
-          NHMMER_GPU_WCTX *wc = &wctxs[dr->wi_idx];
-
-          p7_trace_Reuse(w->pli->ddef->tr);
-          nhmmer_gpu_trace_from_gpu(w->pli->ddef->tr,
-                                    trim_trace_st + (size_t)ti * trim_max_trace,
-                                    trim_trace_k  + (size_t)ti * trim_max_trace,
-                                    trim_trace_i  + (size_t)ti * trim_max_trace,
-                                    trim_trace_pp + (size_t)ti * trim_max_trace,
-                                    trim_trace_N[ti], w->om->M, dr->trim_Ld);
-
-          ESL_DSQ *dsq_save = w->pli_tmp->tmpseq->dsq;
-          int64_t  n_save   = w->pli_tmp->tmpseq->n;
-          w->pli_tmp->tmpseq->dsq = wc->subseq + dr->trim_ienv - 1;
-          w->pli_tmp->tmpseq->n = dr->trim_Ld;
-          p7_oprofile_ReconfigRestLength(w->om, dr->trim_Ld);
-          P7_ALIDISPLAY *trim_ad = p7_alidisplay_Create(w->pli->ddef->tr, 0, w->om, w->pli_tmp->tmpseq, NULL);
-          w->pli_tmp->tmpseq->dsq = dsq_save;
-          w->pli_tmp->tmpseq->n = n_save;
-
-          if (trim_ad != NULL) {
-            p7_alidisplay_Destroy(dr->ad);
-            dr->ad    = trim_ad;
-            dr->ienv  = dr->trim_ienv;
-            dr->jenv  = dr->trim_jenv;
-            dr->Ld    = dr->trim_Ld;
-            dr->envsc = trim_envsc[ti];
-            dr->domcorr = trim_domcorr[ti];
-          }
-        }
-      }
-
-      free(trim_dsq_ptrs); free(trim_lengths); free(trim_rfv_ptrs);
-      free(trim_envsc); free(trim_domcorr); free(trim_oasc); free(trim_statuses);
-      free(trim_trace_st); free(trim_trace_k); free(trim_trace_i);
-      free(trim_trace_pp); free(trim_trace_N); free(trim_map);
-    }
-
-    /* Phase 3c: Report hits */
-    for (int r = 0; r < nresults; r++) {
-      NHMMER_GPU_DOM_RESULT *dr = &dom_results[r];
-      NHMMER_GPU_WCTX *wc = &wctxs[dr->wi_idx];
-      P7_ALIDISPLAY *ad = dr->ad;
-      int ienv = dr->ienv;
-      int jenv = dr->jenv;
-      int Ld   = dr->Ld;
-      float envsc = dr->envsc;
-      float domcorrection = dr->domcorr;
-      window = wc->window;
-      ESL_DSQ *subseq2 = wc->subseq;
-
-      if (domcorrection < envsc) envsc = domcorrection;
-
-      float dom_envsc = envsc;
-      float dom_domcorr = domcorrection - envsc;
-      float dom_oasc = h_oasc[dr->gd];
-      int   env_len = jenv - ienv + 1;
-      int   ali_len = (int)ad->sqto - (int)ad->sqfrom + 1;
-      float bitscore = dom_envsc;
-
-      if (ali_len < 8) { p7_alidisplay_Destroy(ad); continue; }
-
-      bitscore -= 2 * log(2. / (env_len + 2));
-      bitscore += 2 * log(2. / (w->om->max_length + 2));
-      bitscore -= (env_len - ali_len) * log((float)env_len / (env_len + 2));
-      bitscore += (ESL_MAX(w->om->max_length, env_len) - ali_len) * log((float)w->om->max_length / (float)(w->om->max_length + 2));
-
-      float nullsc2;
-      p7_bg_SetLength(w->bg, ESL_MAX(w->om->max_length, env_len));
-      p7_bg_NullOne(w->bg, subseq2, ESL_MAX(w->om->max_length, env_len), &nullsc2);
-      float dom_score = (bitscore - nullsc2) / eslCONST_LOG2;
-      double dom_lnP = esl_exp_logsurv(dom_score, w->om->evparam[p7_FTAU], w->om->evparam[p7_FLAMBDA]);
-
-      float *scores_per_pos = NULL;
-      if (w->pli->do_alignment_score_calc) {
-        P7_DOMAIN tmp_dom;
-        memset(&tmp_dom, 0, sizeof(tmp_dom));
-        tmp_dom.ad = ad;
-        tmp_dom.iali = (int)ad->sqfrom;
-        tmp_dom.jali = (int)ad->sqto;
-        nhmmer_gpu_computeAliScores(&tmp_dom, subseq2 + ienv - 1, w->scoredata, Kp);
-        scores_per_pos = tmp_dom.scores_per_pos;
-      }
-
-      P7_HIT *hit = NULL;
-      p7_tophits_CreateNextHit(w->th, &hit);
-      hit->ndom        = 1;
-      hit->best_domain = 0;
-      hit->window_length = w->om->max_length;
-      hit->seqidx = w->seq_id;
-      hit->subseq_start = (int64_t)w->sq->start;
-
-      ESL_ALLOC(hit->dcl, sizeof(P7_DOMAIN));
-      memset(&hit->dcl[0], 0, sizeof(P7_DOMAIN));
-      hit->dcl[0].ad       = ad;
-      hit->dcl[0].envsc    = dom_envsc;
-      hit->dcl[0].domcorrection = dom_domcorr;
-      hit->dcl[0].oasc     = dom_oasc;
-      hit->dcl[0].ienv     = ienv;
-      hit->dcl[0].jenv     = jenv;
-      hit->dcl[0].iali     = (int)ad->sqfrom;
-      hit->dcl[0].jali     = (int)ad->sqto;
-      hit->dcl[0].dombias  = dom_domcorr;
-      hit->dcl[0].bitscore = dom_score;
-      hit->dcl[0].lnP      = dom_lnP;
-      hit->dcl[0].is_reported = FALSE;
-      hit->dcl[0].is_included = FALSE;
-      hit->dcl[0].scores_per_pos = scores_per_pos;
-      ad->L = -1;
-
-      int ienv_off = ienv - 1;
-      hit->dcl[0].iali += ienv_off;
-      hit->dcl[0].jali += ienv_off;
-      hit->dcl[0].ad->sqfrom += ienv_off;
-      hit->dcl[0].ad->sqto   += ienv_off;
-
-      if (w->complementarity == p7_NOCOMPLEMENT) {
-        hit->dcl[0].ienv       += (int64_t)w->sq->start + (int)window->n - 2;
-        hit->dcl[0].jenv       += (int64_t)w->sq->start + (int)window->n - 2;
-        hit->dcl[0].iali       += (int64_t)w->sq->start + (int)window->n - 2;
-        hit->dcl[0].jali       += (int64_t)w->sq->start + (int)window->n - 2;
-        hit->dcl[0].ad->sqfrom += (int64_t)w->sq->start + (int)window->n - 2;
-        hit->dcl[0].ad->sqto   += (int64_t)w->sq->start + (int)window->n - 2;
-      } else {
-        hit->dcl[0].ienv       = (int64_t)w->sq->start - ((int)window->n + hit->dcl[0].ienv) + 2;
-        hit->dcl[0].jenv       = (int64_t)w->sq->start - ((int)window->n + hit->dcl[0].jenv) + 2;
-        hit->dcl[0].iali       = (int64_t)w->sq->start - ((int)window->n + hit->dcl[0].iali) + 2;
-        hit->dcl[0].jali       = (int64_t)w->sq->start - ((int)window->n + hit->dcl[0].jali) + 2;
-        hit->dcl[0].ad->sqfrom = (int64_t)w->sq->start - ((int)window->n + hit->dcl[0].ad->sqfrom) + 2;
-        hit->dcl[0].ad->sqto   = (int64_t)w->sq->start - ((int)window->n + hit->dcl[0].ad->sqto) + 2;
-      }
-
-      float pre_bitscore = bitscore / eslCONST_LOG2;
-      hit->pre_score = pre_bitscore;
-      hit->pre_lnP   = esl_exp_logsurv(pre_bitscore, w->om->evparam[p7_FTAU], w->om->evparam[p7_FLAMBDA]);
-      hit->sum_score = hit->score = dom_score;
-      hit->sum_lnP   = hit->lnP   = dom_lnP;
-
-      if (w->pli->mode == p7_SEARCH_SEQS) {
-        esl_strdup(w->sq->name, -1, &(hit->name));
-        if (w->sq->acc[0]  != '\0') esl_strdup(w->sq->acc,  -1, &(hit->acc));
-        if (w->sq->desc[0] != '\0') esl_strdup(w->sq->desc, -1, &(hit->desc));
-      } else {
-        esl_strdup(w->om->name, -1, &(hit->name));
-        esl_strdup(w->om->acc,  -1, &(hit->acc));
-        esl_strdup(w->om->desc, -1, &(hit->desc));
-      }
-
-      if (w->pli->use_bit_cutoffs) {
-        if (p7_pli_TargetReportable(w->pli, hit->score, hit->lnP)) {
-          hit->flags |= p7_IS_REPORTED;
-          if (p7_pli_TargetIncludable(w->pli, hit->score, hit->lnP))
-            hit->flags |= p7_IS_INCLUDED;
-        }
-        if (p7_pli_DomainReportable(w->pli, hit->dcl[0].bitscore, hit->dcl[0].lnP)) {
-          hit->dcl[0].is_reported = TRUE;
-          if (p7_pli_DomainIncludable(w->pli, hit->dcl[0].bitscore, hit->dcl[0].lnP))
-            hit->dcl[0].is_included = TRUE;
-        }
-      }
-    }
-
-    if (dom_results) {
-      for (int r = 0; r < nresults; r++) if (dom_results[r].trim_rfv) free(dom_results[r].trim_rfv);
-      free(dom_results);
-    }
-
-    free(h_dsq_ptrs); free(h_lengths); free(h_rfv_ptrs);
-    free(h_envsc); free(h_domcorr); free(h_oasc); free(h_statuses);
-    free(h_trace_st); free(h_trace_k); free(h_trace_i); free(h_trace_pp); free(h_trace_N);
-  }
-
-CLEANUP:
-  p7_oprofile_ReconfigRestLength(w->om, orig_L);
-  if (orig_rfv) free(orig_rfv);
-  if (pdoms) {
-    for (d = 0; d < npdoms; d++) if (pdoms[d].rfv_copy) free(pdoms[d].rfv_copy);
-    free(pdoms);
-  }
-  if (wctxs) free(wctxs);
-  return;
-
-ERROR:
-  w->status = eslEMEM;
-  goto CLEANUP;
-}
-
 #ifdef HMMER_THREADS
 static void *
 nhmmer_gpu_thread_func(void *arg)
@@ -1520,10 +685,7 @@ static void *
 nhmmer_gpu_thread_func_post_vit(void *arg)
 {
   NHMMER_GPU_WORKER *w = (NHMMER_GPU_WORKER *)arg;
-  if (w->use_gpu_fb)
-    nhmmer_gpu_worker_process_post_vit_gpu(w);
-  else
-    nhmmer_gpu_worker_process_post_vit(w);
+  nhmmer_gpu_worker_process_post_vit(w);
   return NULL;
 }
 #endif
@@ -1628,7 +790,7 @@ nhmmer_gpu_forward_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int64_t se
     filtersc = nullsc + (bias_filtersc * (F3_L > window_len ? 1.0f : (float)F3_L / window_len));
     seq_score = (fwdsc - filtersc) / eslCONST_LOG2;
     P_val = esl_exp_surv(seq_score, om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA]);
-    if (P_val > pli->F3 * 2.0) continue;
+    if (P_val > pli->F3) continue;
 
     surv_src_idx[nsurv] = i;
     surv_fwdsc[nsurv] = fwdsc;
@@ -1636,6 +798,53 @@ nhmmer_gpu_forward_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int64_t se
     surv_x_offsets[nsurv] = surv_total_xcells;
     surv_total_xcells += (size_t)(window_len + 1) * p7X_NXCELLS;
     nsurv++;
+  }
+
+  /* --gpu-compare Stage C: compare GPU Forward scores to CPU ForwardParser */
+  if (info->do_compare) {
+    int gpu_pass_count = nsurv;
+    int cpu_pass_count = 0;
+    p7_omx_GrowTo(pli->oxf, om->M, 0, om->max_length);
+
+    for (i = 0; i < nwindows; i++) {
+      if (statuses[2*i] != eslOK) continue;
+
+      int window_len = windows[i].length;
+      ESL_DSQ *subseq = sq->dsq + windows[i].n - 1;
+      float gpu_fwdsc = scores[2*i];
+      float cpu_fwdsc, nullsc, bias_filtersc, filtersc, cpu_seq_score, gpu_seq_score;
+      double cpu_P, gpu_P;
+
+      int F3_L = ESL_MIN(window_len, pli->B3);
+      p7_bg_SetLength(bg, window_len);
+      p7_bg_NullOne(bg, subseq, window_len, &nullsc);
+      if (pli->do_biasfilter) {
+        p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
+        bias_filtersc -= nullsc;
+      } else {
+        bias_filtersc = 0;
+      }
+      filtersc = nullsc + (bias_filtersc * (F3_L > window_len ? 1.0f : (float)F3_L / window_len));
+
+      p7_oprofile_ReconfigRestLength(om, ESL_MIN(window_len, om->max_length));
+      p7_omx_GrowTo(pli->oxf, om->M, 0, window_len);
+      p7_ForwardParser(subseq, window_len, om, pli->oxf, &cpu_fwdsc);
+
+      gpu_seq_score = (gpu_fwdsc - filtersc) / eslCONST_LOG2;
+      cpu_seq_score = (cpu_fwdsc - filtersc) / eslCONST_LOG2;
+      gpu_P = esl_exp_surv(gpu_seq_score, om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA]);
+      cpu_P = esl_exp_surv(cpu_seq_score, om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA]);
+
+      int gpu_pass = (gpu_P <= pli->F3) ? 1 : 0;
+      int cpu_pass = (cpu_P <= pli->F3) ? 1 : 0;
+      cpu_pass_count += cpu_pass;
+
+      if (gpu_pass != cpu_pass || fabsf(gpu_fwdsc - cpu_fwdsc) > 0.1f)
+        fprintf(stderr, "NHMMER_GPU_COMPARE_FWD win=%d n=%" PRId64 " len=%d gpu_fwdsc=%.4f cpu_fwdsc=%.4f delta=%.6f gpu_P=%.2e cpu_P=%.2e gpu_pass=%d cpu_pass=%d\n",
+                i, (int64_t)windows[i].n, window_len, gpu_fwdsc, cpu_fwdsc, gpu_fwdsc - cpu_fwdsc, gpu_P, cpu_P, gpu_pass, cpu_pass);
+    }
+    fprintf(stderr, "NHMMER_GPU_COMPARE_FWD_SUMMARY total=%d gpu_pass=%d cpu_pass=%d\n",
+            nwindows, gpu_pass_count, cpu_pass_count);
   }
 
   /* Compact xf: copy survivor rows into contiguous surv_xf buffer */
@@ -1827,6 +1036,150 @@ ERROR:
   return status;
 }
 
+/* Debug: scalar reimplementation of cuda_viterbi_longtarget_kernel's DP logic.
+ * Runs GPU algorithm on CPU, returns the number of seeds and optionally xE trace.
+ * If override_thresh != 0, use that as the threshold instead of computing from filtersc.
+ * NOTE: lazy-F additional passes simplified (runs full propagation without early exit). */
+static int
+nhmmer_gpu_scalar_viterbi_debug(P7_OPROFILE *om, const ESL_DSQ *dsq, int L,
+                                float filtersc, float F2, int16_t override_thresh,
+                                int *ret_nseeds, int16_t *xE_trace, int trace_len)
+{
+  int Q = p7O_NQW(om->M);
+  int M = om->M;
+  int Kp = om->abc->Kp;
+  int N = Q * 8;
+
+  int16_t *prev_m = (int16_t *)calloc(N, sizeof(int16_t));
+  int16_t *prev_d = (int16_t *)calloc(N, sizeof(int16_t));
+  int16_t *prev_i = (int16_t *)calloc(N, sizeof(int16_t));
+  int16_t *curr_m = (int16_t *)calloc(N, sizeof(int16_t));
+  int16_t *curr_d = (int16_t *)calloc(N, sizeof(int16_t));
+  int16_t *curr_i = (int16_t *)calloc(N, sizeof(int16_t));
+  if (!prev_m || !prev_d || !prev_i || !curr_m || !curr_d || !curr_i) {
+    free(prev_m); free(prev_d); free(prev_i); free(curr_m); free(curr_d); free(curr_i);
+    return eslEMEM;
+  }
+
+  int16_t *twv = (int16_t *)om->twv;
+  int16_t *rwv_base = (int16_t *)om->rwv[0];
+  #define TWV(t, q, z) ((t) == 7 ? twv[((7*Q)+(q))*8+(z)] : twv[((q)*7+(t))*8+(z)])
+  #define RWV(x, q, z) rwv_base[((int)(x)*Q+(q))*8+(z)]
+
+  float invP = esl_gumbel_invsurv(F2, om->evparam[p7_VMU], om->evparam[p7_VLAMBDA]);
+  int loc_L = ESL_MIN(L, om->max_length);
+  float pmove = (2.0f + om->nj) / ((float)loc_L + 2.0f + om->nj);
+  int16_t xw_move = (int16_t)roundf(om->scale_w * logf(pmove));
+  float xw_c_move_f = roundf(om->scale_w * logf(pmove));
+  int16_t sc_thresh;
+  if (override_thresh != 0) {
+    sc_thresh = override_thresh;
+  } else {
+    sc_thresh = (int16_t)ceilf(((filtersc + 0.69314718f * invP + 3.0f) * om->scale_w)
+                       - (float)om->xw[p7O_E][p7O_MOVE] - xw_c_move_f + (float)om->base_w);
+  }
+  int16_t xw_e_loop = om->xw[p7O_E][p7O_LOOP];
+  int16_t xw_e_move = om->xw[p7O_E][p7O_MOVE];
+  int16_t base_w    = om->base_w;
+  int16_t ddbound_w = om->ddbound_w;
+
+  #define SAT16(a,b) ({ int _v=(int)(a)+(int)(b); (int16_t)(_v>32767?32767:(_v<-32768?-32768:_v)); })
+
+  for (int k = 0; k < N; k++) prev_m[k] = prev_d[k] = prev_i[k] = -32768;
+
+  int16_t xN = base_w, xB = SAT16(xN, xw_move), xJ = -32768, xC = -32768;
+  int nseeds = 0;
+
+  for (int i = 1; i <= L; i++) {
+    uint8_t x = dsq[i];
+    if (x >= Kp) { if (xE_trace && i <= trace_len) xE_trace[i] = -32768; continue; }
+
+    int16_t dcv_lanes[8];
+    int16_t xE = -32768;
+    int16_t dmax_all = -32768;
+
+    for (int z = 0; z < 8; z++) {
+      int16_t mpv = (z == 0) ? (int16_t)-32768 : prev_m[(z-1)*Q + Q-1];
+      int16_t dpv = (z == 0) ? (int16_t)-32768 : prev_d[(z-1)*Q + Q-1];
+      int16_t ipv = (z == 0) ? (int16_t)-32768 : prev_i[(z-1)*Q + Q-1];
+      int16_t dcv = -32768;
+      int16_t xE_lane = -32768;
+      int16_t dmax_lane = -32768;
+
+      for (int q = 0; q < Q; q++) {
+        int c = z * Q + q;
+        int16_t sv = SAT16(xB, TWV(0,q,z));
+        int16_t cand;
+        cand = SAT16(mpv, TWV(1,q,z)); if (cand > sv) sv = cand;
+        cand = SAT16(ipv, TWV(2,q,z)); if (cand > sv) sv = cand;
+        cand = SAT16(dpv, TWV(3,q,z)); if (cand > sv) sv = cand;
+        sv = SAT16(sv, RWV(x,q,z));
+        if (sv > xE_lane) xE_lane = sv;
+
+        mpv = prev_m[c]; dpv = prev_d[c]; ipv = prev_i[c];
+        curr_m[c] = sv;
+        curr_d[c] = dcv;
+        dcv = SAT16(sv, TWV(4,q,z));
+        if (dcv > dmax_lane) dmax_lane = dcv;
+        cand = SAT16(mpv, TWV(5,q,z));
+        int16_t isv = SAT16(ipv, TWV(6,q,z));
+        curr_i[c] = cand > isv ? cand : isv;
+      }
+      if (xE_lane > xE) xE = xE_lane;
+      if (dmax_lane > dmax_all) dmax_all = dmax_lane;
+      dcv_lanes[z] = dcv;
+    }
+
+    if (xE_trace && i <= trace_len) xE_trace[i] = xE;
+
+    if (xE >= sc_thresh) {
+      nseeds++;
+      for (int k = 0; k < N; k++) curr_m[k] = curr_d[k] = curr_i[k] = -32768;
+      xN = base_w; xB = SAT16(xN, xw_move); xJ = -32768; xC = -32768;
+    } else {
+      int16_t c2 = SAT16(xE, xw_e_move);
+      xC = xC > c2 ? xC : c2;
+      int16_t j2 = SAT16(xE, xw_e_loop);
+      xJ = xJ > j2 ? xJ : j2;
+      xB = ESL_MAX(SAT16(xJ, xw_move), SAT16(xN, xw_move));
+
+      if ((int)dmax_all + (int)ddbound_w > (int)xB) {
+        /* Full lazy-F: propagate D→D across all lanes */
+        for (int pass = 0; pass < 8; pass++) {
+          int any_update = 0;
+          for (int z = 0; z < 8; z++) {
+            int16_t dcv = (z == 0) ? (int16_t)-32768 : dcv_lanes[z-1];
+            for (int q = 0; q < Q; q++) {
+              int c = z * Q + q;
+              if (dcv > curr_d[c]) { curr_d[c] = dcv; any_update = 1; }
+              dcv = SAT16(curr_d[c], TWV(7,q,z));
+            }
+            dcv_lanes[z] = dcv;
+          }
+          if (!any_update) break;
+        }
+      } else {
+        for (int z = 0; z < 8; z++)
+          curr_d[z * Q] = (z == 0) ? (int16_t)-32768 : dcv_lanes[z-1];
+      }
+    }
+
+    int16_t *tmp;
+    tmp = prev_m; prev_m = curr_m; curr_m = tmp;
+    tmp = prev_d; prev_d = curr_d; curr_d = tmp;
+    tmp = prev_i; prev_i = curr_i; curr_i = tmp;
+  }
+
+  #undef TWV
+  #undef RWV
+  #undef SAT16
+
+  *ret_nseeds = nseeds;
+  free(prev_m); free(prev_d); free(prev_i);
+  free(curr_m); free(curr_d); free(curr_i);
+  return eslOK;
+}
+
 /* GPU scanning Viterbi longtarget: replaces CPU p7_ViterbiFilter_longtarget.
  * Computes per-window thresholds, runs GPU kernel, converts output to window list.
  * Returns sub-windows in *ret_vit_wl (caller must free windows). */
@@ -1867,6 +1220,11 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
     if (status != eslOK) goto ERROR;
   }
 
+  if (info->do_compare) {
+    fprintf(stderr, "NHMMER_GPU_COMPARE_VIT_PARAMS scale_w=%.1f xw_e_move=%d base_w=%d nj=%.1f max_length=%d Q=%d M=%d F2=%.4g vmu=%.6f vlambda=%.6f B2=%d\n",
+            om->scale_w, (int)om->xw[p7O_E][p7O_MOVE], (int)om->base_w, om->nj, om->max_length,
+            p7O_NQW(om->M), om->M, pli->F2, om->evparam[p7_VMU], om->evparam[p7_VLAMBDA], pli->B2);
+  }
   status = p7_cuda_ViterbiLongtarget(info->cuda_engine, info->cuda_msv,
                                      sq->dsq, sq->n,
                                      input_wl->windows, N,
@@ -1879,11 +1237,44 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
                                      (float)om->base_w, om->max_length,
                                      &gpu_windows, &gpu_nwindows,
                                      errbuf, errbuf_size);
+  /* Save GPU bias scores for comparison before freeing */
+  float *saved_bias_scores = NULL;
+  int16_t *gpu_thresholds = NULL;
+  if (info->do_compare && bias_scores) {
+    saved_bias_scores = (float *)malloc(sizeof(float) * N);
+    if (saved_bias_scores) memcpy(saved_bias_scores, bias_scores, sizeof(float) * N);
+  }
+  if (info->do_compare) {
+    gpu_thresholds = (int16_t *)malloc(sizeof(int16_t) * N);
+    if (gpu_thresholds) {
+      p7_cuda_ViterbiLongtarget_GetThresholds(info->cuda_engine, gpu_thresholds, N);
+    }
+  }
   if (bias_scores) { free(bias_scores); bias_scores = NULL; }
-  if (status != eslOK) goto ERROR;
+  if (status != eslOK) { free(saved_bias_scores); free(gpu_thresholds); goto ERROR; }
 
   if (gpu_nwindows == 0) {
+    /* Still run comparison even when GPU produces 0 windows */
+    if (info->do_compare) goto COMPARE_STAGE_B;
     return eslOK;
+  }
+
+  /* Count per-input-window GPU seeds for comparison */
+  int *gpu_seeds_per_win = NULL;
+  P7_CUDA_VIT_LT_WINDOW *saved_gpu_windows = NULL;
+  int saved_gpu_nwindows = 0;
+  if (info->do_compare) {
+    gpu_seeds_per_win = (int *)calloc(N, sizeof(int));
+    if (gpu_seeds_per_win) {
+      for (i = 0; i < gpu_nwindows; i++)
+        gpu_seeds_per_win[gpu_windows[i].window_id]++;
+    }
+    /* Save a copy for detailed position printing */
+    saved_gpu_windows = (P7_CUDA_VIT_LT_WINDOW *)malloc(sizeof(P7_CUDA_VIT_LT_WINDOW) * gpu_nwindows);
+    if (saved_gpu_windows) {
+      memcpy(saved_gpu_windows, gpu_windows, sizeof(P7_CUDA_VIT_LT_WINDOW) * gpu_nwindows);
+      saved_gpu_nwindows = gpu_nwindows;
+    }
   }
 
   for (i = 0; i < gpu_nwindows; i++) {
@@ -1918,6 +1309,135 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
       } while ((int)new_len > max_window_len);
     }
   }
+
+  /* --gpu-compare Stage B: compare GPU Viterbi window set to CPU */
+  COMPARE_STAGE_B:
+  if (info->do_compare) {
+    P7_BG *bg = info->bg;
+    int cpu_vit_total = 0;
+    int gpu_raw_total = gpu_nwindows;  /* raw seeds before ExtendAndMerge */
+    int n_printed = 0;
+
+    P7_OMX *cmp_ox = p7_omx_Create(om->M, 0, om->max_length);
+    if (cmp_ox) {
+      for (i = 0; i < N; i++) {
+        P7_HMM_WINDOWLIST cpu_vit_wl;
+        p7_hmmwindow_init(&cpu_vit_wl);
+
+        int window_len = (int)input_wl->windows[i].length;
+        ESL_DSQ *subseq = sq->dsq + input_wl->windows[i].n - 1;
+        float nullsc, bias_filtersc, filtersc;
+
+        int loc_window_len = ESL_MIN(window_len, om->max_length);
+        p7_bg_SetLength(bg, loc_window_len);
+        p7_bg_NullOne(bg, subseq, loc_window_len, &nullsc);
+
+        bias_filtersc = 0;
+        if (pli->do_biasfilter) {
+          p7_bg_SetLength(bg, window_len);
+          p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
+          bias_filtersc -= nullsc;
+        }
+        int F2_L = ESL_MIN(window_len, pli->B2);
+        filtersc = nullsc + (bias_filtersc * ((F2_L > window_len) ? 1.0f : (float)F2_L / window_len));
+        p7_oprofile_ReconfigRestLength(om, loc_window_len);
+        p7_omx_GrowTo(cmp_ox, om->M, 0, window_len);
+        p7_ViterbiFilter_longtarget(subseq, window_len, om, cmp_ox, filtersc, pli->F2, &cpu_vit_wl);
+
+        /* Print per-window comparison for divergent windows */
+        int cpu_raw_seeds = cpu_vit_wl.count;
+        int gpu_raw_this = (gpu_seeds_per_win ? gpu_seeds_per_win[i] : 0);
+        p7_pli_ExtendAndMergeWindows(om, info->scoredata, &cpu_vit_wl, 0.5);
+
+        if (n_printed < 5 && (cpu_raw_seeds != gpu_raw_this)) {
+          /* Print bias score comparison */
+          float cpu_bias_raw = 0;
+          if (pli->do_biasfilter) {
+            p7_bg_SetLength(info->bg, window_len);
+            p7_bg_FilterScore(info->bg, subseq, window_len, &cpu_bias_raw);
+          }
+          float gpu_bias_raw = saved_bias_scores ? saved_bias_scores[i] : 0;
+          fprintf(stderr, "  bias_scores: cpu=%.4f gpu=%.4f delta=%.4f nullsc=%.4f filtersc=%.4f\n",
+                  cpu_bias_raw, gpu_bias_raw, cpu_bias_raw - gpu_bias_raw, nullsc, filtersc);
+          /* Compute CPU threshold */
+          float cpu_invP = esl_gumbel_invsurv(pli->F2, om->evparam[p7_VMU], om->evparam[p7_VLAMBDA]);
+          int16_t cpu_sc_thresh = (int16_t) ceil( ((filtersc + (eslCONST_LOG2 * cpu_invP) + 3.0) * om->scale_w)
+                                   - (float)om->xw[p7O_E][p7O_MOVE] - (float)om->xw[p7O_C][p7O_MOVE] + (float)om->base_w);
+
+          /* Compute actual GPU threshold using GPU bias scores (matches GPU kernel logic) */
+          int16_t gpu_actual_thresh = cpu_sc_thresh;
+          if (saved_bias_scores && pli->do_biasfilter) {
+            float gpu_nullsc_loc = (float)loc_window_len * logf((float)loc_window_len / (float)(loc_window_len + 1))
+                               + logf(1.0f - (float)loc_window_len / (float)(loc_window_len + 1));
+            float gpu_nullsc_win = (float)window_len * logf((float)window_len / (float)(window_len + 1))
+                               + logf(1.0f - (float)window_len / (float)(window_len + 1));
+            float gpu_bias_filtersc = saved_bias_scores[i] - gpu_nullsc_win;
+            int F2_L_gpu = ESL_MIN(window_len, pli->B2);
+            float gpu_ratio = (F2_L_gpu > window_len) ? 1.0f : (float)F2_L_gpu / (float)window_len;
+            float gpu_filtersc = gpu_nullsc_loc + gpu_bias_filtersc * gpu_ratio;
+            float gpu_pmove = (2.0f + om->nj) / ((float)loc_window_len + 2.0f + om->nj);
+            float gpu_xw_c_move = roundf(om->scale_w * logf(gpu_pmove));
+            float gpu_invP = (float)om->evparam[p7_VMU] - logf(-logf(1.0f - (float)pli->F2)) / (float)om->evparam[p7_VLAMBDA];
+            gpu_actual_thresh = (int16_t)ceilf(((gpu_filtersc + 0.69314718f * gpu_invP + 3.0f) * om->scale_w)
+                                   - (float)om->xw[p7O_E][p7O_MOVE] - gpu_xw_c_move + (float)om->base_w);
+          }
+
+          fprintf(stderr, "NHMMER_GPU_COMPARE_VIT_WIN win=%d n=%ld len=%d gpu_raw=%d cpu_raw=%d"
+                          " cpu_thresh=%d gpu_actual_thresh=%d delta=%d\n",
+                  i, (long)input_wl->windows[i].n, window_len, gpu_raw_this, cpu_raw_seeds,
+                  (int)cpu_sc_thresh, (int)gpu_actual_thresh, (int)cpu_sc_thresh - (int)gpu_actual_thresh);
+          /* Print GPU seed positions for this window */
+          if (saved_gpu_windows) {
+            fprintf(stderr, "  GPU seeds:");
+            for (int g = 0; g < saved_gpu_nwindows; g++) {
+              if (saved_gpu_windows[g].window_id == i)
+                fprintf(stderr, " pos=%d,k=%d", saved_gpu_windows[g].position, (int)saved_gpu_windows[g].model_k);
+            }
+            fprintf(stderr, "\n");
+          }
+          /* Print CPU seed positions */
+          {
+            P7_HMM_WINDOWLIST cpu_raw_wl;
+            p7_hmmwindow_init(&cpu_raw_wl);
+            p7_oprofile_ReconfigRestLength(om, loc_window_len);
+            p7_omx_GrowTo(cmp_ox, om->M, 0, window_len);
+            p7_ViterbiFilter_longtarget(subseq, window_len, om, cmp_ox, filtersc, pli->F2, &cpu_raw_wl);
+            fprintf(stderr, "  CPU seeds:");
+            for (int g = 0; g < cpu_raw_wl.count; g++)
+              fprintf(stderr, " pos=%ld,k=%d", (long)cpu_raw_wl.windows[g].n, (int)cpu_raw_wl.windows[g].k);
+            fprintf(stderr, "\n");
+            if (cpu_raw_wl.windows) free(cpu_raw_wl.windows);
+          }
+          /* Run scalar GPU-algorithm emulation with CPU threshold and actual GPU threshold */
+          {
+            int scalar_seeds_cpu = 0, scalar_seeds_gpu = 0;
+            int16_t actual_gpu_thresh = (gpu_thresholds ? gpu_thresholds[i] : 0);
+            p7_oprofile_ReconfigRestLength(om, loc_window_len);
+            nhmmer_gpu_scalar_viterbi_debug(om, subseq, window_len, filtersc, pli->F2, 0,
+                                             &scalar_seeds_cpu, NULL, 0);
+            if (actual_gpu_thresh != 0)
+              nhmmer_gpu_scalar_viterbi_debug(om, subseq, window_len, filtersc, pli->F2, actual_gpu_thresh,
+                                               &scalar_seeds_gpu, NULL, 0);
+            fprintf(stderr, "  scalar_cpu_thresh=%d scalar_gpu_thresh=%d actual_gpu_thresh=%d (vs cpu=%d gpu=%d)\n",
+                    scalar_seeds_cpu, scalar_seeds_gpu, (int)actual_gpu_thresh, cpu_raw_seeds, gpu_raw_this);
+          }
+          n_printed++;
+        }
+
+        cpu_vit_total += cpu_vit_wl.count;
+        if (cpu_vit_wl.windows) free(cpu_vit_wl.windows);
+      }
+
+      fprintf(stderr, "NHMMER_GPU_COMPARE_VIT gpu_raw_seeds=%d gpu_merged=%d cpu_count=%d input_windows=%d\n",
+              gpu_raw_total, ret_vit_wl->count, cpu_vit_total, N);
+
+      p7_omx_Destroy(cmp_ox);
+    }
+  }
+  if (gpu_seeds_per_win) { free(gpu_seeds_per_win); gpu_seeds_per_win = NULL; }
+  if (saved_gpu_windows) { free(saved_gpu_windows); saved_gpu_windows = NULL; }
+  if (saved_bias_scores) { free(saved_bias_scores); saved_bias_scores = NULL; }
+  if (gpu_thresholds) { free(gpu_thresholds); gpu_thresholds = NULL; }
 
   return eslOK;
 
@@ -1992,7 +1512,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
   memset(&wb, 0, sizeof(wb));
 
   clock_gettime(CLOCK_MONOTONIC, &ts0);
-  if (info->do_gpu_batch && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
+  if (!info->do_cpu_postmsv && info->do_gpu_batch && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
     status = nhmmer_gpu_window_batch_init(&wb, msv_windowlist.count);
     if (status != eslOK) goto ERROR;
 
@@ -2036,7 +1556,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
   info->t_batch_filter += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
 
   /* GPU scanning Viterbi longtarget: replaces CPU scanning Viterbi in workers */
-  if (info->do_gpu_vit_lt && msv_windowlist.count > 0) {
+  if (!info->do_cpu_postmsv && info->do_gpu_vit_lt && msv_windowlist.count > 0) {
     P7_HMM_WINDOWLIST vit_wl;
     vit_wl.windows = NULL;
 
@@ -2097,24 +1617,18 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       return eslOK;
     }
 
-    /* GPU FB parser batch: Backward-only using prefilter xf, or full FB if no prefilter xf */
+    /* GPU FB parser disabled: post-Vit envelope-find + per-domain rescore
+     * runs on CPU via p7_pli_postViterbi_LongTarget for parity with the CPU
+     * pipeline (overlap dedup, F3 gate, Forward+Backward+domaindef all
+     * consistent). The GPU Forward prefilter still pre-shrinks the window
+     * set via fwd_survivors. */
     float   *gpu_xf = NULL, *gpu_xb = NULL, *gpu_fb_scores = NULL;
     int     *gpu_fb_statuses = NULL, *gpu_fb_L_eff = NULL;
     size_t  *gpu_fb_x_offsets = NULL;
     int      gpu_fb_ok = FALSE;
 
-    clock_gettime(CLOCK_MONOTONIC, &ts0);
-    status = nhmmer_gpu_run_fb_parser_batch(info, sq, fwd_survivors, nfwd_surv,
-                                             prefilter_xf, prefilter_fwdsc,
-                                             &gpu_xf, &gpu_xb, &gpu_fb_scores, &gpu_fb_statuses,
-                                             &gpu_fb_x_offsets, &gpu_fb_L_eff, errbuf, errbuf_size);
+    free(prefilter_xf); prefilter_xf = NULL;
     free(prefilter_fwdsc); prefilter_fwdsc = NULL;
-    clock_gettime(CLOCK_MONOTONIC, &ts1);
-    info->t_gpu_fb_parser += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
-    if (status == eslOK && gpu_xf != NULL)
-      gpu_fb_ok = TRUE;
-    else
-      status = eslOK;  /* non-fatal: fall back to CPU FB */
 
     /* Dispatch survivors to worker threads */
     clock_gettime(CLOCK_MONOTONIC, &ts0);
@@ -2158,7 +1672,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
         pthread_create(&threads[i], NULL, nhmmer_gpu_thread_func_post_vit, &workers[i]);
 
       if (workers[0].use_gpu_fb)
-        nhmmer_gpu_worker_process_post_vit_gpu(&workers[0]);
+        nhmmer_gpu_worker_process_post_vit(&workers[0]);
       else
         nhmmer_gpu_worker_process_post_vit(&workers[0]);
 
@@ -2177,6 +1691,23 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       p7_pipeline_Merge(info->pli, workers[0].pli);
 
     VLT_THREAD_ERROR:
+      {
+        double w_envfind = 0, w_phase1 = 0, w_dom = 0, w_trim = 0, w_hit = 0;
+        for (i = 0; i < nworkers; i++) {
+          /* Parallel CPU buckets: max approximates wall. */
+          if (workers[i].t_envfind         > w_envfind) w_envfind = workers[i].t_envfind;
+          if (workers[i].t_phase1_other    > w_phase1)  w_phase1  = workers[i].t_phase1_other;
+          if (workers[i].t_hit_report      > w_hit)     w_hit     = workers[i].t_hit_report;
+          /* Mutex-serialized GPU buckets: sum across workers ≈ total mutex-held wall time. */
+          w_dom  += workers[i].t_dom_rescore_gpu;
+          w_trim += workers[i].t_trim_gpu;
+        }
+        info->t_envfind         += w_envfind;
+        info->t_phase1_other    += w_phase1;
+        info->t_dom_rescore_gpu += w_dom;
+        info->t_trim_gpu        += w_trim;
+        info->t_hit_report      += w_hit;
+      }
       for (i = 0; i < nworkers; i++)
         nhmmer_gpu_worker_destroy(&workers[i]);
       free(workers);
@@ -2211,7 +1742,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       w.gpu_L_eff       = gpu_fb_L_eff;
 
       if (w.use_gpu_fb)
-        nhmmer_gpu_worker_process_post_vit_gpu(&w);
+        nhmmer_gpu_worker_process_post_vit(&w);
       else
         nhmmer_gpu_worker_process_post_vit(&w);
       status = w.status;
@@ -2220,6 +1751,12 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
         p7_tophits_Merge(info->th, w.th);
         p7_pipeline_Merge(info->pli, w.pli);
       }
+
+      info->t_envfind         += w.t_envfind;
+      info->t_phase1_other    += w.t_phase1_other;
+      info->t_dom_rescore_gpu += w.t_dom_rescore_gpu;
+      info->t_trim_gpu        += w.t_trim_gpu;
+      info->t_hit_report      += w.t_hit_report;
 
       nhmmer_gpu_worker_destroy(&w);
       free(fwd_survivors);
@@ -2231,6 +1768,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     }
   }
 
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
   int ncpus = info->ncpus;
   if (ncpus < 1) ncpus = 1;
   if (ncpus > msv_windowlist.count) ncpus = msv_windowlist.count;
@@ -2285,6 +1823,8 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     free(workers);
     free(threads);
     free(msv_windowlist.windows);
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    info->t_cpu_workers += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
     return status;
   }
 #endif /* HMMER_THREADS */
@@ -2312,6 +1852,8 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
 
     nhmmer_gpu_worker_destroy(&w);
     free(msv_windowlist.windows);
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    info->t_cpu_workers += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
     return status;
   }
 
@@ -2526,7 +2068,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   memset(&wb, 0, sizeof(wb));
 
   clock_gettime(CLOCK_MONOTONIC, &ts0);
-  if (info->do_gpu_batch && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
+  if (!info->do_cpu_postmsv && info->do_gpu_batch && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
     status = nhmmer_gpu_window_batch_init(&wb, msv_windowlist.count);
     if (status != eslOK) goto ERROR;
 
@@ -2565,7 +2107,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   info->t_batch_filter += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
 
   /* GPU scanning Viterbi longtarget */
-  if (info->do_gpu_vit_lt && msv_windowlist.count > 0) {
+  if (!info->do_cpu_postmsv && info->do_gpu_vit_lt && msv_windowlist.count > 0) {
     P7_HMM_WINDOWLIST vit_wl;
     vit_wl.windows = NULL;
 

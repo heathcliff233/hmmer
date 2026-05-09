@@ -6,7 +6,7 @@
 __device__ static inline float
 esl_gumbel_invsurv_device(float p, float mu, float lambda)
 {
-  return mu - logf(-logf(p)) / lambda;
+  return mu - logf(-logf(1.0f - p)) / lambda;
 }
 
 __global__ static void
@@ -23,17 +23,23 @@ cuda_compute_viterbi_thresholds_kernel(
   int window_len = lengths[i];
   int loc_window_len = (window_len < max_length) ? window_len : max_length;
   float p1_loc = (float)loc_window_len / (float)(loc_window_len + 1);
-  float nullsc = (float)loc_window_len * logf(p1_loc) + logf(1.0f - p1_loc);
+  float nullsc_loc = (float)loc_window_len * logf(p1_loc) + logf(1.0f - p1_loc);
+
+  /* bias_scores[i] was computed using the full window_len, so we must subtract
+   * null(window_len) — not null(loc_window_len) — to isolate the composition bias,
+   * matching what the CPU does in p7_pli_postSSV_LongTarget(). */
+  float p1_win = (float)window_len / (float)(window_len + 1);
+  float nullsc_win = (float)window_len * logf(p1_win) + logf(1.0f - p1_win);
 
   int F2_L = (window_len < B2) ? window_len : B2;
   float filtersc;
 
   if (do_biasfilter) {
-    float bias_filtersc = bias_scores[i] - nullsc;
+    float bias_filtersc = bias_scores[i] - nullsc_win;
     float ratio = (F2_L > window_len) ? 1.0f : (float)F2_L / (float)window_len;
-    filtersc = nullsc + bias_filtersc * ratio;
+    filtersc = nullsc_loc + bias_filtersc * ratio;
   } else {
-    filtersc = nullsc;
+    filtersc = nullsc_loc;
   }
 
   float pmove = (2.0f + nj) / ((float)loc_window_len + 2.0f + nj);
@@ -410,4 +416,13 @@ ERROR:
   *ret_windows  = NULL;
   *ret_nwindows = 0;
   return status;
+}
+
+extern "C" int
+p7_cuda_ViterbiLongtarget_GetThresholds(P7_CUDA_ENGINE *engine, int16_t *h_thresholds, int nwindows)
+{
+  if (!engine->d_vlt_thresholds || nwindows <= 0) return eslOK;
+  cudaError_t err = cudaMemcpy(h_thresholds, engine->d_vlt_thresholds,
+                               sizeof(int16_t) * nwindows, cudaMemcpyDeviceToHost);
+  return (err == cudaSuccess) ? eslOK : eslFAIL;
 }
