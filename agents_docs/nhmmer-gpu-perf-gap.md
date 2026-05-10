@@ -20,6 +20,38 @@ Target: chr22/hg38 benchmark. Query: `query_medium.hmm` (M=501). Threads: `--cpu
 
 The speed-script result now shows the expected fast-overlap `.nucdb` win after removing the extra single-score GPU Viterbi prefilter. The focused `--tblout` audit produced 215 CPU rows and 215 GPU rows with no diff.
 
+## Current Combined Benchmark
+
+`test-speed/x-nhmmer-gpu-bench` now defaults to a combined all-sample benchmark. It runs `MADE1`, `query_short`, and `query_medium` in one `nhmmer` process per path, so CUDA engine creation and resident `.nucdb` upload are measured once instead of repeated for each query.
+
+Current all-sample result on 2026-05-10:
+
+| Path | Time | Hits |
+|------|:---:|:---:|
+| CPU-1 | 8.333s | 1476 |
+| CPU-4 | 2.297s | 1476 |
+| GPU-4 FASTA | 2.982s | 1476 |
+| GPU-4 no-overlap `.nucdb` | 2.022s | 1476 |
+| GPU-4 overlap `.nucdb` | 1.798s | 1476 |
+
+Parity after the update was clean: MADE1 FASTA 465=465, MADE1 `.nucdb` 465=465, query_short FASTA 363=363, query_medium FASTA 648=648.
+
+The combined overlap `.nucdb` timing run accounted for the previously confusing wall-time gap:
+
+| Bucket | MADE1 | query_short | query_medium |
+|--------|:---:|:---:|:---:|
+| Search stages | 0.150s | 0.219s | 1.102s |
+| GPU loop wall | 0.236s | 0.302s | 1.172s |
+| Query elapsed | 0.237s | 0.303s | 1.174s |
+| CPU workers | 0.062s | 0.123s | 0.756s |
+| Domain workflow | 0.059s | 0.119s | 0.738s |
+| nucdb reconstruct | 0.080s | 0.077s | 0.065s |
+| Query outside search | 0.001s | 0.001s | 0.002s |
+
+Shared setup/teardown for that process: CUDA engine create 0.446s, `.nucdb` open/mmap 0.000s, `.nucdb` upload 0.029s, CUDA destroy 0.003s, summed GPU loop wall 1.710s, process outside search 0.495s, process elapsed 2.205s.
+
+The remaining in-search optimization target is unchanged: query_medium is dominated by CPU domain workflow after GPU parser handoff. The hidden outside-search cost is now explicit: in the focused combined run it was mostly CUDA engine setup, not `.nucdb` mmap/upload or per-query report work.
+
 ## Stage Breakdown
 
 CPU-4 HMMER stage totals are summed across worker threads, so divide by four for a rough per-thread wall comparison. GPU `NHMMER_GPU_INFO` buckets are wall buckets around sequential GPU stages plus max-across-worker CPU continuation buckets. The GPU column shows the focused repeat range after removing the extra single-score Viterbi prefilter.

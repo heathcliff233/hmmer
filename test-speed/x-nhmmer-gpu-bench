@@ -5,8 +5,9 @@
 #   test-speed/x-nhmmer-gpu-bench [builddir]
 #
 # Runs MADE1, query_short, query_medium against chr22.fa and available nucdbs.
-# Reports time and hit counts for CPU-1, CPU-4, GPU-4 FASTA, ordinary nucdb,
-# and fast overlap nucdb.
+# By default it runs all query HMMs in one nhmmer process so startup, CUDA
+# engine creation, and resident .nucdb upload are amortized across samples.
+# Set NHMMER_GPU_BENCH_MODE=per-query for the old one-query-at-a-time view.
 #
 # Prerequisites:
 #   - Build with --enable-cuda
@@ -31,6 +32,7 @@ TARGET="$WORKDIR/chr22.fa"
 NUCDB="$WORKDIR/chr22.nucdb.nucdb"
 OVERLAP_NUCDB="$WORKDIR/chr22-overlap.nucdb.nucdb"
 QUERIES=("MADE1" "query_short" "query_medium")
+MODE="${NHMMER_GPU_BENCH_MODE:-all}"
 
 if [ ! -f "$TARGET" ]; then
     echo "ERROR: $TARGET not found. See agents_docs/nucleotide-benchmark.md" >&2
@@ -53,26 +55,59 @@ fi
 run_bench() {
     local label="$1"
     shift
-    local query_hmm="$1"
-    shift
 
     local start end elapsed hits
     start=$(date +%s%N)
-    hits=$("$@" 2>/dev/null | grep -c "^  " || echo 0)
+    hits=$("$@" 2>/dev/null | grep -c "^  " || true)
     end=$(date +%s%N)
     elapsed=$(echo "scale=3; ($end - $start) / 1000000000" | bc)
 
     printf "  %-22s %6ss  %4d hits\n" "$label" "$elapsed" "$hits"
 }
 
+combined_hmm="$WORKDIR/nhmmer-gpu-all-samples.hmm"
+: > "$combined_hmm"
+for q in "${QUERIES[@]}"; do
+    HMM="$WORKDIR/$q.hmm"
+    if [ -f "$HMM" ]; then
+        cat "$HMM" >> "$combined_hmm"
+    fi
+done
+
 # Header
 echo "================================================================"
 echo "nhmmer GPU Benchmark — $(date '+%Y-%m-%d %H:%M')"
 echo "Target: chr22.fa (50MB)"
+echo "Mode: ${MODE}"
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo 'unknown')"
 echo "================================================================"
 echo
 
+if [ "$MODE" = "all" ]; then
+    if [ ! -s "$combined_hmm" ]; then
+        echo "ERROR: no query HMMs found" >&2
+        exit 1
+    fi
+
+    echo "--- all samples (${QUERIES[*]}) ---"
+    run_bench "CPU-1" "$NHMMER" --cpu 1 --noali "$combined_hmm" "$TARGET"
+    run_bench "CPU-4" "$NHMMER" --cpu 4 --noali "$combined_hmm" "$TARGET"
+
+    if "$NHMMER" -h 2>&1 | grep -q "\-\-gpu"; then
+        run_bench "GPU-4 (FASTA)" "$NHMMER" --gpu --cpu 4 --noali "$combined_hmm" "$TARGET"
+
+        if [ -f "$NUCDB" ]; then
+            run_bench "GPU-4 (nucdb-o0)" "$NHMMER" --gpu --cpu 4 --noali "$combined_hmm" "$NUCDB"
+        fi
+
+        if [ -f "$OVERLAP_NUCDB" ]; then
+            run_bench "GPU-4 (nucdb-fast)" "$NHMMER" --gpu --cpu 4 --noali "$combined_hmm" "$OVERLAP_NUCDB"
+        fi
+    else
+        echo "  (GPU not available — build with --enable-cuda)"
+    fi
+    echo
+else
 for q in "${QUERIES[@]}"; do
     HMM="$WORKDIR/$q.hmm"
     if [ ! -f "$HMM" ]; then
@@ -82,19 +117,19 @@ for q in "${QUERIES[@]}"; do
 
     echo "--- $q ($(grep '^LENG' "$HMM" | awk '{print $2}') nodes) ---"
 
-    run_bench "CPU-1" "$HMM" "$NHMMER" --cpu 1 --noali "$HMM" "$TARGET"
-    run_bench "CPU-4" "$HMM" "$NHMMER" --cpu 4 --noali "$HMM" "$TARGET"
+    run_bench "CPU-1" "$NHMMER" --cpu 1 --noali "$HMM" "$TARGET"
+    run_bench "CPU-4" "$NHMMER" --cpu 4 --noali "$HMM" "$TARGET"
 
     # GPU requires --enable-cuda build
     if "$NHMMER" -h 2>&1 | grep -q "\-\-gpu"; then
-        run_bench "GPU-4 (FASTA)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$TARGET"
+        run_bench "GPU-4 (FASTA)" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$TARGET"
 
         if [ -f "$NUCDB" ]; then
-            run_bench "GPU-4 (nucdb-o0)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$NUCDB"
+            run_bench "GPU-4 (nucdb-o0)" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$NUCDB"
         fi
 
         if [ -f "$OVERLAP_NUCDB" ]; then
-            run_bench "GPU-4 (nucdb-fast)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$OVERLAP_NUCDB"
+            run_bench "GPU-4 (nucdb-fast)" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$OVERLAP_NUCDB"
         fi
     else
         echo "  (GPU not available — build with --enable-cuda)"
@@ -102,6 +137,7 @@ for q in "${QUERIES[@]}"; do
 
     echo
 done
+fi
 
 echo "================================================================"
 echo "Parity check: CPU-4 hit count is reference. GPU hit counts should"

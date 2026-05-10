@@ -207,6 +207,20 @@ typedef struct {
   int16_t  pad;
 } P7_CUDA_VIT_LT_WINDOW;
 
+typedef struct {
+  double   pack_seconds;
+  double   h2d_seconds;
+  double   threshold_kernel_seconds;
+  double   kernel_seconds;
+  double   d2h_seconds;
+  double   alloc_seconds;
+  double   stream_seconds;
+  int64_t  packed_bytes;
+  int      nwindows_in;
+  int      nwindows_out;
+  int      warps_per_block;
+} P7_CUDA_VIT_LT_STATS;
+
 extern int  p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                   const ESL_DSQ *dsq, int L,
                                   const uint8_t *ssv_scores_host, int Kp,
@@ -257,6 +271,7 @@ extern int  p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVP
                                       float scale_w, float xw_e_move, float nj,
                                       float base_w, int max_length,
                                       P7_CUDA_VIT_LT_WINDOW **ret_windows, int *ret_nwindows,
+                                      P7_CUDA_VIT_LT_STATS *stats,
                                       char *errbuf, int errbuf_size);
 extern int  p7_cuda_ViterbiLongtarget_GetThresholds(P7_CUDA_ENGINE *engine,
                                                      int16_t *h_thresholds, int nwindows);

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <time.h>
 
 #include "easel.h"
 #include "esl_alphabet.h"
@@ -35,6 +36,12 @@
 
 /* set the max residue count to 1/4 meg when reading a block */
 #define NHMMER_MAX_RESIDUE_COUNT (1024 * 256)  /* 1/4 Mb */
+
+static double
+elapsed_seconds(const struct timespec *ts0, const struct timespec *ts1)
+{
+  return (ts1->tv_sec - ts0->tv_sec) + (ts1->tv_nsec - ts0->tv_nsec) * 1e-9;
+}
 
 typedef struct {
 #ifdef HMMER_THREADS
@@ -556,6 +563,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   int              sstatus   = eslOK;
   int              i;
   int64_t          resCnt    = 0;
+  struct timespec  prog_ts0, prog_ts1;
+  struct timespec  query_ts0, query_ts1;
+  struct timespec  post_ts0, post_ts1;
+  struct timespec  gpu_loop_ts0, gpu_loop_ts1;
+  struct timespec  tmp_ts0, tmp_ts1;
 
   /* used to keep track of the lengths of the sequences that are processed */
   ID_LENGTH_LIST  *id_length_list = NULL;
@@ -587,6 +599,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   ESL_MSA          *msa         = NULL;
   int               msas_named  = 0;
   int               force_single = ( esl_opt_IsOn(go, "--singlemx") ? TRUE : FALSE );
+
+  clock_gettime(CLOCK_MONOTONIC, &prog_ts0);
 
   if (esl_opt_IsUsed(go, "--w_beta"))   { if (( window_beta   = esl_opt_GetReal   (go, "--w_beta") )  < 0 || window_beta > 1  ) esl_fatal("Invalid window-length beta value\n"); }
   if (esl_opt_IsUsed(go, "--w_length")) { if (( window_length = esl_opt_GetInteger(go, "--w_length")) < 4  )                    esl_fatal("Invalid window length value\n"); }
@@ -944,9 +958,43 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
 #ifdef HMMER_CUDA
   P7_CUDA_ENGINE *cuda_engine = NULL;
+  P7_NUCDB       *gpu_shared_nucdb = NULL;
+  NHMMER_GPU_INFO gpu_info;
+  int             gpu_info_valid = FALSE;
+  double          gpu_t_engine_create = 0.0;
+  double          gpu_t_nucdb_open    = 0.0;
+  double          gpu_t_nucdb_upload  = 0.0;
+  double          gpu_t_cuda_destroy  = 0.0;
+  double          gpu_t_query_presearch_total = 0.0;
+  double          gpu_t_gpu_loop_wall_total   = 0.0;
+  double          gpu_t_query_postloop_total  = 0.0;
+  double          gpu_t_post_search_total     = 0.0;
+  double          gpu_t_cuda_reset_total      = 0.0;
   if (esl_opt_GetBoolean(go, "--gpu")) {
+    memset(&gpu_info, 0, sizeof(gpu_info));
+    clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
     status = p7_cuda_engine_Create(esl_opt_GetInteger(go, "--gpu-device"), &cuda_engine, errbuf, sizeof(errbuf));
+    clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
+    gpu_t_engine_create = elapsed_seconds(&tmp_ts0, &tmp_ts1);
     if (status != eslOK) p7_Fail("--gpu requested, but CUDA initialization failed: %s\n", errbuf);
+
+    clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
+    status = p7_nucdb_Open(cfg->dbfile, &gpu_shared_nucdb, errbuf);
+    clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
+    if (status == eslOK) {
+      gpu_t_nucdb_open = elapsed_seconds(&tmp_ts0, &tmp_ts1);
+      NHMMER_GPU_INFO upload_info;
+      memset(&upload_info, 0, sizeof(upload_info));
+      upload_info.cuda_engine = cuda_engine;
+      clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
+      status = nhmmer_gpu_nucdb_upload(&upload_info, gpu_shared_nucdb, errbuf, sizeof(errbuf));
+      clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
+      gpu_t_nucdb_upload = elapsed_seconds(&tmp_ts0, &tmp_ts1);
+      if (status != eslOK) p7_Fail("--gpu requested, but .nucdb upload failed: %s\n", errbuf);
+    } else {
+      gpu_shared_nucdb = NULL;
+      gpu_t_nucdb_open = 0.0;
+    }
   }
 #endif
 
@@ -1002,6 +1050,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
       nquery++;
       resCnt = 0;
+      clock_gettime(CLOCK_MONOTONIC, &query_ts0);
       esl_stopwatch_Start(w);
 
       /* seqfile may need to be rewound (multiquery mode) */
@@ -1119,10 +1168,12 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 #ifdef HMMER_CUDA
       if (esl_opt_GetBoolean(go, "--gpu"))
       {
-        NHMMER_GPU_INFO gpu_info;
         P7_CUDA_MSVPROFILE *cuda_msv    = NULL;
         int     gpu_nseqs = 0;
         int64_t gpu_nres  = 0;
+
+        memset(&gpu_info, 0, sizeof(gpu_info));
+        gpu_info_valid = FALSE;
 
         status = p7_cuda_msvprofile_Create(info[0].om, &cuda_msv, errbuf, sizeof(errbuf));
         if (status != eslOK) p7_Fail("--gpu requested, but CUDA MSV profile creation failed: %s\n", errbuf);
@@ -1142,6 +1193,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.do_gpu_fwd     = ! esl_opt_GetBoolean(go, "--gpu-no-fwd-prefilter");
         gpu_info.do_cpu_postmsv = esl_opt_GetBoolean(go, "--gpu-cpu-postmsv");
         gpu_info.do_compare     = esl_opt_GetBoolean(go, "--gpu-compare");
+        gpu_info.do_domain_trace = (getenv("HMMER_NHMMER_GPU_DOMAIN_TRACE") != NULL);
+        gpu_info.nucdb_resident = (gpu_shared_nucdb != NULL);
         gpu_info.h_ssv_scores   = NULL;
         gpu_info.h_ssv_status   = NULL;
         gpu_info.h_null_scores  = NULL;
@@ -1155,9 +1208,33 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_merge         = 0;
         gpu_info.t_batch_filter  = 0;
         gpu_info.t_vit_lt        = 0;
+        gpu_info.t_vit_bias      = 0;
+        gpu_info.t_vit_cuda      = 0;
+        gpu_info.t_vit_sort      = 0;
+        gpu_info.t_vit_extend    = 0;
+        gpu_info.t_vit_pack      = 0;
+        gpu_info.t_vit_h2d       = 0;
+        gpu_info.t_vit_thresh    = 0;
+        gpu_info.t_vit_kernel    = 0;
+        gpu_info.t_vit_d2h       = 0;
+        gpu_info.t_vit_alloc     = 0;
+        gpu_info.t_vit_stream    = 0;
+        gpu_info.vit_packed_bytes = 0;
         gpu_info.t_fwd_prefilter = 0;
         gpu_info.t_gpu_fb_parser = 0;
         gpu_info.t_cpu_workers   = 0;
+        gpu_info.t_nucdb_open    = gpu_t_nucdb_open;
+        gpu_info.t_nucdb_upload  = gpu_t_nucdb_upload;
+        gpu_info.t_nucdb_reconstruct = 0;
+        gpu_info.t_post_search   = 0;
+        gpu_info.t_cuda_reset    = 0;
+        gpu_info.t_cuda_destroy  = 0;
+        gpu_info.t_gpu_loop_wall = 0;
+        gpu_info.t_query_elapsed = 0;
+        gpu_info.t_query_presearch = 0;
+        gpu_info.t_query_postloop = 0;
+        gpu_info.t_program_prequery = 0;
+        gpu_info.t_program_total = 0;
         gpu_info.t_worker_null     = 0;
         gpu_info.t_worker_bias     = 0;
         gpu_info.t_worker_bck      = 0;
@@ -1165,18 +1242,19 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_worker_output   = 0;
         /* Detect nucdb format: check for .nucdb extension or .nucdb file alongside target */
         {
-          P7_NUCDB *nucdb = NULL;
-          int nucdb_status = p7_nucdb_Open(cfg->dbfile, &nucdb, errbuf);
-          if (nucdb_status == eslOK) {
-            sstatus = nhmmer_gpu_nucdb_loop(&gpu_info, nucdb, info[0].pli->strands,
+          clock_gettime(CLOCK_MONOTONIC, &gpu_loop_ts0);
+          gpu_info.t_query_presearch = elapsed_seconds(&query_ts0, &gpu_loop_ts0);
+          if (gpu_shared_nucdb != NULL) {
+            sstatus = nhmmer_gpu_nucdb_loop(&gpu_info, gpu_shared_nucdb, info[0].pli->strands,
                                             gpu_idlen_cb, id_length_list,
                                             &gpu_nseqs, &gpu_nres);
-            p7_nucdb_Close(nucdb);
           } else {
             sstatus = nhmmer_gpu_serial_loop(&gpu_info, dbfp, info[0].pli->strands,
                                              gpu_idlen_cb, id_length_list,
                                              &gpu_nseqs, &gpu_nres);
           }
+          clock_gettime(CLOCK_MONOTONIC, &gpu_loop_ts1);
+          gpu_info.t_gpu_loop_wall = elapsed_seconds(&gpu_loop_ts0, &gpu_loop_ts1);
         }
 
         info[0].pli->nres  = gpu_nres;
@@ -1188,36 +1266,12 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
                   gpu_info.n_post_vit_windows, gpu_info.n_fwd_survivor_windows, (int64_t)info[0].th->N,
                   100.0 * (double)gpu_info.n_fwd_survivor_windows / (double)gpu_info.n_post_vit_windows);
 
-        {
-          double t_total = gpu_info.t_ssv + gpu_info.t_merge + gpu_info.t_batch_filter
-                         + gpu_info.t_vit_lt + gpu_info.t_fwd_prefilter
-                         + gpu_info.t_gpu_fb_parser + gpu_info.t_cpu_workers;
-          if (t_total > 0.0) {
-            fprintf(stderr, "GPU timing breakdown (%.3fs total):\n", t_total);
-            fprintf(stderr, "  SSV longtarget:    %7.3fs  (%4.1f%%)\n", gpu_info.t_ssv, 100.0*gpu_info.t_ssv/t_total);
-            fprintf(stderr, "  extend+merge:      %7.3fs  (%4.1f%%)\n", gpu_info.t_merge, 100.0*gpu_info.t_merge/t_total);
-            fprintf(stderr, "  batch filter:      %7.3fs  (%4.1f%%)\n", gpu_info.t_batch_filter, 100.0*gpu_info.t_batch_filter/t_total);
-            fprintf(stderr, "  scanning Viterbi:  %7.3fs  (%4.1f%%)\n", gpu_info.t_vit_lt, 100.0*gpu_info.t_vit_lt/t_total);
-            fprintf(stderr, "  Forward prefilter: %7.3fs  (%4.1f%%)\n", gpu_info.t_fwd_prefilter, 100.0*gpu_info.t_fwd_prefilter/t_total);
-            fprintf(stderr, "  GPU FB parser:     %7.3fs  (%4.1f%%)\n", gpu_info.t_gpu_fb_parser, 100.0*gpu_info.t_gpu_fb_parser/t_total);
-            fprintf(stderr, "  CPU workers:       %7.3fs  (%4.1f%%)\n", gpu_info.t_cpu_workers, 100.0*gpu_info.t_cpu_workers/t_total);
-            fprintf(stderr, "    null scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_null, 100.0*gpu_info.t_worker_null/t_total);
-            fprintf(stderr, "    bias scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bias, 100.0*gpu_info.t_worker_bias/t_total);
-            fprintf(stderr, "    CPU Backward:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bck, 100.0*gpu_info.t_worker_bck/t_total);
-            fprintf(stderr, "    domain workflow: %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_domain, 100.0*gpu_info.t_worker_domain/t_total);
-            fprintf(stderr, "    hit reporting:   %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_output, 100.0*gpu_info.t_worker_output/t_total);
-          } else {
-            fprintf(stderr, "GPU timing: all zeros (t_ssv=%.6f t_merge=%.6f t_batch=%.6f t_vit=%.6f t_fwd=%.6f t_cpu=%.6f)\n",
-                    gpu_info.t_ssv, gpu_info.t_merge, gpu_info.t_batch_filter,
-                    gpu_info.t_vit_lt, gpu_info.t_fwd_prefilter, gpu_info.t_cpu_workers);
-          }
-        }
-
         p7_cuda_msvprofile_Destroy(cuda_msv);
         free(gpu_info.h_ssv_scores);
         free(gpu_info.h_ssv_status);
         free(gpu_info.h_null_scores);
         free(gpu_info.h_bias_scores);
+        gpu_info_valid = TRUE;
       }
       else
 #endif
@@ -1262,7 +1316,13 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
           esl_fatal("Unexpected error %d reading sequence file %s", sstatus, dbfp->filename);
       }
 
-      //need to re-compute e-values before merging (when list will be sorted)
+	      clock_gettime(CLOCK_MONOTONIC, &post_ts0);
+#ifdef HMMER_CUDA
+	      if (esl_opt_GetBoolean(go, "--gpu") && gpu_info_valid)
+	        gpu_info.t_query_postloop = elapsed_seconds(&gpu_loop_ts1, &post_ts0);
+#endif
+
+	      //need to re-compute e-values before merging (when list will be sorted)
       if (esl_opt_IsUsed(go, "-Z")) {
     	  resCnt = 1000000*esl_opt_GetReal(go, "-Z");
 
@@ -1327,13 +1387,95 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       if (dfamtblfp) p7_tophits_TabularXfam(dfamtblfp,   hmm->name, hmm->acc, info->th, info->pli);
       if (aliscoresfp) p7_tophits_AliScores(aliscoresfp, hmm->name, info->th );
 
-      esl_stopwatch_Stop(w);
+	      esl_stopwatch_Stop(w);
+	      clock_gettime(CLOCK_MONOTONIC, &post_ts1);
 
-      p7_pli_Statistics(ofp, info->pli, w);
+	      p7_pli_Statistics(ofp, info->pli, w);
 
-      if (fprintf(ofp, "//\n") < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+	      if (fprintf(ofp, "//\n") < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 
-      /* Output the results in an MSA (-A option) */
+#ifdef HMMER_CUDA
+	      if (esl_opt_GetBoolean(go, "--gpu") && gpu_info_valid) {
+	        gpu_info.t_post_search   = elapsed_seconds(&post_ts0, &post_ts1);
+	        clock_gettime(CLOCK_MONOTONIC, &query_ts1);
+	        gpu_info.t_query_elapsed = elapsed_seconds(&query_ts0, &query_ts1);
+	        if (cuda_engine) {
+	          clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
+	          p7_cuda_engine_Reset(cuda_engine);
+	          clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
+	          gpu_info.t_cuda_reset = elapsed_seconds(&tmp_ts0, &tmp_ts1);
+	        }
+	        gpu_t_query_presearch_total += gpu_info.t_query_presearch;
+	        gpu_t_gpu_loop_wall_total   += gpu_info.t_gpu_loop_wall;
+	        gpu_t_query_postloop_total  += gpu_info.t_query_postloop;
+	        gpu_t_post_search_total     += gpu_info.t_post_search;
+	        gpu_t_cuda_reset_total      += gpu_info.t_cuda_reset;
+
+	        {
+	          double t_search = gpu_info.t_ssv + gpu_info.t_merge + gpu_info.t_batch_filter
+	                          + gpu_info.t_vit_lt + gpu_info.t_fwd_prefilter
+	                          + gpu_info.t_gpu_fb_parser + gpu_info.t_cpu_workers;
+	          double t_loop_gap = gpu_info.t_gpu_loop_wall - t_search;
+	          double t_query_outside_search = gpu_info.t_query_presearch + gpu_info.t_query_postloop + gpu_info.t_post_search;
+	          double t_accounted_query = gpu_info.t_gpu_loop_wall + t_query_outside_search;
+	          double t_query_gap = gpu_info.t_query_elapsed - t_accounted_query;
+	          double t_outside_query = gpu_t_engine_create + gpu_info.t_nucdb_open + gpu_info.t_nucdb_upload;
+
+	          if (t_search > 0.0) {
+	            fprintf(stderr, "GPU timing breakdown (%.3fs search stages; %.3fs GPU loop wall):\n",
+	                    t_search, gpu_info.t_gpu_loop_wall);
+	            fprintf(stderr, "  SSV longtarget:    %7.3fs  (%4.1f%%)\n", gpu_info.t_ssv, 100.0*gpu_info.t_ssv/t_search);
+	            fprintf(stderr, "  extend+merge:      %7.3fs  (%4.1f%%)\n", gpu_info.t_merge, 100.0*gpu_info.t_merge/t_search);
+	            fprintf(stderr, "  batch filter:      %7.3fs  (%4.1f%%)\n", gpu_info.t_batch_filter, 100.0*gpu_info.t_batch_filter/t_search);
+	            fprintf(stderr, "  scanning Viterbi:  %7.3fs  (%4.1f%%)\n", gpu_info.t_vit_lt, 100.0*gpu_info.t_vit_lt/t_search);
+	            if (gpu_info.t_vit_lt > 0.0) {
+	              fprintf(stderr, "    vit bias pass:   %7.3fs\n", gpu_info.t_vit_bias);
+	              fprintf(stderr, "    vit CUDA call:   %7.3fs\n", gpu_info.t_vit_cuda);
+	              fprintf(stderr, "      alloc/grow:    %7.3fs\n", gpu_info.t_vit_alloc);
+	              fprintf(stderr, "      host pack:     %7.3fs  (%" PRId64 " bytes)\n", gpu_info.t_vit_pack, gpu_info.vit_packed_bytes);
+	              fprintf(stderr, "      H2D:           %7.3fs\n", gpu_info.t_vit_h2d);
+	              fprintf(stderr, "      threshold ker: %7.3fs\n", gpu_info.t_vit_thresh);
+	              fprintf(stderr, "      scan kernel:   %7.3fs\n", gpu_info.t_vit_kernel);
+	              fprintf(stderr, "      D2H:           %7.3fs\n", gpu_info.t_vit_d2h);
+	              fprintf(stderr, "      stream/sync:   %7.3fs\n", gpu_info.t_vit_stream);
+	              fprintf(stderr, "    vit seed sort:   %7.3fs\n", gpu_info.t_vit_sort);
+	              fprintf(stderr, "    vit extend:      %7.3fs\n", gpu_info.t_vit_extend);
+	            }
+	            fprintf(stderr, "  Forward prefilter: %7.3fs  (%4.1f%%)\n", gpu_info.t_fwd_prefilter, 100.0*gpu_info.t_fwd_prefilter/t_search);
+	            fprintf(stderr, "  GPU FB parser:     %7.3fs  (%4.1f%%)\n", gpu_info.t_gpu_fb_parser, 100.0*gpu_info.t_gpu_fb_parser/t_search);
+	            fprintf(stderr, "  CPU workers:       %7.3fs  (%4.1f%%)\n", gpu_info.t_cpu_workers, 100.0*gpu_info.t_cpu_workers/t_search);
+	            fprintf(stderr, "    null scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_null, 100.0*gpu_info.t_worker_null/t_search);
+	            fprintf(stderr, "    bias scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bias, 100.0*gpu_info.t_worker_bias/t_search);
+	            fprintf(stderr, "    CPU Backward:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bck, 100.0*gpu_info.t_worker_bck/t_search);
+	            fprintf(stderr, "    domain workflow: %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_domain, 100.0*gpu_info.t_worker_domain/t_search);
+	            fprintf(stderr, "    hit reporting:   %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_output, 100.0*gpu_info.t_worker_output/t_search);
+	          } else {
+	            fprintf(stderr, "GPU timing: all zeros (t_ssv=%.6f t_merge=%.6f t_batch=%.6f t_vit=%.6f t_fwd=%.6f t_cpu=%.6f)\n",
+	                    gpu_info.t_ssv, gpu_info.t_merge, gpu_info.t_batch_filter,
+	                    gpu_info.t_vit_lt, gpu_info.t_fwd_prefilter, gpu_info.t_cpu_workers);
+	          }
+
+	          fprintf(stderr, "GPU outside-search timing:\n");
+	          fprintf(stderr, "  CUDA engine create: %7.3fs\n", gpu_t_engine_create);
+	          fprintf(stderr, "  nucdb open/mmap:    %7.3fs%s\n", gpu_info.t_nucdb_open,
+	                  gpu_shared_nucdb ? " (shared)" : "");
+	          fprintf(stderr, "  nucdb upload:       %7.3fs%s\n", gpu_info.t_nucdb_upload,
+	                  gpu_shared_nucdb ? " (shared)" : "");
+	          fprintf(stderr, "  nucdb reconstruct:  %7.3fs\n", gpu_info.t_nucdb_reconstruct);
+	          fprintf(stderr, "  loop unbucketed:    %7.3fs\n", t_loop_gap > 0.0 ? t_loop_gap : 0.0);
+	          fprintf(stderr, "  pre-search setup:   %7.3fs\n", gpu_info.t_query_presearch);
+	          fprintf(stderr, "  post-loop cleanup:  %7.3fs\n", gpu_info.t_query_postloop);
+	          fprintf(stderr, "  post-search/report: %7.3fs\n", gpu_info.t_post_search);
+	          fprintf(stderr, "  query outside search:%6.3fs\n", t_query_outside_search);
+	          fprintf(stderr, "  query elapsed:      %7.3fs\n", gpu_info.t_query_elapsed);
+	          fprintf(stderr, "  query unbucketed:   %7.3fs\n", t_query_gap > 0.0 ? t_query_gap : 0.0);
+	          fprintf(stderr, "  shared setup outside query:%7.3fs\n", t_outside_query);
+	          fprintf(stderr, "  CUDA reset:         %7.3fs\n", gpu_info.t_cuda_reset);
+	        }
+	      }
+#endif
+
+	      /* Output the results in an MSA (-A option) */
       if (afp) {
           ESL_MSA *msa = NULL;
 
@@ -1369,11 +1511,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       destroy_id_length(id_length_list);
       if (qsq != NULL) esl_sq_Reuse(qsq);
 
-#ifdef HMMER_CUDA
-      if (cuda_engine) p7_cuda_engine_Reset(cuda_engine);
-#endif
-
-      if (hfp != NULL) {
+	      if (hfp != NULL) {
         qhstatus = p7_hmmfile_Read(hfp, &abc, &hmm);
       } else if (qfp_msa != NULL){
         esl_msa_Destroy(msa);
@@ -1389,7 +1527,13 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   } /* end outer loop over queries */
 
 #ifdef HMMER_CUDA
-  if (cuda_engine) p7_cuda_engine_Destroy(cuda_engine);
+  if (cuda_engine) {
+    clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
+    p7_cuda_engine_Destroy(cuda_engine);
+    clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
+    gpu_t_cuda_destroy = elapsed_seconds(&tmp_ts0, &tmp_ts1);
+  }
+  if (gpu_shared_nucdb) p7_nucdb_Close(gpu_shared_nucdb);
 #endif
 
   if (hfp != NULL) {
@@ -1471,6 +1615,23 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   if (tblfp)         fclose(tblfp);
   if (dfamtblfp)     fclose(dfamtblfp);
   if (aliscoresfp)   fclose(aliscoresfp);
+
+#ifdef HMMER_CUDA
+  if (esl_opt_GetBoolean(go, "--gpu")) {
+    double gpu_t_process_elapsed;
+    double gpu_t_process_outside_search;
+    clock_gettime(CLOCK_MONOTONIC, &prog_ts1);
+    gpu_t_process_elapsed = elapsed_seconds(&prog_ts0, &prog_ts1);
+    gpu_t_process_outside_search = gpu_t_process_elapsed - gpu_t_gpu_loop_wall_total;
+    if (gpu_t_process_outside_search < 0.0) gpu_t_process_outside_search = 0.0;
+    fprintf(stderr, "GPU process timing: setup_engine=%.3fs shared_nucdb_open=%.3fs shared_nucdb_upload=%.3fs query_presearch=%.3fs gpu_loop_wall=%.3fs query_postloop=%.3fs post_search_report=%.3fs cuda_reset=%.3fs cuda_destroy=%.3fs process_outside_search=%.3fs process_elapsed=%.3fs\n",
+            gpu_t_engine_create, gpu_t_nucdb_open, gpu_t_nucdb_upload,
+            gpu_t_query_presearch_total, gpu_t_gpu_loop_wall_total,
+            gpu_t_query_postloop_total, gpu_t_post_search_total,
+            gpu_t_cuda_reset_total, gpu_t_cuda_destroy,
+            gpu_t_process_outside_search, gpu_t_process_elapsed);
+  }
+#endif
 
   return eslOK;
 

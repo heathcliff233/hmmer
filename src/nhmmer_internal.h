@@ -43,6 +43,8 @@ typedef struct {
   int               do_gpu_fwd;         /* default GPU Fwd/Bwd parser handoff */
   int               do_cpu_postmsv;     /* --gpu-cpu-postmsv: bypass GPU Vit+Fwd, use CPU postSSV */
   int               do_compare;         /* --gpu-compare: print GPU vs CPU score mismatches */
+  int               do_domain_trace;    /* env HMMER_NHMMER_GPU_DOMAIN_TRACE: per-window CPU domain timing */
+  int               nucdb_resident;     /* .nucdb data was uploaded before the per-query search loop */
   /* Persistent scratch arrays (grow-only, freed at end) */
   float            *h_ssv_scores;
   int              *h_ssv_status;
@@ -59,9 +61,33 @@ typedef struct {
   double            t_merge;         /* window extend + merge */
   double            t_batch_filter;  /* GPU batch SSV/bias/F1 filter */
   double            t_vit_lt;        /* GPU scanning Viterbi longtarget */
+  double            t_vit_bias;      /* Bias-score recomputation before GPU scanning Viterbi */
+  double            t_vit_cuda;      /* p7_cuda_ViterbiLongtarget call wall time */
+  double            t_vit_sort;      /* CPU sort of GPU Viterbi seeds */
+  double            t_vit_extend;    /* CPU Viterbi seed extend/merge/split/coordinate fixup */
+  double            t_vit_pack;      /* Host packing inside p7_cuda_ViterbiLongtarget */
+  double            t_vit_h2d;       /* CUDA H2D inside p7_cuda_ViterbiLongtarget */
+  double            t_vit_thresh;    /* CUDA threshold kernel inside p7_cuda_ViterbiLongtarget */
+  double            t_vit_kernel;    /* CUDA scanning Viterbi kernel */
+  double            t_vit_d2h;       /* CUDA D2H inside p7_cuda_ViterbiLongtarget */
+  double            t_vit_alloc;     /* CUDA buffer growth/allocation inside p7_cuda_ViterbiLongtarget */
+  double            t_vit_stream;    /* CUDA stream create/sync/destroy overhead in Viterbi helper */
+  int64_t           vit_packed_bytes;/* Total packed Viterbi window bytes uploaded */
   double            t_fwd_prefilter; /* GPU Forward pre-filter */
   double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
   double            t_cpu_workers;   /* CPU domaindef + hit reporting (wallclock around threaded section) */
+  double            t_nucdb_open;     /* one-time .nucdb open/mmap, charged outside per-query search */
+  double            t_nucdb_upload;   /* one-time .nucdb H2D upload, charged outside per-query search */
+  double            t_nucdb_reconstruct; /* CPU reconstruction of full ESL_SQ strands from .nucdb chunks */
+  double            t_post_search;    /* E-value/sort/dedup/threshold/output after GPU search loop */
+  double            t_cuda_reset;     /* CUDA engine reset after a query */
+  double            t_cuda_destroy;   /* CUDA engine/database teardown after all queries */
+  double            t_gpu_loop_wall;  /* wall time around serial/nucdb GPU search loop */
+  double            t_query_elapsed;  /* HMMER stopwatch-equivalent wall time for current query */
+  double            t_query_presearch; /* per-query model/profile/output setup before GPU search loop */
+  double            t_query_postloop;  /* per-query cleanup/status work between GPU loop and post-search */
+  double            t_program_prequery; /* setup before first query stopwatch starts */
+  double            t_program_total;  /* process wall from main timing start to teardown */
   /* Sub-bucket breakdown of t_cpu_workers (wall-clock = max across worker threads) */
   double            t_worker_null;    /* base null model scoring inside CPU workers */
   double            t_worker_bias;    /* biased-composition scoring inside CPU workers */
@@ -77,5 +103,8 @@ int nhmmer_gpu_serial_loop(NHMMER_GPU_INFO *info, ESL_SQFILE *dbfp,
 int nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
                           int strands, NHMMER_GPU_IDLEN_CB idlen_cb, void *idlen_data,
                           int *ret_nseqs, int64_t *ret_nres);
+
+int nhmmer_gpu_nucdb_upload(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
+                            char *errbuf, int errbuf_size);
 
 #endif /*NHMMER_INTERNAL_INCLUDED*/

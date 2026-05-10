@@ -255,6 +255,7 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
                           float scale_w, float xw_e_move, float nj,
                           float base_w, int max_length,
                           P7_CUDA_VIT_LT_WINDOW **ret_windows, int *ret_nwindows,
+                          P7_CUDA_VIT_LT_STATS *stats,
                           char *errbuf, int errbuf_size)
 {
   int status = eslOK;
@@ -266,10 +267,20 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   int total_packed = 0;
   int h_win_count = 0;
   P7_CUDA_VIT_LT_WINDOW *h_windows = NULL;
+  P7_CUDA_VIT_LT_STATS local_stats;
+  double t0, t1, t_stream0, t_stream1;
+  cudaEvent_t h2d0 = NULL, h2d1 = NULL;
+  cudaEvent_t th0  = NULL, th1  = NULL;
+  cudaEvent_t k0   = NULL, k1   = NULL;
+  cudaEvent_t d2h0 = NULL, d2h1 = NULL;
+
+  memset(&local_stats, 0, sizeof(local_stats));
+  local_stats.nwindows_in = nwindows;
 
   if (nwindows == 0) {
     *ret_windows  = NULL;
     *ret_nwindows = 0;
+    if (stats) *stats = local_stats;
     return eslOK;
   }
 
@@ -286,6 +297,7 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   }
   total_packed += 1;
 
+  t0 = host_seconds();
   /* Grow engine-persistent buffers */
   if (engine->vlt_dsq_alloc < total_packed) {
     if (engine->d_vlt_dsq) cudaFree(engine->d_vlt_dsq);
@@ -328,8 +340,11 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     if ((status = cuda_status(cudaMalloc((void **)&engine->d_vlt_win_count, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(vlt win_count)")) != eslOK) goto ERROR;
     engine->vlt_win_alloc = max_out;
   }
+  t1 = host_seconds();
+  local_stats.alloc_seconds += t1 - t0;
 
   /* Pack window subsequences into pinned host buffer */
+  t0 = host_seconds();
   for (int w = 0; w < nwindows; w++) {
     uint8_t *dest = engine->h_vlt_dsq + h_offsets[w];
     int64_t seq_start = windows[w].n;
@@ -337,16 +352,28 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     dest[0] = eslDSQ_SENTINEL;
     memcpy(dest + 1, dsq + seq_start, wlen);
   }
+  t1 = host_seconds();
+  local_stats.pack_seconds += t1 - t0;
+  local_stats.packed_bytes += total_packed;
 
   /* Upload and compute thresholds concurrently using streams */
   {
     cudaStream_t stream_copy, stream_thresh;
+    if ((status = cuda_status(cudaEventCreate(&h2d0), errbuf, errbuf_size, "cudaEventCreate(vlt h2d0)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaEventCreate(&h2d1), errbuf, errbuf_size, "cudaEventCreate(vlt h2d1)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaEventCreate(&th0),  errbuf, errbuf_size, "cudaEventCreate(vlt th0)"))  != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaEventCreate(&th1),  errbuf, errbuf_size, "cudaEventCreate(vlt th1)"))  != eslOK) goto ERROR;
+    t_stream0 = host_seconds();
     cudaStreamCreate(&stream_copy);
     cudaStreamCreate(&stream_thresh);
+    t_stream1 = host_seconds();
+    local_stats.stream_seconds += t_stream1 - t_stream0;
 
     /* Stream 1: upload DSQ data (large transfer) */
+    cudaEventRecord(h2d0, stream_copy);
     cudaMemcpyAsync(engine->d_vlt_dsq, engine->h_vlt_dsq, total_packed, cudaMemcpyHostToDevice, stream_copy);
     cudaMemcpyAsync(engine->d_vlt_offsets, h_offsets, sizeof(int) * nwindows, cudaMemcpyHostToDevice, stream_copy);
+    cudaEventRecord(h2d1, stream_copy);
 
     /* Stream 2 (default): upload lengths + bias + compute thresholds */
     if ((status = cuda_status(cudaMemcpy(engine->d_vlt_lengths, h_lengths, sizeof(int) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt lengths)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
@@ -357,22 +384,34 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
       if ((status = cuda_status(cudaMalloc((void **)&d_bias, sizeof(float) * nwindows), errbuf, errbuf_size, "cudaMalloc(vlt bias)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
       if ((status = cuda_status(cudaMemcpy(d_bias, bias_scores, sizeof(float) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt bias)")) != eslOK) { cudaFree(d_bias); cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
     }
+    cudaEventRecord(th0, stream_thresh);
     cuda_compute_viterbi_thresholds_kernel<<<(nwindows + 127) / 128, 128, 0, stream_thresh>>>(
         NULL, d_bias, engine->d_vlt_lengths, nwindows, do_biasfilter,
         B2, F2, vmu, vlambda, scale_w, xw_e_move, nj, base_w,
         max_length, engine->d_vlt_thresholds);
+    cudaEventRecord(th1, stream_thresh);
     if (d_bias) cudaFree(d_bias);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "vlt threshold kernel launch")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
 
     /* Wait for both streams to complete before launching main kernel */
+    t_stream0 = host_seconds();
     cudaStreamSynchronize(stream_copy);
     cudaStreamSynchronize(stream_thresh);
+    t_stream1 = host_seconds();
+    local_stats.stream_seconds += t_stream1 - t_stream0;
+    local_stats.h2d_seconds += elapsed_seconds(h2d0, h2d1);
+    local_stats.threshold_kernel_seconds += elapsed_seconds(th0, th1);
+    t_stream0 = host_seconds();
     cudaStreamDestroy(stream_copy);
     cudaStreamDestroy(stream_thresh);
+    t_stream1 = host_seconds();
+    local_stats.stream_seconds += t_stream1 - t_stream0;
   }
 
   /* Launch kernel: dynamically choose warps-per-block for occupancy */
   {
+    if ((status = cuda_status(cudaEventCreate(&k0), errbuf, errbuf_size, "cudaEventCreate(vlt k0)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaEventCreate(&k1), errbuf, errbuf_size, "cudaEventCreate(vlt k1)")) != eslOK) goto ERROR;
     size_t shmem_per_warp = (size_t) Q * 8 * 3 * 2 * sizeof(int16_t);
     int wpb = VIT_LT_WARPS_PER_BLOCK;
     /* Reduce warps/block for large M to fit in shared memory and increase occupancy.
@@ -381,6 +420,8 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
       wpb >>= 1;
     int nblocks = (nwindows + wpb - 1) / wpb;
     size_t shmem = shmem_per_warp * wpb;
+    local_stats.warps_per_block = wpb;
+    cudaEventRecord(k0);
     cuda_viterbi_longtarget_kernel<<<nblocks, wpb * 32, shmem>>>(
       engine->d_vlt_dsq, engine->d_vlt_offsets, engine->d_vlt_lengths,
       nwindows,
@@ -390,11 +431,16 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
       cuom->base_w, cuom->ddbound_w,
       engine->d_vlt_thresholds,
       engine->d_vlt_windows, engine->d_vlt_win_count, engine->vlt_win_alloc);
+    cudaEventRecord(k1);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_longtarget_kernel launch")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_viterbi_longtarget sync")) != eslOK) goto ERROR;
+    local_stats.kernel_seconds += elapsed_seconds(k0, k1);
   }
 
   /* Download results */
+  if ((status = cuda_status(cudaEventCreate(&d2h0), errbuf, errbuf_size, "cudaEventCreate(vlt d2h0)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaEventCreate(&d2h1), errbuf, errbuf_size, "cudaEventCreate(vlt d2h1)")) != eslOK) goto ERROR;
+  cudaEventRecord(d2h0);
   if ((status = cuda_status(cudaMemcpy(&h_win_count, engine->d_vlt_win_count, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vlt win_count)")) != eslOK) goto ERROR;
   if (h_win_count > engine->vlt_win_alloc) h_win_count = engine->vlt_win_alloc;
 
@@ -403,18 +449,47 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     if (!h_windows) { status = eslEMEM; goto ERROR; }
     if ((status = cuda_status(cudaMemcpy(h_windows, engine->d_vlt_windows, sizeof(P7_CUDA_VIT_LT_WINDOW) * h_win_count, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vlt windows)")) != eslOK) goto ERROR;
   }
+  cudaEventRecord(d2h1);
+  cudaEventSynchronize(d2h1);
+  local_stats.d2h_seconds += elapsed_seconds(d2h0, d2h1);
+  local_stats.nwindows_out = h_win_count;
+
+  engine->stats.vit_h2d_seconds    += local_stats.h2d_seconds;
+  engine->stats.vit_kernel_seconds += local_stats.threshold_kernel_seconds + local_stats.kernel_seconds;
+  engine->stats.vit_d2h_seconds    += local_stats.d2h_seconds;
+  engine->stats.vit_nseqs          += nwindows;
+  engine->stats.vit_nres           += total_packed > nwindows ? (uint64_t)(total_packed - nwindows - 1) : 0;
+  engine->stats.vit_nbatches       += 1;
 
   *ret_windows  = h_windows;
   *ret_nwindows = h_win_count;
+  if (stats) *stats = local_stats;
+  if (h2d0) cudaEventDestroy(h2d0);
+  if (h2d1) cudaEventDestroy(h2d1);
+  if (th0)  cudaEventDestroy(th0);
+  if (th1)  cudaEventDestroy(th1);
+  if (k0)   cudaEventDestroy(k0);
+  if (k1)   cudaEventDestroy(k1);
+  if (d2h0) cudaEventDestroy(d2h0);
+  if (d2h1) cudaEventDestroy(d2h1);
   free(h_offsets);
   free(h_lengths);
   return eslOK;
 
 ERROR:
+  if (h2d0) cudaEventDestroy(h2d0);
+  if (h2d1) cudaEventDestroy(h2d1);
+  if (th0)  cudaEventDestroy(th0);
+  if (th1)  cudaEventDestroy(th1);
+  if (k0)   cudaEventDestroy(k0);
+  if (k1)   cudaEventDestroy(k1);
+  if (d2h0) cudaEventDestroy(d2h0);
+  if (d2h1) cudaEventDestroy(d2h1);
   free(h_offsets);
   free(h_lengths);
   *ret_windows  = NULL;
   *ret_nwindows = 0;
+  if (stats) *stats = local_stats;
   return status;
 }
 

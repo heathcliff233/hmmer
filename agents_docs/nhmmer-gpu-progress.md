@@ -71,9 +71,9 @@ Both strands processed sequentially (forward, then reverse complement).
 
 | File | Purpose |
 |------|---------|
-| `src/nhmmer.c` | CLI (`--gpu` option), engine lifecycle, nucdb detection |
+| `src/nhmmer.c` | CLI (`--gpu` option), engine lifecycle, shared nucdb open/upload, timing accounting |
 | `src/nhmmer_internal.h` | `NHMMER_GPU_INFO`, `NHMMER_GPU_WINDOW_BATCH` structs |
-| `src/nhmmer_gpu.c` | GPU orchestration: batch filter, Viterbi, scanning Vit, domain rescore, hit reporting |
+| `src/nhmmer_gpu.c` | GPU orchestration: batch filter, Viterbi, scanning Vit, shared nucdb reuse, domain rescore, hit reporting |
 | `src/cuda/p7_cuda_ssv_longtarget.cu` | SSV longtarget kernel + `SSVLongtargetResident` |
 | `src/cuda/p7_cuda_viterbi_longtarget.cu` | Scanning Viterbi kernel + threshold kernel |
 | `src/cuda/p7_cuda_fb_parser.cu` | Forward/Backward parser batch: Forward-only, Backward-only, and combined F+B modes |
@@ -115,15 +115,64 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-o0.nucdb.nucdb
 **Target**: chr22.fa (50MB, ~101.6M residues both strands)
 **System**: RTX 4090, 4 CPU threads
 
+`test-speed/x-nhmmer-gpu-bench` now defaults to an all-sample multi-query run. It concatenates `MADE1`, `query_short`, and `query_medium` into `benchmark-data/nucleotide-bench/work/nhmmer-gpu-all-samples.hmm`, then runs one `nhmmer` process per path. This is the preferred benchmark for current GPU nhmmer because CUDA engine creation and resident `.nucdb` upload are shared across searches. The old one-query-at-a-time behavior remains available with `NHMMER_GPU_BENCH_MODE=per-query`.
+
+Current combined all-sample result:
+
+| Path | Time | Hits |
+|------|:---:|:---:|
+| CPU-1 | 8.333s | 1476 |
+| CPU-4 | 2.297s | 1476 |
+| GPU-4 FASTA | 2.982s | 1476 |
+| GPU-4 nucdb, no overlap | 2.022s | 1476 |
+| GPU-4 overlap-nucdb | 1.798s | 1476 |
+
+Current parity script result:
+
+| Query/path | Result |
+|------------|:---:|
+| MADE1 FASTA | 465 = 465 |
+| MADE1 nucdb | 465 = 465 |
+| query_short FASTA | 363 = 363 |
+| query_medium FASTA | 648 = 648 |
+
+Recent per-query baseline:
+
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-1 | 0.849s / 465 | 1.625s / 363 | 5.995s / 648 |
-| CPU-4 | 0.268s / 465 | 0.463s / 363 | 1.669s / 648 |
-| GPU-4 FASTA | 0.669s / 465 | 0.689s / 363 | 1.589s / 648 |
-| GPU-4 nucdb | 0.677s / 465 | 0.716s / 363 | 1.340s / 648 |
-| GPU-4 overlap-nucdb | 0.468s / 465 | 0.561s / 363 | 1.232s / 648 |
+| CPU-1 | 0.835s / 465 | 1.324s / 363 | 5.809s / 648 |
+| CPU-4 | 0.278s / 465 | 0.388s / 363 | 1.713s / 648 |
+| GPU-4 FASTA | 0.706s / 465 | 0.703s / 363 | 1.668s / 648 |
+| GPU-4 nucdb | 0.724s / 465 | 0.817s / 363 | 1.493s / 648 |
+| GPU-4 overlap-nucdb | 0.613s / 465 | 0.644s / 363 | 1.669s / 648 |
 
-This table is the current `test-speed/x-nhmmer-gpu-bench .` result after removing the extra single-score GPU Viterbi prefilter. The older 2.109s overlap `.nucdb` result was stale: it predated the GPU window-ordering fixes and mixed old default runs with targeted Fwd/Bwd handoff runs.
+The older 2.109s overlap `.nucdb` result was stale: it predated the GPU window-ordering fixes and mixed old default runs with targeted Fwd/Bwd handoff runs.
+
+### Combined-Run Timing Accounting
+
+`nhmmer --gpu` now reports both search-stage timing and outside-search timing. The combined overlap `.nucdb` run showed one shared CUDA engine creation (`0.446s`) and one shared `.nucdb` upload (`0.029s`) for all three queries, followed by per-query reconstruction/search/report buckets. In that run, process elapsed time was `2.205s`, summed GPU loop wall time was `1.710s`, and process time outside the GPU search loops was `0.495s`.
+
+| Query | Search stages | GPU loop wall | Query elapsed | CPU workers | Domain workflow | nucdb reconstruct | Query outside search |
+|-------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| MADE1 | 0.150s | 0.236s | 0.237s | 0.062s | 0.059s | 0.080s | 0.001s |
+| query_short | 0.219s | 0.302s | 0.303s | 0.123s | 0.119s | 0.077s | 0.001s |
+| query_medium | 1.102s | 1.172s | 1.174s | 0.756s | 0.738s | 0.065s | 0.002s |
+
+Process-level line from that run:
+
+| Bucket | Time |
+|--------|:---:|
+| CUDA engine create | 0.446s |
+| shared nucdb open/mmap | 0.000s |
+| shared nucdb upload | 0.029s |
+| query pre-search setup | 0.002s |
+| GPU loop wall total | 1.710s |
+| query post-loop cleanup | 0.000s |
+| post-search/report | 0.003s |
+| CUDA reset | 0.000s |
+| CUDA destroy | 0.003s |
+| process outside search | 0.495s |
+| process elapsed | 2.205s |
 
 Current strict query_medium parity audit on 2026-05-10:
 
@@ -144,11 +193,11 @@ Current fast `.nucdb` GPU breakdown for query_medium:
 | scanning Viterbi | 0.138-0.289s |
 | Forward prefilter | 0.028-0.039s |
 | GPU FB parser | 0.011-0.014s |
-| CPU workers | 0.801-0.812s |
-| worker domain workflow | 0.782-0.799s |
+| CPU workers | 0.756s |
+| worker domain workflow | 0.738s |
 | worker CPU Backward | 0.000s |
 
-Focused repeats after the speed-script run showed GPU wall 1.53-1.86s. The largest variance was scanning Viterbi; CPU domain workflow stayed the dominant and relatively stable bucket.
+Focused repeats show run-to-run variance in CUDA engine setup and scanning Viterbi, while CPU domain workflow stays the dominant and relatively stable in-search bucket.
 
 ### Historical GPU Domain Rescoring Performance
 
