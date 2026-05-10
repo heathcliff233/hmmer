@@ -421,6 +421,30 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     int nblocks = (nwindows + wpb - 1) / wpb;
     size_t shmem = shmem_per_warp * wpb;
     local_stats.warps_per_block = wpb;
+    local_stats.grid_blocks        = nblocks;
+    local_stats.block_threads      = wpb * 32;
+    local_stats.dynamic_smem_bytes = (int) shmem;
+    {
+      cudaDeviceProp prop;
+      int dev = 0;
+      int active_blocks = 0;
+      if (cudaGetDevice(&dev) == cudaSuccess &&
+          cudaGetDeviceProperties(&prop, dev) == cudaSuccess &&
+          cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks,
+                                                        cuda_viterbi_longtarget_kernel,
+                                                        wpb * 32, shmem) == cudaSuccess) {
+        local_stats.active_blocks_per_sm  = active_blocks;
+        local_stats.active_warps_per_sm   = active_blocks * wpb;
+        local_stats.max_warps_per_sm      = prop.maxThreadsPerMultiProcessor / 32;
+        local_stats.sm_count              = prop.multiProcessorCount;
+        local_stats.theoretical_occupancy = local_stats.max_warps_per_sm > 0
+                                            ? (double)local_stats.active_warps_per_sm / (double)local_stats.max_warps_per_sm
+                                            : 0.0;
+        local_stats.grid_sm_coverage      = local_stats.sm_count > 0
+                                            ? (double)nblocks / (double)local_stats.sm_count
+                                            : 0.0;
+      }
+    }
     cudaEventRecord(k0);
     cuda_viterbi_longtarget_kernel<<<nblocks, wpb * 32, shmem>>>(
       engine->d_vlt_dsq, engine->d_vlt_offsets, engine->d_vlt_lengths,

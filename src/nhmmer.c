@@ -1205,6 +1205,18 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.n_post_vit_windows   = 0;
         gpu_info.n_fwd_survivor_windows = 0;
         gpu_info.t_ssv           = 0;
+        gpu_info.ssv_launches    = 0;
+        gpu_info.ssv_grid_blocks = 0;
+        gpu_info.ssv_block_threads = 0;
+        gpu_info.ssv_dynamic_smem = 0;
+        gpu_info.ssv_active_blocks_per_sm = 0;
+        gpu_info.ssv_active_warps_per_sm = 0;
+        gpu_info.ssv_max_warps_per_sm = 0;
+        gpu_info.ssv_sm_count = 0;
+        gpu_info.ssv_nchunks = 0;
+        gpu_info.ssv_chunk_size = 0;
+        gpu_info.ssv_theoretical_occupancy = 0;
+        gpu_info.ssv_grid_sm_coverage = 0;
         gpu_info.t_merge         = 0;
         gpu_info.t_batch_filter  = 0;
         gpu_info.t_vit_lt        = 0;
@@ -1220,6 +1232,16 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_vit_alloc     = 0;
         gpu_info.t_vit_stream    = 0;
         gpu_info.vit_packed_bytes = 0;
+        gpu_info.vit_launches    = 0;
+        gpu_info.vit_grid_blocks = 0;
+        gpu_info.vit_block_threads = 0;
+        gpu_info.vit_dynamic_smem = 0;
+        gpu_info.vit_active_blocks_per_sm = 0;
+        gpu_info.vit_active_warps_per_sm = 0;
+        gpu_info.vit_max_warps_per_sm = 0;
+        gpu_info.vit_sm_count = 0;
+        gpu_info.vit_theoretical_occupancy = 0;
+        gpu_info.vit_grid_sm_coverage = 0;
         gpu_info.t_fwd_prefilter = 0;
         gpu_info.t_gpu_fb_parser = 0;
         gpu_info.t_cpu_workers   = 0;
@@ -1450,6 +1472,16 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	            fprintf(stderr, "GPU timing breakdown (%.3fs search stages; %.3fs GPU loop wall):\n",
 	                    t_search, gpu_info.t_gpu_loop_wall);
 	            fprintf(stderr, "  SSV longtarget:    %7.3fs  (%4.1f%%)\n", gpu_info.t_ssv, 100.0*gpu_info.t_ssv/t_search);
+	            if (gpu_info.ssv_launches > 0) {
+	              fprintf(stderr, "    launch shape:    %" PRId64 " launches, last grid=%d block=%d smem=%dB chunks=%d chunk_step=%d\n",
+	                      gpu_info.ssv_launches, gpu_info.ssv_grid_blocks, gpu_info.ssv_block_threads,
+	                      gpu_info.ssv_dynamic_smem, gpu_info.ssv_nchunks, gpu_info.ssv_chunk_size);
+	              fprintf(stderr, "    occupancy:       %.1f%% theoretical (%d active warps/SM of %d), %.2fx grid/SM coverage on %d SMs\n",
+	                      100.0 * gpu_info.ssv_theoretical_occupancy / (double)gpu_info.ssv_launches,
+	                      gpu_info.ssv_active_warps_per_sm, gpu_info.ssv_max_warps_per_sm,
+	                      gpu_info.ssv_grid_sm_coverage / (double)gpu_info.ssv_launches,
+	                      gpu_info.ssv_sm_count);
+	            }
 	            fprintf(stderr, "  extend+merge:      %7.3fs  (%4.1f%%)\n", gpu_info.t_merge, 100.0*gpu_info.t_merge/t_search);
 	            fprintf(stderr, "  batch filter:      %7.3fs  (%4.1f%%)\n", gpu_info.t_batch_filter, 100.0*gpu_info.t_batch_filter/t_search);
 	            fprintf(stderr, "  scanning Viterbi:  %7.3fs  (%4.1f%%)\n", gpu_info.t_vit_lt, 100.0*gpu_info.t_vit_lt/t_search);
@@ -1463,6 +1495,16 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	              fprintf(stderr, "      scan kernel:   %7.3fs\n", gpu_info.t_vit_kernel);
 	              fprintf(stderr, "      D2H:           %7.3fs\n", gpu_info.t_vit_d2h);
 	              fprintf(stderr, "      stream/sync:   %7.3fs\n", gpu_info.t_vit_stream);
+	              if (gpu_info.vit_launches > 0) {
+	                fprintf(stderr, "      launch shape:  %" PRId64 " launches, last grid=%d block=%d smem=%dB\n",
+	                        gpu_info.vit_launches, gpu_info.vit_grid_blocks,
+	                        gpu_info.vit_block_threads, gpu_info.vit_dynamic_smem);
+	                fprintf(stderr, "      occupancy:     %.1f%% theoretical (%d active warps/SM of %d), %.2fx grid/SM coverage on %d SMs\n",
+	                        100.0 * gpu_info.vit_theoretical_occupancy / (double)gpu_info.vit_launches,
+	                        gpu_info.vit_active_warps_per_sm, gpu_info.vit_max_warps_per_sm,
+	                        gpu_info.vit_grid_sm_coverage / (double)gpu_info.vit_launches,
+	                        gpu_info.vit_sm_count);
+	              }
 	              fprintf(stderr, "    vit seed sort:   %7.3fs\n", gpu_info.t_vit_sort);
 	              fprintf(stderr, "    vit extend:      %7.3fs\n", gpu_info.t_vit_extend);
 	            }

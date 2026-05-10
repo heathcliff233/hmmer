@@ -153,6 +153,42 @@ ERROR:
   return eslEMEM;
 }
 
+static void
+nhmmer_gpu_record_ssv_launch(NHMMER_GPU_INFO *info, const P7_CUDA_SSV_LT_STATS *stats)
+{
+  if (stats == NULL || stats->grid_blocks <= 0) return;
+
+  info->ssv_launches++;
+  info->ssv_grid_blocks         = stats->grid_blocks;
+  info->ssv_block_threads       = stats->block_threads;
+  info->ssv_dynamic_smem        = stats->dynamic_smem_bytes;
+  info->ssv_active_blocks_per_sm = stats->active_blocks_per_sm;
+  info->ssv_active_warps_per_sm = stats->active_warps_per_sm;
+  info->ssv_max_warps_per_sm    = stats->max_warps_per_sm;
+  info->ssv_sm_count            = stats->sm_count;
+  info->ssv_nchunks             = stats->nchunks;
+  info->ssv_chunk_size          = stats->chunk_size;
+  info->ssv_theoretical_occupancy += stats->theoretical_occupancy;
+  info->ssv_grid_sm_coverage      += stats->grid_sm_coverage;
+}
+
+static void
+nhmmer_gpu_record_vit_launch(NHMMER_GPU_INFO *info, const P7_CUDA_VIT_LT_STATS *stats)
+{
+  if (stats == NULL || stats->grid_blocks <= 0) return;
+
+  info->vit_launches++;
+  info->vit_grid_blocks         = stats->grid_blocks;
+  info->vit_block_threads       = stats->block_threads;
+  info->vit_dynamic_smem        = stats->dynamic_smem_bytes;
+  info->vit_active_blocks_per_sm = stats->active_blocks_per_sm;
+  info->vit_active_warps_per_sm = stats->active_warps_per_sm;
+  info->vit_max_warps_per_sm    = stats->max_warps_per_sm;
+  info->vit_sm_count            = stats->sm_count;
+  info->vit_theoretical_occupancy += stats->theoretical_occupancy;
+  info->vit_grid_sm_coverage      += stats->grid_sm_coverage;
+}
+
 /* Ensure persistent scratch arrays in info are large enough for N elements. */
 static int
 nhmmer_gpu_ensure_scratch(NHMMER_GPU_INFO *info, int N)
@@ -1457,6 +1493,7 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   info->t_vit_alloc  += cuda_stats.alloc_seconds;
   info->t_vit_stream += cuda_stats.stream_seconds;
   info->vit_packed_bytes += cuda_stats.packed_bytes;
+  nhmmer_gpu_record_vit_launch(info, &cuda_stats);
   /* Save GPU bias scores for comparison before freeing */
   float *saved_bias_scores = NULL;
   int16_t *gpu_thresholds = NULL;
@@ -1706,10 +1743,12 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
   struct timespec ts0, ts1;
 
   P7_CUDA_LT_WINDOW *gpu_windows = NULL;
+  P7_CUDA_SSV_LT_STATS ssv_stats;
   int gpu_nwindows = 0;
 
   P7_HMM_WINDOWLIST  msv_windowlist;
   msv_windowlist.windows = NULL;
+  memset(&ssv_stats, 0, sizeof(ssv_stats));
 
   clock_gettime(CLOCK_MONOTONIC, &ts0);
   status = p7_cuda_SSVLongtarget(info->cuda_engine, info->cuda_msv,
@@ -1718,10 +1757,12 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
                                  sc_thresh, om->scale_b,
                                  chunk_size, overlap,
                                  &gpu_windows, &gpu_nwindows,
+                                 &ssv_stats,
                                  errbuf, errbuf_size);
   if (status != eslOK) return status;
   clock_gettime(CLOCK_MONOTONIC, &ts1);
   info->t_ssv += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
+  nhmmer_gpu_record_ssv_launch(info, &ssv_stats);
 
   if (gpu_nwindows == 0) { free(gpu_windows); return eslOK; }
 
@@ -2285,7 +2326,9 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   int overlap    = om->max_length;
 
   P7_CUDA_LT_WINDOW *gpu_windows = NULL;
+  P7_CUDA_SSV_LT_STATS ssv_stats;
   int gpu_nwindows = 0;
+  memset(&ssv_stats, 0, sizeof(ssv_stats));
 
   /* Use GPU-resident path when nucdb is uploaded and chunks have sufficient overlap */
   clock_gettime(CLOCK_MONOTONIC, &ts0);
@@ -2314,6 +2357,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
                                             sc_thresh, om->scale_b,
                                             ndb_step,
                                             &gpu_windows, &gpu_nwindows,
+                                            &ssv_stats,
                                             errbuf, errbuf_size);
     free(h_offsets);
     free(h_lengths);
@@ -2327,11 +2371,13 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
                                    sc_thresh, om->scale_b,
                                    chunk_size, overlap,
                                    &gpu_windows, &gpu_nwindows,
+                                   &ssv_stats,
                                    errbuf, errbuf_size);
   }
   if (status != eslOK) return status;
   clock_gettime(CLOCK_MONOTONIC, &ts1);
   info->t_ssv += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
+  nhmmer_gpu_record_ssv_launch(info, &ssv_stats);
 
   if (gpu_nwindows == 0) { free(gpu_windows); return eslOK; }
 

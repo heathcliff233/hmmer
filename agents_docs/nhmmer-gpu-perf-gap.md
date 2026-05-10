@@ -28,11 +28,11 @@ Current all-sample result on 2026-05-10:
 
 | Path | Time | Hits |
 |------|:---:|:---:|
-| CPU-1 | 8.625s | 1476 |
-| CPU-4 | 2.570s | 1476 |
-| GPU-4 FASTA | 2.094s | 1476 |
-| GPU-4 no-overlap `.nucdb` | 1.786s | 1476 |
-| GPU-4 overlap `.nucdb` | 1.640s | 1476 |
+| CPU-1 | 7.859s | 1476 |
+| CPU-4 | 2.480s | 1476 |
+| GPU-4 FASTA | 2.356s | 1476 |
+| GPU-4 no-overlap `.nucdb` | 1.883s | 1476 |
+| GPU-4 overlap `.nucdb` | 1.709s | 1476 |
 
 Parity after the update was clean: MADE1 FASTA 465=465, MADE1 `.nucdb` 465=465, query_short FASTA 363=363, query_medium FASTA 648=648.
 
@@ -69,23 +69,32 @@ CPU-4 HMMER stage totals are summed across worker threads, so divide by four for
 
 GPU device-side filtering is faster than CPU for SSV, Viterbi, and Forward/Backward. After dynamic scheduling, CPU domain workflow is no longer the unexplained mismatch against CPU-16; the remaining GPU-side cost is setup/reconstruction plus CUDA Viterbi/parser overhead.
 
+Current launch occupancy from the instrumented query_medium fast overlap `.nucdb` run:
+
+| Stage | Last launch | Theoretical occupancy | Grid/SM coverage |
+|-------|-------------|:---:|:---:|
+| SSV longtarget | grid=800, block=32, smem=1002B | 50.0% (24 active warps/SM of 48) | 6.25x |
+| Scanning Viterbi | grid=1097, block=128, smem=24192B | 33.3% (16 active warps/SM of 48) | 8.51x |
+
+The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times. SSV occupancy is capped by one warp per block, while scanning Viterbi occupancy is capped by dynamic shared memory. Optimization should therefore focus on either improving per-window GPU DP efficiency/allocation reuse or reducing the CPU domain workflow and `.nucdb` reconstruction cost, not on creating more CUDA engines.
+
 ## Timing Breakdown From Current GPU Run
 
 ```
 GPU pipeline: vit_lt_in=8710 vit_lt_out=707 post_vit=707 post_fwd=341 hits=478
-GPU timing breakdown repeat range (1.141-1.319s total):
-  SSV longtarget:      0.103-0.109s
-  extend+merge:        0.003s
-  batch filter:        0.054-0.064s
-  scanning Viterbi:    0.138-0.289s
-  Forward prefilter:   0.028-0.039s
-  GPU FB parser:       0.011-0.014s
-  CPU workers:         0.801-0.812s
+GPU timing breakdown (1.264s search stages; 1.349s GPU loop wall):
+  SSV longtarget:      0.226s
+  extend+merge:        0.004s
+  batch filter:        0.064s
+  scanning Viterbi:    0.133s
+  Forward prefilter:   0.041s
+  GPU FB parser:       0.013s
+  CPU workers:         0.783s
     null scoring:      0.000s
     bias scoring:      0.002s
     CPU Backward:      0.000s
-    domain workflow:   0.782-0.799s
-    hit reporting:     0.002-0.004s
+    domain workflow:   0.761s
+    hit reporting:     0.002s
 ```
 
 `hits=478` in the diagnostic line is the internal `P7_TOPHITS` count before final output formatting. The comparable main-output hit-line count was 648 for both CPU-4 and GPU; strict `--tblout` rows were 215 for both with no diff.

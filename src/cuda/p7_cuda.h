@@ -208,6 +208,15 @@ typedef struct {
 } P7_CUDA_VIT_LT_WINDOW;
 
 typedef struct {
+  int      grid_blocks;
+  int      block_threads;
+  int      dynamic_smem_bytes;
+  int      active_blocks_per_sm;
+  int      active_warps_per_sm;
+  int      max_warps_per_sm;
+  int      sm_count;
+  double   theoretical_occupancy;
+  double   grid_sm_coverage;
   double   pack_seconds;
   double   h2d_seconds;
   double   threshold_kernel_seconds;
@@ -221,12 +230,27 @@ typedef struct {
   int      warps_per_block;
 } P7_CUDA_VIT_LT_STATS;
 
+typedef struct {
+  int      grid_blocks;
+  int      block_threads;
+  int      dynamic_smem_bytes;
+  int      active_blocks_per_sm;
+  int      active_warps_per_sm;
+  int      max_warps_per_sm;
+  int      sm_count;
+  int      nchunks;
+  int      chunk_size;
+  double   theoretical_occupancy;
+  double   grid_sm_coverage;
+} P7_CUDA_SSV_LT_STATS;
+
 extern int  p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                   const ESL_DSQ *dsq, int L,
                                   const uint8_t *ssv_scores_host, int Kp,
                                   uint8_t sc_thresh, float scale_b,
                                   int chunk_size, int overlap,
                                   P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
+                                  P7_CUDA_SSV_LT_STATS *stats,
                                   char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
@@ -236,6 +260,7 @@ extern int  p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_
                                           uint8_t sc_thresh, float scale_b,
                                           int step,
                                           P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
+                                          P7_CUDA_SSV_LT_STATS *stats,
                                           char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_engine_UploadNucdb(P7_CUDA_ENGINE *engine, const uint8_t *data, int64_t size,

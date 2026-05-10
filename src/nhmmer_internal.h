@@ -58,6 +58,18 @@ typedef struct {
   int64_t           n_fwd_survivor_windows;/* windows surviving GPU Forward prefilter */
   /* Timing breakdown (seconds, accumulated across strands) */
   double            t_ssv;           /* GPU SSV longtarget kernel */
+  int64_t           ssv_launches;     /* GPU SSV launch count */
+  int               ssv_grid_blocks;
+  int               ssv_block_threads;
+  int               ssv_dynamic_smem;
+  int               ssv_active_blocks_per_sm;
+  int               ssv_active_warps_per_sm;
+  int               ssv_max_warps_per_sm;
+  int               ssv_sm_count;
+  int               ssv_nchunks;
+  int               ssv_chunk_size;
+  double            ssv_theoretical_occupancy;
+  double            ssv_grid_sm_coverage;
   double            t_merge;         /* window extend + merge */
   double            t_batch_filter;  /* GPU batch SSV/bias/F1 filter */
   double            t_vit_lt;        /* GPU scanning Viterbi longtarget */
@@ -73,6 +85,16 @@ typedef struct {
   double            t_vit_alloc;     /* CUDA buffer growth/allocation inside p7_cuda_ViterbiLongtarget */
   double            t_vit_stream;    /* CUDA stream create/sync/destroy overhead in Viterbi helper */
   int64_t           vit_packed_bytes;/* Total packed Viterbi window bytes uploaded */
+  int64_t           vit_launches;     /* GPU scanning Viterbi launch count */
+  int               vit_grid_blocks;
+  int               vit_block_threads;
+  int               vit_dynamic_smem;
+  int               vit_active_blocks_per_sm;
+  int               vit_active_warps_per_sm;
+  int               vit_max_warps_per_sm;
+  int               vit_sm_count;
+  double            vit_theoretical_occupancy;
+  double            vit_grid_sm_coverage;
   double            t_fwd_prefilter; /* GPU Forward pre-filter */
   double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
   double            t_cpu_workers;   /* CPU domaindef + hit reporting (wallclock around threaded section) */

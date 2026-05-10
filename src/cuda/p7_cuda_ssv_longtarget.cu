@@ -216,6 +216,45 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
   }
 }
 
+static void
+ssv_longtarget_set_launch_stats(P7_CUDA_SSV_LT_STATS *stats, int nchunks, int chunk_size,
+                                int block_threads, size_t shmem)
+{
+  cudaDeviceProp prop;
+  int dev = 0;
+  int active_blocks = 0;
+
+  if (stats == NULL) return;
+
+  memset(stats, 0, sizeof(*stats));
+  stats->grid_blocks        = nchunks;
+  stats->block_threads      = block_threads;
+  stats->dynamic_smem_bytes = (int) shmem;
+  stats->nchunks            = nchunks;
+  stats->chunk_size         = chunk_size;
+
+  if (cudaGetDevice(&dev) != cudaSuccess) return;
+  if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return;
+  if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks,
+                                                    cuda_ssv_longtarget_kernel,
+                                                    block_threads, shmem) != cudaSuccess)
+    return;
+
+  {
+    int warps_per_block = (block_threads + 31) / 32;
+    stats->active_blocks_per_sm    = active_blocks;
+    stats->active_warps_per_sm     = active_blocks * warps_per_block;
+    stats->max_warps_per_sm        = prop.maxThreadsPerMultiProcessor / 32;
+    stats->sm_count                = prop.multiProcessorCount;
+    stats->theoretical_occupancy   = stats->max_warps_per_sm > 0
+                                      ? (double)stats->active_warps_per_sm / (double)stats->max_warps_per_sm
+                                      : 0.0;
+    stats->grid_sm_coverage        = stats->sm_count > 0
+                                      ? (double)nchunks / (double)stats->sm_count
+                                      : 0.0;
+  }
+}
+
 /* Host wrapper: chunk a long sequence, upload, launch kernel, download windows.
  *
  * The caller provides the full digital sequence (dsq[1..L]) and the model
@@ -233,6 +272,7 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                       uint8_t sc_thresh, float scale_b,
                       int chunk_size, int overlap,
                       P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
+                      P7_CUDA_SSV_LT_STATS *stats,
                       char *errbuf, int errbuf_size)
 {
   int status = eslOK;
@@ -333,6 +373,7 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   /* Launch kernel */
   {
     size_t shmem = (size_t)M * 2;
+    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, shmem);
     cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
       engine->d_lt_dsq, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
       cuom->d_rbv, engine->d_lt_ssv_scores,
@@ -388,6 +429,7 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
                               uint8_t sc_thresh, float scale_b,
                               int step,
                               P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
+                              P7_CUDA_SSV_LT_STATS *stats,
                               char *errbuf, int errbuf_size)
 {
   int status = eslOK;
@@ -438,6 +480,7 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   /* Launch kernel — data comes directly from resident nucdb on device */
   {
     size_t shmem = (size_t)M * 2;
+    ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, shmem);
     cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
       d_nucdb_data, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
       cuom->d_rbv, engine->d_lt_ssv_scores,
