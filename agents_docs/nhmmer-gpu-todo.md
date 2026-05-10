@@ -4,7 +4,7 @@
 
 The accepted default path is GPU filters + GPU scanning Viterbi + exact-F3 GPU Forward prefilter + GPU Forward/Backward parser handoff + CPU domain/hit processing. `hmmnucdb` defaults to overlap chunking (`--overlap 2001`) for the fast GPU-resident SSV path. Historical phase notes below include GPU domain-rescoring experiments that are not the accepted default continuation path.
 
-Current query_medium smoke result on chr22, RTX 4090, `--cpu 4`: CPU-4 FASTA 1.87s HMMER elapsed / 648 output rows; GPU default fast overlap `.nucdb` 1.40s HMMER elapsed / 648 output rows. GPU worker time is mostly CPU domain workflow; CPU Backward is 0.000s in the default handoff path.
+Current query_medium smoke result on chr22, RTX 4090, `--cpu 4`: speed script measured CPU-4 FASTA 1.669s / 648 main-output hit lines and GPU default fast overlap `.nucdb` 1.232s / 648 hit lines; focused repeats showed CPU-4 wall 1.77s and GPU fast `.nucdb` wall 1.53-1.86s. Strict `--tblout` CPU FASTA versus GPU fast `.nucdb` rows both produced 215 rows with no diff. GPU worker time is mostly CPU domain workflow; CPU Backward is 0.000s in the default handoff path.
 
 ## Completed: GPU Forward/Backward Parser Handoff
 

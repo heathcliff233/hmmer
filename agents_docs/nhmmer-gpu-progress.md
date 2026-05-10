@@ -4,7 +4,7 @@ Last updated: 2026-05-10
 
 ## Architecture
 
-GPU nhmmer uses a **GPU SSV + GPU filters + GPU scanning Viterbi + GPU Forward prefilter + GPU Forward/Backward parser handoff + threaded CPU domain hit reporting** pipeline by default. The GPU Forward prefilter is default-on with `--gpu` and reduces post-Viterbi survivors before CPU workers. GPU Forward/Backward parser matrix reuse is also default-on with `--gpu`; it hands GPU xmx matrices to CPU domain processing after enforcing the exact F3 gate. The single-score GPU Viterbi prefilter is no longer default; enable hidden `--gpu-vit-prefilter` only for diagnostics.
+GPU nhmmer uses a **GPU SSV + GPU filters + GPU scanning Viterbi + GPU Forward prefilter + GPU Forward/Backward parser handoff + threaded CPU domain hit reporting** pipeline by default. The GPU Forward prefilter is default-on with `--gpu` and reduces post-Viterbi survivors before CPU workers. GPU Forward/Backward parser matrix reuse is also default-on with `--gpu`; it hands GPU xmx matrices to CPU domain processing after enforcing the exact F3 gate. The previous extra single-score GPU Viterbi prefilter has been removed; GPU scanning Viterbi is the CPU-equivalent Viterbi boundary.
 
 ```
 Input FASTA/nucdb
@@ -23,11 +23,6 @@ Input FASTA/nucdb
 │ GPU Batch Filter (MSV + null + bias + F1 gating)    │
 │   → synthetic ESL_DSQDATA_CHUNK (zero-copy)         │
 │   → removes non-survivors                           │
-└──────────────────────┬──────────────────────────────┘
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│ Optional GPU Viterbi Pre-filter (single-score F2)   │
-│   → hidden --gpu-vit-prefilter diagnostic path      │
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
@@ -106,7 +101,6 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-o0.nucdb.nucdb
 
 # Hidden flags (group 99, not shown in help)
 --gpu-batch             # SSV/bias batch on GPU (default-on with --gpu)
---gpu-vit-prefilter     # Optional single-score Viterbi pre-filter before scanning Viterbi
 --gpu-vit-longtarget    # Scanning Viterbi (default-on with --gpu)
 --gpu-fwd-prefilter     # Deprecated no-op: GPU Fwd/Bwd parser reuse is default-on
 --gpu-no-fwd-prefilter  # Diagnostic: use older CPU Fwd/Bwd continuation after GPU Forward prefilter
@@ -123,37 +117,38 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-o0.nucdb.nucdb
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-1 | 0.865s / 465 | 1.719s / 363 | 6.014s / 648 |
-| CPU-4 | 0.307s / 465 | 0.383s / 363 | 1.734s / 648 |
-| GPU-4 FASTA | 1.114s / 462 | 1.203s / 363 | 2.384s / 648 |
-| GPU-4 nucdb | 0.851s / 462 | 0.996s / 363 | 2.261s / 648 |
-| GPU-4 overlap-nucdb | 0.952s / 462 | 0.858s / 363 | 2.109s / 648 |
+| CPU-1 | 0.849s / 465 | 1.625s / 363 | 5.995s / 648 |
+| CPU-4 | 0.268s / 465 | 0.463s / 363 | 1.669s / 648 |
+| GPU-4 FASTA | 0.669s / 465 | 0.689s / 363 | 1.589s / 648 |
+| GPU-4 nucdb | 0.677s / 465 | 0.716s / 363 | 1.340s / 648 |
+| GPU-4 overlap-nucdb | 0.468s / 465 | 0.561s / 363 | 1.232s / 648 |
 
-The table above is historical quick-benchmark output. It is useful as old context, but not as the current default result: it predates the GPU window-ordering fixes and mixed old default runs with targeted Fwd/Bwd handoff runs.
+This table is the current `test-speed/x-nhmmer-gpu-bench .` result after removing the extra single-score GPU Viterbi prefilter. The older 2.109s overlap `.nucdb` result was stale: it predated the GPU window-ordering fixes and mixed old default runs with targeted Fwd/Bwd handoff runs.
 
-Current controlled query_medium rerun on 2026-05-10:
+Current strict query_medium parity audit on 2026-05-10:
 
-| Path | Target | Output rows | HMMER elapsed | `/usr/bin/time` wall |
-|------|--------|:---:|:---:|:---:|
-| CPU-4 | `chr22.fa` | 648 | 1.87s | 1.89s |
-| GPU default, ordinary no-overlap nucdb | `chr22.nucdb.nucdb` | 648 | 1.36s | 1.71s |
-| GPU default, fast overlap nucdb | `chr22-overlap.nucdb.nucdb` | 648 | 1.40s | 1.75s |
+| Path | Target | Main-output hit lines | `--tblout` rows |
+|------|--------|:---:|:---:|
+| CPU-4 | `chr22.fa` | 648 | 215 |
+| GPU default, fast overlap nucdb | `chr22-overlap.nucdb.nucdb` | 648 | 215 |
 
-As of this update, `hmmnucdb` defaults to the fast overlap construction (`--overlap 2001`) and `nhmmer --gpu` defaults to GPU Fwd/Bwd parser handoff. The code-path verification is nonzero `GPU FB parser` time with zero CPU Forward/Backward stage time. The old `1.91s` versus `2.109s` discrepancy was apples-to-oranges and stale: a targeted handoff/no-overlap run was compared to an older quick-benchmark overlap run before GPU SSV window sorting and GPU Viterbi seed local-coordinate merging fixed downstream worker inflation.
+The CPU and GPU `--tblout` rows had no diff. `hmmnucdb` defaults to the fast overlap construction (`--overlap 2001`) and `nhmmer --gpu` defaults to GPU Fwd/Bwd parser handoff. The code-path verification is nonzero `GPU FB parser` time with zero CPU Forward/Backward stage time.
 
 Current fast `.nucdb` GPU breakdown for query_medium:
 
 | Bucket | Time |
 |--------|:---:|
-| SSV longtarget | 0.107s |
-| extend+merge | 0.001s |
-| batch filter | 0.099s |
-| scanning Viterbi | 0.015s |
-| Forward prefilter | 0.038s |
-| GPU FB parser | 0.013s |
-| CPU workers | 1.024s |
-| worker domain workflow | 1.013s |
+| SSV longtarget | 0.103-0.109s |
+| extend+merge | 0.003s |
+| batch filter | 0.054-0.064s |
+| scanning Viterbi | 0.138-0.289s |
+| Forward prefilter | 0.028-0.039s |
+| GPU FB parser | 0.011-0.014s |
+| CPU workers | 0.801-0.812s |
+| worker domain workflow | 0.782-0.799s |
 | worker CPU Backward | 0.000s |
+
+Focused repeats after the speed-script run showed GPU wall 1.53-1.86s. The largest variance was scanning Viterbi; CPU domain workflow stayed the dominant and relatively stable bucket.
 
 ### Historical GPU Domain Rescoring Performance
 
@@ -173,7 +168,7 @@ The default path always runs the GPU Forward prefilter with the exact F3 gate, t
 
 GPU Backward parser matrix handoff was tested after fixing the CPU diagnostic length configuration to use `window_len` rather than `min(window_len, om->max_length)`. `--gpu-compare` shows Forward/Backward parser scores match CPU to float noise. query_short showed a 1 bp envelope-start shift in one coordinate comparison, and a similar 1 bp envelope-start jitter can occur between repeated default `--gpu` runs, so this is a boundary-sensitivity issue rather than a hit-count regression.
 
-Current Forward-prefilter evidence: on query_medium fast overlap `.nucdb`, the default Fwd/Bwd handoff kept 511/874 post-Viterbi windows (58.5%) and ran in 1.40s HMMER elapsed versus 1.87s for CPU-4. Worker CPU Backward was 0.000s, confirming the parser handoff rather than the older CPU Forward/Backward continuation.
+Current Forward-prefilter evidence: on query_medium fast overlap `.nucdb`, the default Fwd/Bwd handoff kept 341/707 post-Viterbi windows (48.2%) in the focused timing run and the speed script measured 1.232s versus 1.669s for CPU-4. Worker CPU Backward was 0.000s, confirming the parser handoff rather than the older CPU Forward/Backward continuation.
 
 Implementation:
 - `NHMMER_GPU_WORKER` carries `prefilter_xf`, `prefilter_fwdsc`, `prefilter_xf_offset` (non-owning pointers into shared buffers)
@@ -200,9 +195,9 @@ Fixes:
 - Clamp overlap accounting for `pos_past_vit` and `pos_past_fwd` so overlapping windows cannot underflow residue counters.
 - Use exact F3 gating in the GPU Forward prefilter.
 
-### Default Viterbi Prefilter Policy (2026-05-10)
+### Removed Single-Score Viterbi Prefilter (2026-05-10)
 
-The single-score GPU Viterbi prefilter (`--gpu-vit-prefilter`) is opt-in. It is useful for stage diagnostics, but the fastest accepted default is `.nucdb` overlap input with GPU SSV, GPU batch MSV/null/bias filtering, GPU scanning Viterbi, GPU Forward prefilter, and GPU Fwd/Bwd parser handoff. Keeping the single-score prefilter out of the default also avoids adding another sensitivity boundary before scanning Viterbi unless a benchmark shows a clear win.
+The previous single-score GPU Viterbi prefilter (`--gpu-vit-prefilter`) was removed from nucleotide `nhmmer`. It was an extra GPU-only gate before the real long-target scanning Viterbi stage and had no direct CPU-reference equivalent. The accepted path is `.nucdb` overlap input with GPU SSV, GPU batch MSV/null/bias filtering, GPU scanning Viterbi, GPU Forward prefilter, and GPU Fwd/Bwd parser handoff.
 
 ### Nucdb Reverse-Strand Coordinate Fix (2026-05-10)
 

@@ -294,107 +294,6 @@ nhmmer_gpu_batch_filter(NHMMER_GPU_INFO *info, NHMMER_GPU_WINDOW_BATCH *wb,
   return eslOK;
 }
 
-/* GPU Viterbi pre-filter on a subset of windows.
- * Windows that fail GPU Viterbi (single-score < threshold) cannot produce
- * sub-windows in scanning Viterbi, so they are removed.
- * Filters wl in-place, returns survivor count in *ret_nsurv. */
-static int
-nhmmer_gpu_viterbi_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
-                             NHMMER_GPU_WINDOW_BATCH *wb,
-                             P7_HMM_WINDOWLIST *wl, int *ret_nsurv,
-                             char *errbuf, int errbuf_size)
-{
-  int       status;
-  int       N = wl->count;
-  float    *vit_scores  = NULL;
-  int      *vit_status  = NULL;
-  float    *filtersc    = NULL;
-  int      *passed      = NULL;
-  int      *seqidx      = NULL;
-  float    *bias_scores = NULL;
-  int       nsurv = 0;
-  int       i;
-  P7_OPROFILE *om = info->om;
-  P7_PIPELINE *pli = info->pli;
-
-  nhmmer_gpu_window_batch_pack(wb, sq, wl);
-
-  ESL_ALLOC(vit_scores, sizeof(float) * N);
-  ESL_ALLOC(vit_status, sizeof(int)   * N);
-  ESL_ALLOC(filtersc,   sizeof(float) * N);
-  ESL_ALLOC(passed,     sizeof(int)   * N);
-  ESL_ALLOC(seqidx,     sizeof(int)   * N);
-  ESL_ALLOC(bias_scores, sizeof(float) * N);
-
-  /* GPU null scores */
-  float *null_scores = NULL;
-  ESL_ALLOC(null_scores, sizeof(float) * N);
-  status = p7_cuda_NullScoreDsqdataChunk(info->cuda_engine, info->bg, &wb->chu, null_scores, errbuf, errbuf_size);
-  if (status != eslOK) goto ERROR;
-
-  /* GPU bias scores */
-  if (pli->do_biasfilter) {
-    status = p7_cuda_BiasFilterDsqdataChunk(info->cuda_engine, info->bg, &wb->chu, bias_scores, errbuf, errbuf_size);
-    if (status != eslOK) goto ERROR;
-  }
-
-  for (i = 0; i < N; i++) {
-    seqidx[i] = i;
-
-    int   window_len = (int)wb->lengths[i];
-    int   F2_L      = ESL_MIN(window_len, pli->B2);
-    float nullsc    = null_scores[i];
-
-    if (pli->do_biasfilter) {
-      float bias_filtersc_val = bias_scores[i] - nullsc;
-      filtersc[i] = nullsc + (bias_filtersc_val * ((F2_L > window_len) ? 1.0f : (float)F2_L / window_len));
-    } else {
-      filtersc[i] = nullsc;
-    }
-  }
-
-  status = p7_cuda_ViterbiFilterDsqdataSubset(info->cuda_engine, info->cuda_msv,
-                                              &wb->chu, seqidx, N,
-                                              filtersc,
-                                              om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
-                                              pli->F2,
-                                              vit_scores, vit_status, passed,
-                                              1,
-                                              errbuf, errbuf_size);
-  if (status != eslOK) goto ERROR;
-
-  for (i = 0; i < N; i++) {
-    if (passed[i]) {
-      if (nsurv != i)
-        wl->windows[nsurv] = wl->windows[i];
-      nsurv++;
-    }
-  }
-
-  wl->count = nsurv;
-  *ret_nsurv = nsurv;
-
-  free(vit_scores);
-  free(vit_status);
-  free(filtersc);
-  free(passed);
-  free(seqidx);
-  free(bias_scores);
-  free(null_scores);
-  return eslOK;
-
-ERROR:
-  if (vit_scores)  free(vit_scores);
-  if (vit_status)  free(vit_status);
-  if (filtersc)    free(filtersc);
-  if (passed)      free(passed);
-  if (seqidx)      free(seqidx);
-  if (bias_scores) free(bias_scores);
-  if (null_scores) free(null_scores);
-  *ret_nsurv = 0;
-  return status;
-}
-
 typedef struct {
   P7_OPROFILE      *om;
   P7_BG            *bg;
@@ -1779,23 +1678,6 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       return eslOK;
     }
 
-    /* GPU Viterbi pre-filter: remove windows whose single-score Viterbi < F2 */
-    if (info->do_gpu_vit && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
-      status = nhmmer_gpu_viterbi_prefilter(info, sq, &wb, &msv_windowlist, &nsurv,
-                                            errbuf, errbuf_size);
-      if (status != eslOK) {
-        fprintf(stderr, "GPU Viterbi pre-filter failed: %s\n", errbuf);
-        nhmmer_gpu_window_batch_free(&wb);
-        goto ERROR;
-      }
-
-      if (msv_windowlist.count == 0) {
-        nhmmer_gpu_window_batch_free(&wb);
-        free(msv_windowlist.windows);
-        return eslOK;
-      }
-    }
-
     nhmmer_gpu_window_batch_free(&wb);
   }
   clock_gettime(CLOCK_MONOTONIC, &ts1);
@@ -2243,7 +2125,7 @@ ERROR:
 
 /* Process one strand's worth of pre-built chunks from nucdb.
  * Chunks are packed as synthetic batch and run through GPU SSV+bias+F1
- * then GPU Viterbi pre-filter, then threaded CPU downstream. */
+ * then GPU scanning Viterbi, then threaded CPU downstream. */
 static int
 nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
                                 const P7_NUCDB *ndb,
@@ -2379,20 +2261,6 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       clock_gettime(CLOCK_MONOTONIC, &ts1);
       info->t_batch_filter += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
       return eslOK;
-    }
-
-    if (info->do_gpu_vit && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
-      status = nhmmer_gpu_viterbi_prefilter(info, sq, &wb, &msv_windowlist, &nsurv,
-                                            errbuf, errbuf_size);
-      if (status != eslOK) { nhmmer_gpu_window_batch_free(&wb); goto ERROR; }
-
-      if (msv_windowlist.count == 0) {
-        nhmmer_gpu_window_batch_free(&wb);
-        free(msv_windowlist.windows);
-        clock_gettime(CLOCK_MONOTONIC, &ts1);
-        info->t_batch_filter += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
-        return eslOK;
-      }
     }
 
     nhmmer_gpu_window_batch_free(&wb);

@@ -188,7 +188,6 @@ static ESL_OPTIONS options[] = {
   { "--gpu-device",       eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,        "CUDA device id for --gpu",                                     99 },
   { "--gpu-chunk-size",   eslARG_INT, "65536", NULL, "n>0", NULL, "--gpu", NULL,       "chunk size (residues) for GPU SSV longtarget scan",             99 },
   { "--gpu-batch",        eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU batch SSV/bias filtering on merged windows",            99 },
-  { "--gpu-vit-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Viterbi as pre-filter before scanning Viterbi",         99 },
   { "--gpu-vit-longtarget",eslARG_NONE, FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU scanning Viterbi for longtarget sub-window detection",   99 },
   { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "deprecated: GPU Forward/Backward parser reuse is default with --gpu", 99 },
   { "--gpu-no-fwd-prefilter",eslARG_NONE,FALSE, NULL, NULL,    NULL, "--gpu", "--gpu-fwd-prefilter", "diagnostic: disable default GPU Forward/Backward parser reuse", 99 },
@@ -1139,7 +1138,6 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.gpu_chunk_size = esl_opt_GetInteger(go, "--gpu-chunk-size");
         gpu_info.ncpus          = ncpus;
         gpu_info.do_gpu_batch   = TRUE;
-        gpu_info.do_gpu_vit     = esl_opt_GetBoolean(go, "--gpu-vit-prefilter");
         gpu_info.do_gpu_vit_lt  = TRUE;
         gpu_info.do_gpu_fwd     = ! esl_opt_GetBoolean(go, "--gpu-no-fwd-prefilter");
         gpu_info.do_cpu_postmsv = esl_opt_GetBoolean(go, "--gpu-cpu-postmsv");

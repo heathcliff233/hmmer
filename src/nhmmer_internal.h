@@ -39,7 +39,6 @@ typedef struct {
   int               gpu_chunk_size;
   int               ncpus;
   int               do_gpu_batch;       /* --gpu-batch: batch SSV/bias on GPU */
-  int               do_gpu_vit;         /* --gpu-vit-prefilter */
   int               do_gpu_vit_lt;      /* --gpu-vit-longtarget: scanning Viterbi on GPU */
   int               do_gpu_fwd;         /* default GPU Fwd/Bwd parser handoff */
   int               do_cpu_postmsv;     /* --gpu-cpu-postmsv: bypass GPU Vit+Fwd, use CPU postSSV */
@@ -58,7 +57,7 @@ typedef struct {
   /* Timing breakdown (seconds, accumulated across strands) */
   double            t_ssv;           /* GPU SSV longtarget kernel */
   double            t_merge;         /* window extend + merge */
-  double            t_batch_filter;  /* GPU batch SSV/bias/F1 + Viterbi pre-filter */
+  double            t_batch_filter;  /* GPU batch SSV/bias/F1 filter */
   double            t_vit_lt;        /* GPU scanning Viterbi longtarget */
   double            t_fwd_prefilter; /* GPU Forward pre-filter */
   double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
