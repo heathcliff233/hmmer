@@ -1345,6 +1345,31 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       for (i = 0; i < infocnt; ++i)
           p7_tophits_ComputeNhmmerEvalues(info[i].th, resCnt, info[i].om->max_length);
 
+#ifdef HMMER_THREADS
+      if (ncpus > 0
+#ifdef HMMER_CUDA
+          && !esl_opt_GetBoolean(go, "--gpu")
+#endif
+          && getenv("HMMER_NHMMER_CPU_WALL_TRACE") != NULL) {
+        double w_null = 0.0, w_ssv = 0.0, w_msv = 0.0, w_bias = 0.0;
+        double w_vit = 0.0, w_fwd = 0.0, w_bck = 0.0, w_domain = 0.0, w_null2 = 0.0;
+        for (i = 0; i < infocnt; ++i) {
+          if (info[i].pli->time_null > w_null) w_null = info[i].pli->time_null;
+          if (info[i].pli->time_ssv > w_ssv) w_ssv = info[i].pli->time_ssv;
+          if (info[i].pli->time_msv > w_msv) w_msv = info[i].pli->time_msv;
+          if (info[i].pli->time_bias > w_bias) w_bias = info[i].pli->time_bias;
+          if (info[i].pli->time_vit > w_vit) w_vit = info[i].pli->time_vit;
+          if (info[i].pli->time_fwd > w_fwd) w_fwd = info[i].pli->time_fwd;
+          if (info[i].pli->time_bck > w_bck) w_bck = info[i].pli->time_bck;
+          if (info[i].pli->time_domain > w_domain) w_domain = info[i].pli->time_domain;
+          if (info[i].pli->time_null2 + info[i].pli->time_output > w_null2)
+            w_null2 = info[i].pli->time_null2 + info[i].pli->time_output;
+        }
+        fprintf(stderr, "CPU threaded wall-stage estimate: workers=%d null=%.6fs ssv=%.6fs msv=%.6fs bias=%.6fs vit=%.6fs fwd=%.6fs bck=%.6fs domain=%.6fs null2_output=%.6fs\n",
+                ncpus, w_null, w_ssv, w_msv, w_bias, w_vit, w_fwd, w_bck, w_domain, w_null2);
+      }
+#endif
+
       /* merge the results of the search results */
       for (i = 1; i < infocnt; ++i) {
           p7_tophits_Merge(info[0].th, info[i].th);

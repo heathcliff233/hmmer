@@ -28,11 +28,11 @@ Current all-sample result on 2026-05-10:
 
 | Path | Time | Hits |
 |------|:---:|:---:|
-| CPU-1 | 8.333s | 1476 |
-| CPU-4 | 2.297s | 1476 |
-| GPU-4 FASTA | 2.982s | 1476 |
-| GPU-4 no-overlap `.nucdb` | 2.022s | 1476 |
-| GPU-4 overlap `.nucdb` | 1.798s | 1476 |
+| CPU-1 | 8.625s | 1476 |
+| CPU-4 | 2.570s | 1476 |
+| GPU-4 FASTA | 2.094s | 1476 |
+| GPU-4 no-overlap `.nucdb` | 1.786s | 1476 |
+| GPU-4 overlap `.nucdb` | 1.640s | 1476 |
 
 Parity after the update was clean: MADE1 FASTA 465=465, MADE1 `.nucdb` 465=465, query_short FASTA 363=363, query_medium FASTA 648=648.
 
@@ -50,7 +50,7 @@ The combined overlap `.nucdb` timing run accounted for the previously confusing 
 
 Shared setup/teardown for that process: CUDA engine create 0.446s, `.nucdb` open/mmap 0.000s, `.nucdb` upload 0.029s, CUDA destroy 0.003s, summed GPU loop wall 1.710s, process outside search 0.495s, process elapsed 2.205s.
 
-The remaining in-search optimization target is unchanged: query_medium is dominated by CPU domain workflow after GPU parser handoff. The hidden outside-search cost is now explicit: in the focused combined run it was mostly CUDA engine setup, not `.nucdb` mmap/upload or per-query report work.
+The previous in-search mismatch was static GPU CPU-continuation scheduling. GPU workers were assigned contiguous equal-window slices, but domain-definition cost depends on region/envelope complexity. Dynamic survivor-window scheduling now lets workers pull work from a shared index and brings GPU-16 query_medium domain wall time (`0.239-0.258s`) in line with the CPU-16 wall-stage trace (`0.250s`). The remaining gap is mostly CUDA setup, `.nucdb` reconstruction, and GPU-side kernel/allocation variance rather than inflated CPU domain workflow.
 
 ## Stage Breakdown
 
@@ -67,7 +67,7 @@ CPU-4 HMMER stage totals are summed across worker threads, so divide by four for
 | Output/null2 | 0.000s | ~0.000s | 0.002-0.004s hit reporting |
 | Total measured wall | - | 1.77s focused | 1.53-1.86s focused repeats |
 
-GPU device-side filtering is faster than CPU for SSV, Viterbi, and Forward/Backward. The dominant remaining GPU-side cost is not a CUDA kernel; it is CPU domain workflow after parser handoff.
+GPU device-side filtering is faster than CPU for SSV, Viterbi, and Forward/Backward. After dynamic scheduling, CPU domain workflow is no longer the unexplained mismatch against CPU-16; the remaining GPU-side cost is setup/reconstruction plus CUDA Viterbi/parser overhead.
 
 ## Timing Breakdown From Current GPU Run
 

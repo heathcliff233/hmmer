@@ -323,6 +323,7 @@ typedef struct {
   float            *prefilter_xf;       /* precomputed forward special cells from GPU */
   float            *prefilter_fwdsc;    /* precomputed forward scores from GPU */
   size_t            prefilter_xf_offset; /* byte offset into prefilter_xf for this worker's first window */
+  size_t           *prefilter_x_offsets; /* per-window offsets for dynamic scheduling */
   /* GPU FB parser results (non-owning pointers into shared buffers) */
   float            *gpu_xf;
   float            *gpu_xb;
@@ -335,7 +336,29 @@ typedef struct {
   P7_CUDA_MSVPROFILE *cuda_msv;
   int               worker_id;
   int               do_domain_trace;
+#ifdef HMMER_THREADS
+  pthread_mutex_t  *work_mutex;
+#endif
+  int              *next_window;
+  int               global_nwindows;
 } NHMMER_GPU_WORKER;
+
+static int
+nhmmer_gpu_worker_next_window(NHMMER_GPU_WORKER *w)
+{
+  int idx;
+
+  if (w->next_window == NULL) return -1;
+#ifdef HMMER_THREADS
+  if (w->work_mutex) pthread_mutex_lock(w->work_mutex);
+#endif
+  idx = *(w->next_window);
+  if (idx < w->global_nwindows) (*(w->next_window))++;
+#ifdef HMMER_THREADS
+  if (w->work_mutex) pthread_mutex_unlock(w->work_mutex);
+#endif
+  return (idx < w->global_nwindows) ? idx : -1;
+}
 
 static void
 nhmmer_gpu_trace_domain_window(const NHMMER_GPU_WORKER *w, const char *path,
@@ -404,6 +427,12 @@ nhmmer_gpu_worker_init(NHMMER_GPU_WORKER *w, const NHMMER_GPU_INFO *info)
   w->cuda_msv        = info->cuda_msv;
   w->worker_id       = -1;
   w->do_domain_trace = info->do_domain_trace;
+  w->next_window     = NULL;
+  w->global_nwindows = 0;
+  w->prefilter_x_offsets = NULL;
+#ifdef HMMER_THREADS
+  w->work_mutex      = NULL;
+#endif
   return eslOK;
 
 ERROR:
@@ -468,9 +497,12 @@ nhmmer_gpu_worker_process_post_vit(NHMMER_GPU_WORKER *w)
 {
   int          i;
   int          overlap = 0;
+  int          use_dynamic = (w->next_window != NULL);
   P7_HMM_WINDOW *window;
 
-  for (i = 0; i < w->nwindows; i++) {
+  for (i = use_dynamic ? nhmmer_gpu_worker_next_window(w) : 0;
+       use_dynamic ? (i >= 0) : (i < w->nwindows);
+       i = use_dynamic ? nhmmer_gpu_worker_next_window(w) : i + 1) {
     window = w->windows + i;
     ESL_DSQ *subseq = w->sq->dsq + window->n - 1;
 
@@ -493,7 +525,7 @@ nhmmer_gpu_worker_process_post_vit(NHMMER_GPU_WORKER *w)
     nhmmer_gpu_trace_domain_window(w, "post_vit", i, window, domain_before, w->status);
     if (w->status != eslOK) return;
 
-    if (overlap == -1 && i < w->nwindows - 1) {
+    if (overlap == -1 && i < w->global_nwindows - 1) {
       overlap = ESL_MAX(0, (int)(window->n + window->length) - (int)w->windows[i+1].n);
     } else {
       overlap = 0;
@@ -512,10 +544,12 @@ nhmmer_gpu_worker_process_post_fwd(NHMMER_GPU_WORKER *w)
 {
   int          i;
   int          overlap = 0;
+  int          use_dynamic = (w->next_window != NULL);
   P7_HMM_WINDOW *window;
-  size_t       xf_cursor = 0;
 
-  for (i = 0; i < w->nwindows; i++) {
+  for (i = use_dynamic ? nhmmer_gpu_worker_next_window(w) : 0;
+       use_dynamic ? (i >= 0) : (i < w->nwindows);
+       i = use_dynamic ? nhmmer_gpu_worker_next_window(w) : i + 1) {
     window = w->windows + i;
     ESL_DSQ *subseq = w->sq->dsq + window->n - 1;
     int window_len = window->length;
@@ -531,8 +565,8 @@ nhmmer_gpu_worker_process_post_fwd(NHMMER_GPU_WORKER *w)
     p7_oprofile_ReconfigRestLength(w->om, window_len);
 
     /* Inject GPU-precomputed forward special cells into oxf->xmx */
-    float *win_xf = w->prefilter_xf + w->prefilter_xf_offset + xf_cursor;
     size_t xcells = (size_t)(window_len + 1) * p7X_NXCELLS;
+    float *win_xf = w->prefilter_xf + (w->prefilter_x_offsets ? w->prefilter_x_offsets[i] : w->prefilter_xf_offset);
     memcpy(w->pli->oxf->xmx, win_xf, xcells * sizeof(float));
     w->pli->oxf->M = w->om->M;
     w->pli->oxf->L = window_len;
@@ -543,7 +577,6 @@ nhmmer_gpu_worker_process_post_fwd(NHMMER_GPU_WORKER *w)
       float s = win_xf[r * p7X_NXCELLS + p7X_SCALE];
       if (s > 1.0f) w->pli->oxf->totscale += logf(s);
     }
-    xf_cursor += xcells;
 
     /* Call existing postViterbi but with oxf already filled.
      * p7_pli_postViterbi_LongTarget will call p7_ForwardParser which
@@ -560,7 +593,7 @@ nhmmer_gpu_worker_process_post_fwd(NHMMER_GPU_WORKER *w)
     nhmmer_gpu_trace_domain_window(w, "post_fwd", i, window, domain_before, w->status);
     if (w->status != eslOK) return;
 
-    if (overlap == -1 && i < w->nwindows - 1) {
+    if (overlap == -1 && i < w->global_nwindows - 1) {
       overlap = ESL_MAX(0, (int)(window->n + window->length) - (int)w->windows[i+1].n);
     } else {
       overlap = 0;
@@ -578,9 +611,12 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
 {
   int          i;
   int          overlap = 0;
+  int          use_dynamic = (w->next_window != NULL);
   P7_HMM_WINDOW *window;
 
-  for (i = 0; i < w->nwindows; i++) {
+  for (i = use_dynamic ? nhmmer_gpu_worker_next_window(w) : 0;
+       use_dynamic ? (i >= 0) : (i < w->nwindows);
+       i = use_dynamic ? nhmmer_gpu_worker_next_window(w) : i + 1) {
     window = w->windows + i;
     ESL_DSQ *subseq = w->sq->dsq + window->n - 1;
     int window_len = window->length;
@@ -625,7 +661,7 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
     nhmmer_gpu_trace_domain_window(w, "post_fb", i, window, domain_before, w->status);
     if (w->status != eslOK) return;
 
-    if (overlap == -1 && i < w->nwindows - 1) {
+    if (overlap == -1 && i < w->global_nwindows - 1) {
       overlap = ESL_MAX(0, (int)(window->n + window->length) - (int)w->windows[i+1].n);
     } else {
       overlap = 0;
@@ -1874,14 +1910,14 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     if (ncpus_vlt > 1) {
       NHMMER_GPU_WORKER *workers = NULL;
       pthread_t         *threads = NULL;
+      pthread_mutex_t    work_mutex;
       int                nworkers = ncpus_vlt;
-      int                windows_per_thread = nfwd_surv / nworkers;
-      int                remainder = nfwd_surv % nworkers;
-      int                offset = 0;
+      int                next_window = 0;
 
       ESL_ALLOC(workers, sizeof(NHMMER_GPU_WORKER) * nworkers);
       ESL_ALLOC(threads, sizeof(pthread_t) * nworkers);
       memset(workers, 0, sizeof(NHMMER_GPU_WORKER) * nworkers);
+      pthread_mutex_init(&work_mutex, NULL);
 
       for (i = 0; i < nworkers; i++) {
         status = nhmmer_gpu_worker_init(&workers[i], info);
@@ -1891,19 +1927,22 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
         workers[i].worker_id       = i;
         workers[i].seq_id          = seq_id;
         workers[i].complementarity = complementarity;
-        workers[i].nwindows        = windows_per_thread + (i < remainder ? 1 : 0);
-        workers[i].windows         = fwd_survivors + offset;
+        workers[i].nwindows        = nfwd_surv;
+        workers[i].global_nwindows = nfwd_surv;
+        workers[i].windows         = fwd_survivors;
+        workers[i].work_mutex      = &work_mutex;
+        workers[i].next_window     = &next_window;
         workers[i].use_gpu_fb      = gpu_fb_ok;
         workers[i].gpu_xf          = gpu_xf;
         workers[i].gpu_xb          = gpu_xb;
-        workers[i].gpu_scores      = gpu_fb_ok ? gpu_fb_scores + offset * 2 : NULL;
-        workers[i].gpu_statuses    = gpu_fb_ok ? gpu_fb_statuses + offset * 2 : NULL;
-        workers[i].gpu_x_offsets   = gpu_fb_ok ? gpu_fb_x_offsets + offset : NULL;
-        workers[i].gpu_L_eff       = gpu_fb_ok ? gpu_fb_L_eff + offset : NULL;
+        workers[i].gpu_scores      = gpu_fb_ok ? gpu_fb_scores : NULL;
+        workers[i].gpu_statuses    = gpu_fb_ok ? gpu_fb_statuses : NULL;
+        workers[i].gpu_x_offsets   = gpu_fb_ok ? gpu_fb_x_offsets : NULL;
+        workers[i].gpu_L_eff       = gpu_fb_ok ? gpu_fb_L_eff : NULL;
         workers[i].prefilter_xf       = (use_skip_fwd && !gpu_fb_ok) ? prefilter_xf : NULL;
-        workers[i].prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc + offset : NULL;
-        workers[i].prefilter_xf_offset = (use_skip_fwd && !gpu_fb_ok) ? surv_xf_offsets[offset] : 0;
-        offset += workers[i].nwindows;
+        workers[i].prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc : NULL;
+        workers[i].prefilter_x_offsets = (use_skip_fwd && !gpu_fb_ok) ? surv_xf_offsets : NULL;
+        workers[i].prefilter_xf_offset = 0;
       }
 
       for (i = 1; i < nworkers; i++) {
@@ -1955,6 +1994,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     VLT_THREAD_ERROR:
       for (i = 0; i < nworkers; i++)
         nhmmer_gpu_worker_destroy(&workers[i]);
+      pthread_mutex_destroy(&work_mutex);
       free(workers);
       free(threads);
       free(fwd_survivors);
@@ -1979,6 +2019,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       w.seq_id          = seq_id;
       w.complementarity = complementarity;
       w.nwindows        = nfwd_surv;
+      w.global_nwindows = nfwd_surv;
       w.windows         = fwd_survivors;
       w.use_gpu_fb      = gpu_fb_ok;
       w.gpu_xf          = gpu_xf;
@@ -1989,6 +2030,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       w.gpu_L_eff       = gpu_fb_L_eff;
       w.prefilter_xf       = (use_skip_fwd && !gpu_fb_ok) ? prefilter_xf : NULL;
       w.prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc : NULL;
+      w.prefilter_x_offsets = NULL;
       w.prefilter_xf_offset = 0;
 
       if (gpu_fb_ok)
@@ -2452,14 +2494,14 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
     if (ncpus_vlt > 1) {
       NHMMER_GPU_WORKER *workers = NULL;
       pthread_t         *threads = NULL;
+      pthread_mutex_t    work_mutex;
       int                nworkers = ncpus_vlt;
-      int                windows_per_thread = nfwd_surv / nworkers;
-      int                remainder = nfwd_surv % nworkers;
-      int                offset = 0;
+      int                next_window = 0;
 
       ESL_ALLOC(workers, sizeof(NHMMER_GPU_WORKER) * nworkers);
       ESL_ALLOC(threads, sizeof(pthread_t) * nworkers);
       memset(workers, 0, sizeof(NHMMER_GPU_WORKER) * nworkers);
+      pthread_mutex_init(&work_mutex, NULL);
 
       for (i = 0; i < nworkers; i++) {
         status = nhmmer_gpu_worker_init(&workers[i], info);
@@ -2469,19 +2511,22 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
         workers[i].worker_id       = i;
         workers[i].seq_id          = seq_id;
         workers[i].complementarity = complementarity;
-        workers[i].nwindows        = windows_per_thread + (i < remainder ? 1 : 0);
-        workers[i].windows         = fwd_survivors + offset;
+        workers[i].nwindows        = nfwd_surv;
+        workers[i].global_nwindows = nfwd_surv;
+        workers[i].windows         = fwd_survivors;
+        workers[i].work_mutex      = &work_mutex;
+        workers[i].next_window     = &next_window;
         workers[i].use_gpu_fb      = gpu_fb_ok;
         workers[i].gpu_xf          = gpu_xf;
         workers[i].gpu_xb          = gpu_xb;
-        workers[i].gpu_scores      = gpu_fb_ok ? gpu_fb_scores + offset * 2 : NULL;
-        workers[i].gpu_statuses    = gpu_fb_ok ? gpu_fb_statuses + offset * 2 : NULL;
-        workers[i].gpu_x_offsets   = gpu_fb_ok ? gpu_fb_x_offsets + offset : NULL;
-        workers[i].gpu_L_eff       = gpu_fb_ok ? gpu_fb_L_eff + offset : NULL;
+        workers[i].gpu_scores      = gpu_fb_ok ? gpu_fb_scores : NULL;
+        workers[i].gpu_statuses    = gpu_fb_ok ? gpu_fb_statuses : NULL;
+        workers[i].gpu_x_offsets   = gpu_fb_ok ? gpu_fb_x_offsets : NULL;
+        workers[i].gpu_L_eff       = gpu_fb_ok ? gpu_fb_L_eff : NULL;
         workers[i].prefilter_xf       = (use_skip_fwd && !gpu_fb_ok) ? prefilter_xf : NULL;
-        workers[i].prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc + offset : NULL;
-        workers[i].prefilter_xf_offset = (use_skip_fwd && !gpu_fb_ok) ? surv_xf_offsets[offset] : 0;
-        offset += workers[i].nwindows;
+        workers[i].prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc : NULL;
+        workers[i].prefilter_x_offsets = (use_skip_fwd && !gpu_fb_ok) ? surv_xf_offsets : NULL;
+        workers[i].prefilter_xf_offset = 0;
       }
 
       for (i = 1; i < nworkers; i++) {
@@ -2531,6 +2576,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
     VLT2_THREAD_ERROR:
       for (i = 0; i < nworkers; i++)
         nhmmer_gpu_worker_destroy(&workers[i]);
+      pthread_mutex_destroy(&work_mutex);
       free(workers);
       free(threads);
       free(fwd_survivors);
@@ -2559,6 +2605,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       w.seq_id          = seq_id;
       w.complementarity = complementarity;
       w.nwindows        = nfwd_surv;
+      w.global_nwindows = nfwd_surv;
       w.windows         = fwd_survivors;
       w.use_gpu_fb      = gpu_fb_ok;
       w.gpu_xf          = gpu_xf;
@@ -2569,6 +2616,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       w.gpu_L_eff       = gpu_fb_L_eff;
       w.prefilter_xf       = (use_skip_fwd && !gpu_fb_ok) ? prefilter_xf : NULL;
       w.prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc : NULL;
+      w.prefilter_x_offsets = NULL;
       w.prefilter_xf_offset = 0;
 
       if (gpu_fb_ok)

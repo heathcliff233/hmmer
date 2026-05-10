@@ -121,11 +121,11 @@ Current combined all-sample result:
 
 | Path | Time | Hits |
 |------|:---:|:---:|
-| CPU-1 | 8.333s | 1476 |
-| CPU-4 | 2.297s | 1476 |
-| GPU-4 FASTA | 2.982s | 1476 |
-| GPU-4 nucdb, no overlap | 2.022s | 1476 |
-| GPU-4 overlap-nucdb | 1.798s | 1476 |
+| CPU-1 | 8.625s | 1476 |
+| CPU-4 | 2.570s | 1476 |
+| GPU-4 FASTA | 2.094s | 1476 |
+| GPU-4 nucdb, no overlap | 1.786s | 1476 |
+| GPU-4 overlap-nucdb | 1.640s | 1476 |
 
 Current parity script result:
 
@@ -197,7 +197,25 @@ Current fast `.nucdb` GPU breakdown for query_medium:
 | worker domain workflow | 0.738s |
 | worker CPU Backward | 0.000s |
 
-Focused repeats show run-to-run variance in CUDA engine setup and scanning Viterbi, while CPU domain workflow stays the dominant and relatively stable in-search bucket.
+Focused repeats show run-to-run variance in CUDA engine setup and scanning Viterbi. After dynamic survivor-window scheduling, GPU CPU-domain workflow is no longer inflated relative to CPU-16 for query_medium: CPU-16 wall-stage trace measured domain at `0.250s`; GPU-16 focused repeats measured worker domain at `0.239-0.258s` and GPU loop wall at `0.617-0.814s` depending mostly on CUDA Viterbi allocation variance.
+
+### CPU Wall-Stage Trace
+
+`HMMER_NHMMER_CPU_WALL_TRACE=1` prints max-across-worker stage times before CPU worker pipelines are merged. This is intentionally separate from the normal `# Stage ... time` lines, which remain summed across workers. Current CPU-16 query_medium wall-stage trace:
+
+| Stage | Wall estimate |
+|-------|:---:|
+| SSV | 0.239s |
+| MSV host | 0.015s |
+| bias | 0.044s |
+| Viterbi | 0.141s |
+| Forward | 0.044s |
+| Backward | 0.032s |
+| domain | 0.250s |
+
+### Dynamic CPU-Continuation Scheduling
+
+The GPU continuation workers now pull post-Forward survivor windows from a shared work index instead of receiving contiguous equal-window slices. This better matches the CPU-only work-queue behavior because domain-definition cost is driven by region/envelope complexity, not just survivor-window count. The change also computes overlap accounting from global neighboring survivor windows, preserving parity while avoiding worker-boundary artifacts.
 
 ### Historical GPU Domain Rescoring Performance
 
