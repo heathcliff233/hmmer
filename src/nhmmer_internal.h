@@ -64,14 +64,11 @@ typedef struct {
   double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
   double            t_cpu_workers;   /* CPU domaindef + hit reporting (wallclock around threaded section) */
   /* Sub-bucket breakdown of t_cpu_workers (wall-clock = max across worker threads) */
-  double            t_envfind;       /* Phase 1: p7_domaindef envelope-finding heuristics */
-  double            t_phase1_other;  /* Phase 1: F3 gate, reparameterize, bookkeeping */
-  double            t_dom_rescore_gpu; /* Phase 2: GPU domain rescore main batch (host wall) */
-  double            t_trim_gpu;        /* Phase 3b: GPU trim batch (host wall) */
-  double            t_hit_report;      /* Phase 3a+3c: alidisplay build + tophits */
-#ifdef HMMER_THREADS
-  pthread_mutex_t   gpu_domain_mutex; /* serialize GPU domain rescore across threads */
-#endif
+  double            t_worker_null;    /* base null model scoring inside CPU workers */
+  double            t_worker_bias;    /* biased-composition scoring inside CPU workers */
+  double            t_worker_bck;     /* CPU Backward parser inside CPU workers */
+  double            t_worker_domain;  /* domain definition workflow inside CPU workers */
+  double            t_worker_output;  /* hit object construction/threshold prep */
 } NHMMER_GPU_INFO;
 
 int nhmmer_gpu_serial_loop(NHMMER_GPU_INFO *info, ESL_SQFILE *dbfp,

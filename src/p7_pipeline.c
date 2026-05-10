@@ -1295,7 +1295,10 @@ p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_T
   P = esl_exp_surv(seq_score,  om->evparam[p7_FTAU],  om->evparam[p7_FLAMBDA]);
   if (P > pli->F3 ) return eslOK;
 
-  pli->pos_past_fwd += window_len - *overlap;
+  {
+    int eff_overlap = ESL_MIN(window_len, ESL_MAX(0, *overlap));
+    pli->pos_past_fwd += window_len - eff_overlap;
+  }
 
   *overlap = -1; // overload variable to tell calling function that this window passed fwd
 
@@ -1509,9 +1512,15 @@ postFwd_LongTarget_Core(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS
   int F3_L = ESL_MIN( window_len,  pli->B3);
 
   p7_bg_SetLength(bg, window_len);
-  p7_bg_NullOne  (bg, subseq, window_len, &nullsc);
+  {
+    double _t0 = p7_pipeline_WallTime();
+    p7_bg_NullOne  (bg, subseq, window_len, &nullsc);
+    pli->time_null += p7_pipeline_WallTime() - _t0;
+  }
   if (pli->do_biasfilter) {
+    double _t0 = p7_pipeline_WallTime();
     p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
+    pli->time_bias += p7_pipeline_WallTime() - _t0;
     bias_filtersc -= nullsc;
   } else {
     bias_filtersc = 0;
@@ -1525,7 +1534,10 @@ postFwd_LongTarget_Core(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS
   P = esl_exp_surv(seq_score,  om->evparam[p7_FTAU],  om->evparam[p7_FLAMBDA]);
   if (enforce_f3 && P > pli->F3 ) return eslOK;
 
-  pli->pos_past_fwd += window_len - *overlap;
+  {
+    int eff_overlap = ESL_MIN(window_len, ESL_MAX(0, *overlap));
+    pli->pos_past_fwd += window_len - eff_overlap;
+  }
 
   *overlap = -1;
 
@@ -1541,11 +1553,19 @@ postFwd_LongTarget_Core(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS
   if (run_backward) {
     /* Backwards parser pass using pre-filled oxf for scale factors */
     p7_omx_GrowTo(pli->oxb, om->M, 0, window_len);
-    p7_BackwardParser(subseq, window_len, om, pli->oxf, pli->oxb, NULL);
+    {
+      double _t0 = p7_pipeline_WallTime();
+      p7_BackwardParser(subseq, window_len, om, pli->oxf, pli->oxb, NULL);
+      pli->time_bck += p7_pipeline_WallTime() - _t0;
+    }
   }
 
-  status = p7_domaindef_ByPosteriorHeuristics(pli_tmp->tmpseq, NULL, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, TRUE,
-                                              pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE);
+  {
+    double _t0 = p7_pipeline_WallTime();
+    status = p7_domaindef_ByPosteriorHeuristics(pli_tmp->tmpseq, NULL, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, TRUE,
+                                                pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE);
+    pli->time_domain += p7_pipeline_WallTime() - _t0;
+  }
 
   pli_tmp->tmpseq->dsq = dsq_holder;
   if (status != eslOK) ESL_FAIL(status, pli->errbuf, "domain definition workflow failure");

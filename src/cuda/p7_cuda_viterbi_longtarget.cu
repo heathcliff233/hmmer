@@ -35,7 +35,7 @@ cuda_compute_viterbi_thresholds_kernel(
   float filtersc;
 
   if (do_biasfilter) {
-    float bias_filtersc = bias_scores[i] - nullsc_loc;
+    float bias_filtersc = bias_scores[i] - nullsc_win;
     float ratio = (F2_L > window_len) ? 1.0f : (float)F2_L / (float)window_len;
     filtersc = nullsc_loc + bias_filtersc * ratio;
   } else {

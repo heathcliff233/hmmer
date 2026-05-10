@@ -36,6 +36,18 @@
 static char nhmmer_empty_str[] = "";
 
 static int
+nhmmer_gpu_vit_window_compare(const void *a, const void *b)
+{
+  const P7_CUDA_VIT_LT_WINDOW *wa = (const P7_CUDA_VIT_LT_WINDOW *)a;
+  const P7_CUDA_VIT_LT_WINDOW *wb = (const P7_CUDA_VIT_LT_WINDOW *)b;
+
+  if (wa->window_id != wb->window_id) return (wa->window_id < wb->window_id) ? -1 : 1;
+  if (wa->position  != wb->position)  return (wa->position  < wb->position)  ? -1 : 1;
+  if (wa->model_k   != wb->model_k)   return (wa->model_k   < wb->model_k)   ? -1 : 1;
+  return 0;
+}
+
+static int
 nhmmer_gpu_window_batch_init(NHMMER_GPU_WINDOW_BATCH *wb, int alloc)
 {
   int status;
@@ -398,15 +410,6 @@ typedef struct {
   int               use_gpu_fb;
   P7_CUDA_ENGINE   *cuda_engine;
   P7_CUDA_MSVPROFILE *cuda_msv;
-#ifdef HMMER_THREADS
-  pthread_mutex_t  *gpu_domain_mutex;
-#endif
-  /* Per-worker timing buckets for post_vit_gpu (seconds, accumulated across windows). */
-  double  t_envfind;
-  double  t_phase1_other;
-  double  t_dom_rescore_gpu;
-  double  t_trim_gpu;
-  double  t_hit_report;
 } NHMMER_GPU_WORKER;
 
 static int
@@ -453,14 +456,6 @@ nhmmer_gpu_worker_init(NHMMER_GPU_WORKER *w, const NHMMER_GPU_INFO *info)
   w->status          = eslOK;
   w->cuda_engine     = info->cuda_engine;
   w->cuda_msv        = info->cuda_msv;
-#ifdef HMMER_THREADS
-  w->gpu_domain_mutex = &((NHMMER_GPU_INFO *)info)->gpu_domain_mutex;
-#endif
-  w->t_envfind         = 0.0;
-  w->t_phase1_other    = 0.0;
-  w->t_dom_rescore_gpu = 0.0;
-  w->t_trim_gpu        = 0.0;
-  w->t_hit_report      = 0.0;
   return eslOK;
 
 ERROR:
@@ -535,7 +530,8 @@ nhmmer_gpu_worker_process_post_vit(NHMMER_GPU_WORKER *w)
     w->pli->pos_past_bias += window->length;
     w->pli->pos_past_vit += window->length;
     if (i > 0)
-      w->pli->pos_past_vit -= ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n);
+      w->pli->pos_past_vit -= ESL_MIN((int)window->length,
+                                      ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n));
 
     p7_omx_GrowTo(w->pli->oxf, w->om->M, 0, window->length);
     p7_oprofile_ReconfigRestLength(w->om, ESL_MIN((int)window->length, w->om->max_length));
@@ -578,7 +574,8 @@ nhmmer_gpu_worker_process_post_fwd(NHMMER_GPU_WORKER *w)
     w->pli->pos_past_bias += window_len;
     w->pli->pos_past_vit += window_len;
     if (i > 0)
-      w->pli->pos_past_vit -= ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n);
+      w->pli->pos_past_vit -= ESL_MIN(window_len,
+                                      ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n));
 
     p7_omx_GrowTo(w->pli->oxf, w->om->M, 0, window_len);
     p7_oprofile_ReconfigRestLength(w->om, window_len);
@@ -647,7 +644,8 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
     w->pli->pos_past_bias += window_len;
     w->pli->pos_past_vit += window_len;
     if (i > 0)
-      w->pli->pos_past_vit -= ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n);
+      w->pli->pos_past_vit -= ESL_MIN(window_len,
+                                      ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n));
 
     p7_omx_GrowTo(w->pli->oxf, w->om->M, 0, window_len);
     p7_omx_GrowTo(w->pli->oxb, w->om->M, 0, window_len);
@@ -851,7 +849,7 @@ nhmmer_gpu_forward_prefilter(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int64_t se
   P7_OPROFILE *om = info->om;
   P7_BG *bg = info->bg;
   P7_PIPELINE *pli = info->pli;
-  double fwd_gate = ESL_MIN(1.0, pli->F3 * 2.0);
+  double fwd_gate = pli->F3;
   int i;
 
   NHMMER_GPU_WINDOW_BATCH wb;
@@ -1488,17 +1486,19 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
     }
   }
 
+  qsort(gpu_windows, gpu_nwindows, sizeof(P7_CUDA_VIT_LT_WINDOW),
+        nhmmer_gpu_vit_window_compare);
+
   for (i = 0; i < gpu_nwindows; i++) {
     int win_id = gpu_windows[i].window_id;
-    int64_t base_n = input_wl->windows[win_id].n;
     int pos = gpu_windows[i].position;
     int k = gpu_windows[i].model_k;
 
-    p7_hmmwindow_new(ret_vit_wl, 0,
-                     (uint32_t)(base_n + pos - 1),
+    p7_hmmwindow_new(ret_vit_wl, (uint32_t)win_id,
+                     (uint32_t)pos,
                      0, (uint16_t)k, 1, 0.0f,
                      p7_NOCOMPLEMENT,
-                     (uint32_t)sq->n);
+                     (uint32_t)input_wl->windows[win_id].length);
   }
   free(gpu_windows);
   gpu_windows = NULL;
@@ -1514,11 +1514,25 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
         int shift = max_window_len - overlap_len;
         new_n   += shift;
         new_len -= shift;
-        p7_hmmwindow_new(ret_vit_wl, 0, new_n, 0, 0,
+        p7_hmmwindow_new(ret_vit_wl, ret_vit_wl->windows[i].id, new_n, 0, 0,
                          ESL_MIN(max_window_len, new_len), 0.0f,
                          p7_NOCOMPLEMENT, new_len);
       } while ((int)new_len > max_window_len);
     }
+  }
+
+  /* CPU p7_pli_postSSV_LongTarget() runs scanning Viterbi and window
+   * extension in coordinates local to each parent MSV window, then converts
+   * surviving windows back to target coordinates when dispatching them.
+   * The GPU batch path must do the same; otherwise ExtendAndMerge can extend
+   * each Viterbi seed against the whole chromosome chunk and massively inflate
+   * downstream domain-definition work.
+   */
+  for (i = 0; i < ret_vit_wl->count; i++) {
+    int win_id = ret_vit_wl->windows[i].id;
+    ret_vit_wl->windows[i].n += input_wl->windows[win_id].n - 1;
+    ret_vit_wl->windows[i].target_len = sq->n;
+    ret_vit_wl->windows[i].id = 0;
   }
 
   /* --gpu-compare Stage B: compare GPU Viterbi window set to CPU */
@@ -1584,7 +1598,7 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
             float gpu_p1_win = (float)window_len / (float)(window_len + 1);
             float gpu_nullsc_win = (float)((double)window_len * log((double)gpu_p1_win)
                                + log(1.0 - (double)gpu_p1_win));
-            float gpu_bias_filtersc = saved_bias_scores[i] - gpu_nullsc_loc;
+            float gpu_bias_filtersc = saved_bias_scores[i] - gpu_nullsc_win;
             int F2_L_gpu = ESL_MIN(window_len, pli->B2);
             float gpu_ratio = (F2_L_gpu > window_len) ? 1.0f : (float)F2_L_gpu / (float)window_len;
             float gpu_filtersc = gpu_nullsc_loc + gpu_bias_filtersc * gpu_ratio;
@@ -1935,6 +1949,22 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       for (i = 1; i < nworkers && status == eslOK; i++)
         status = workers[i].status;
 
+      {
+        double w_null = 0, w_bias = 0, w_bck = 0, w_domain = 0, w_output = 0;
+        for (i = 0; i < nworkers; i++) {
+          if (workers[i].pli->time_null   > w_null)   w_null   = workers[i].pli->time_null;
+          if (workers[i].pli->time_bias   > w_bias)   w_bias   = workers[i].pli->time_bias;
+          if (workers[i].pli->time_bck    > w_bck)    w_bck    = workers[i].pli->time_bck;
+          if (workers[i].pli->time_domain > w_domain) w_domain = workers[i].pli->time_domain;
+          if (workers[i].pli->time_output > w_output) w_output = workers[i].pli->time_output;
+        }
+        info->t_worker_null   += w_null;
+        info->t_worker_bias   += w_bias;
+        info->t_worker_bck    += w_bck;
+        info->t_worker_domain += w_domain;
+        info->t_worker_output += w_output;
+      }
+
       for (i = 1; i < nworkers && status == eslOK; i++) {
         p7_tophits_Merge(info->th, workers[i].th);
         p7_pipeline_Merge(info->pli, workers[i].pli);
@@ -1943,23 +1973,6 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       p7_pipeline_Merge(info->pli, workers[0].pli);
 
     VLT_THREAD_ERROR:
-      {
-        double w_envfind = 0, w_phase1 = 0, w_dom = 0, w_trim = 0, w_hit = 0;
-        for (i = 0; i < nworkers; i++) {
-          /* Parallel CPU buckets: max approximates wall. */
-          if (workers[i].t_envfind         > w_envfind) w_envfind = workers[i].t_envfind;
-          if (workers[i].t_phase1_other    > w_phase1)  w_phase1  = workers[i].t_phase1_other;
-          if (workers[i].t_hit_report      > w_hit)     w_hit     = workers[i].t_hit_report;
-          /* Mutex-serialized GPU buckets: sum across workers ≈ total mutex-held wall time. */
-          w_dom  += workers[i].t_dom_rescore_gpu;
-          w_trim += workers[i].t_trim_gpu;
-        }
-        info->t_envfind         += w_envfind;
-        info->t_phase1_other    += w_phase1;
-        info->t_dom_rescore_gpu += w_dom;
-        info->t_trim_gpu        += w_trim;
-        info->t_hit_report      += w_hit;
-      }
       for (i = 0; i < nworkers; i++)
         nhmmer_gpu_worker_destroy(&workers[i]);
       free(workers);
@@ -2010,11 +2023,11 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
         p7_pipeline_Merge(info->pli, w.pli);
       }
 
-      info->t_envfind         += w.t_envfind;
-      info->t_phase1_other    += w.t_phase1_other;
-      info->t_dom_rescore_gpu += w.t_dom_rescore_gpu;
-      info->t_trim_gpu        += w.t_trim_gpu;
-      info->t_hit_report      += w.t_hit_report;
+      info->t_worker_null   += w.pli->time_null;
+      info->t_worker_bias   += w.pli->time_bias;
+      info->t_worker_bck    += w.pli->time_bck;
+      info->t_worker_domain += w.pli->time_domain;
+      info->t_worker_output += w.pli->time_output;
 
       nhmmer_gpu_worker_destroy(&w);
       free(fwd_survivors);
@@ -2509,6 +2522,22 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       for (i = 1; i < nworkers && status == eslOK; i++)
         status = workers[i].status;
 
+      {
+        double w_null = 0, w_bias = 0, w_bck = 0, w_domain = 0, w_output = 0;
+        for (i = 0; i < nworkers; i++) {
+          if (workers[i].pli->time_null   > w_null)   w_null   = workers[i].pli->time_null;
+          if (workers[i].pli->time_bias   > w_bias)   w_bias   = workers[i].pli->time_bias;
+          if (workers[i].pli->time_bck    > w_bck)    w_bck    = workers[i].pli->time_bck;
+          if (workers[i].pli->time_domain > w_domain) w_domain = workers[i].pli->time_domain;
+          if (workers[i].pli->time_output > w_output) w_output = workers[i].pli->time_output;
+        }
+        info->t_worker_null   += w_null;
+        info->t_worker_bias   += w_bias;
+        info->t_worker_bck    += w_bck;
+        info->t_worker_domain += w_domain;
+        info->t_worker_output += w_output;
+      }
+
       for (i = 1; i < nworkers && status == eslOK; i++) {
         p7_tophits_Merge(info->th, workers[i].th);
         p7_pipeline_Merge(info->pli, workers[i].pli);
@@ -2567,9 +2596,13 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       status = w.status;
 
       if (status == eslOK) {
+        info->t_worker_null   += w.pli->time_null;
+        info->t_worker_bias   += w.pli->time_bias;
+        info->t_worker_bck    += w.pli->time_bck;
+        info->t_worker_domain += w.pli->time_domain;
+        info->t_worker_output += w.pli->time_output;
         p7_tophits_Merge(info->th, w.th);
         p7_pipeline_Merge(info->pli, w.pli);
-        
       }
 
       nhmmer_gpu_worker_destroy(&w);

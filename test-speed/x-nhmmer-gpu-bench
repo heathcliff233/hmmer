@@ -4,14 +4,16 @@
 # Usage:
 #   test-speed/x-nhmmer-gpu-bench [builddir]
 #
-# Runs MADE1, query_short, query_medium against chr22.fa (and nucdb if available).
-# Reports time and hit counts for CPU-1, CPU-4, GPU-4 (FASTA), GPU-4 (nucdb).
+# Runs MADE1, query_short, query_medium against chr22.fa and available nucdbs.
+# Reports time and hit counts for CPU-1, CPU-4, GPU-4 FASTA, ordinary nucdb,
+# and fast overlap nucdb.
 #
 # Prerequisites:
 #   - Build with --enable-cuda
 #   - benchmark-data/nucleotide-bench/work/ must contain:
 #     chr22.fa, MADE1.hmm, query_short.hmm, query_medium.hmm
-#   - Optional: chr22.nucdb.nucdb (built with: src/hmmnucdb chr22.fa chr22.nucdb)
+#   - Optional: chr22.nucdb.nucdb (ordinary, built with: src/hmmnucdb --overlap 0 chr22.fa chr22.nucdb)
+#   - Optional: chr22-overlap.nucdb.nucdb (default fast path, built with: src/hmmnucdb chr22.fa chr22-overlap.nucdb)
 
 set -euo pipefail
 
@@ -35,16 +37,17 @@ if [ ! -f "$TARGET" ]; then
     exit 1
 fi
 
-# Build nucdb (no overlap) if missing
+# Build ordinary nucdb (no overlap) if missing. This is a diagnostic baseline,
+# not the fastest default construction.
 if [ ! -f "$NUCDB" ] && [ -x "$HMMNUCDB" ]; then
-    echo "Building nucdb..."
-    "$HMMNUCDB" "$TARGET" "$WORKDIR/chr22.nucdb" 2>/dev/null
+    echo "Building ordinary nucdb (--overlap 0)..."
+    "$HMMNUCDB" --overlap 0 "$TARGET" "$WORKDIR/chr22.nucdb" 2>/dev/null
 fi
 
-# Build overlap nucdb (GPU-resident SSV path) if missing
+# Build overlap nucdb (default fast GPU-resident SSV path) if missing.
 if [ ! -f "$OVERLAP_NUCDB" ] && [ -x "$HMMNUCDB" ]; then
-    echo "Building overlap nucdb (--overlap 2001)..."
-    "$HMMNUCDB" --overlap 2001 "$TARGET" "$WORKDIR/chr22-overlap.nucdb" 2>/dev/null
+    echo "Building overlap nucdb (default overlap)..."
+    "$HMMNUCDB" "$TARGET" "$WORKDIR/chr22-overlap.nucdb" 2>/dev/null
 fi
 
 run_bench() {
@@ -87,11 +90,11 @@ for q in "${QUERIES[@]}"; do
         run_bench "GPU-4 (FASTA)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$TARGET"
 
         if [ -f "$NUCDB" ]; then
-            run_bench "GPU-4 (nucdb)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$NUCDB"
+            run_bench "GPU-4 (nucdb-o0)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$NUCDB"
         fi
 
         if [ -f "$OVERLAP_NUCDB" ]; then
-            run_bench "GPU-4 (overlap-nucdb)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$OVERLAP_NUCDB"
+            run_bench "GPU-4 (nucdb-fast)" "$HMM" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$OVERLAP_NUCDB"
         fi
     else
         echo "  (GPU not available — build with --enable-cuda)"
@@ -101,7 +104,6 @@ for q in "${QUERIES[@]}"; do
 done
 
 echo "================================================================"
-echo "Parity check: CPU-4 hit count is reference. GPU hits should match"
-echo "for MADE1. query_short/medium may show +5-10% extra GPU hits"
-echo "(known: GPU scanning Viterbi uses fixed xw_* parameters)."
+echo "Parity check: CPU-4 hit count is reference. GPU hit counts should"
+echo "match or stay within the documented smoke-test tolerance."
 echo "================================================================"

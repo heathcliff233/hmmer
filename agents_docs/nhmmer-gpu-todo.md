@@ -1,16 +1,17 @@
 # nhmmer GPU Support — TODO
 
-## All Phases Complete (including GPU Domain Rescoring + Kernel Parallelization + FB Split + Skip-Forward)
+## Current Status
 
-Phases 1–8 are done. Phase 9 (GPU Domain Rescoring) is complete. Phase 10 (kernel parallelization + FB split) is complete. Phase 11 (skip-Forward optimization) is complete. See `nhmmer-gpu-progress.md` for details.
+The accepted default path is GPU filters + GPU scanning Viterbi + exact-F3 GPU Forward prefilter + GPU Forward/Backward parser handoff + CPU domain/hit processing. `hmmnucdb` defaults to overlap chunking (`--overlap 2001`) for the fast GPU-resident SSV path. Historical phase notes below include GPU domain-rescoring experiments that are not the accepted default continuation path.
 
-## Phase 11: Skip-Forward Optimization — COMPLETE
+Current query_medium smoke result on chr22, RTX 4090, `--cpu 4`: CPU-4 FASTA 1.87s HMMER elapsed / 648 output rows; GPU default fast overlap `.nucdb` 1.40s HMMER elapsed / 648 output rows. GPU worker time is mostly CPU domain workflow; CPU Backward is 0.000s in the default handoff path.
+
+## Completed: GPU Forward/Backward Parser Handoff
 
 - [x] `p7_pli_postFwd_LongTarget()` in `p7_pipeline.c`: skips Forward recomputation, uses GPU-precomputed xf/fwdsc
 - [x] `nhmmer_gpu_worker_process_post_fwd()`: injects GPU xf into pli->oxf->xmx, reconstructs totscale
 - [x] Per-window xf offset computation for multi-worker partitioning (`surv_xf_offsets`)
 - [x] Gated on `use_skip_fwd = info->do_gpu_fwd && prefilter_xf != NULL`; `info->do_gpu_fwd` is default-on with `--gpu`
-- [x] Thread dispatch: `nhmmer_gpu_thread_func_post_fwd` for skip-Forward, `nhmmer_gpu_thread_func_post_vit` for standard path
 - [x] `--gpu-compare` and `--gpu-cpu-postmsv` flags for debug/comparison
 
 ### Impact
@@ -38,7 +39,7 @@ Eliminates redundant CPU Forward computation in post-filter workers when GPU For
 
 Parallel-thread kernels: ~1.3-1.5x kernel speedup on domain rescoring. Forward-Backward split: eliminates ~50% of FB computation (no redundant Forward). Combined: MADE1 1.74s → 1.35s (1.3x), query_medium 10.3s → 5.34s (1.9x). Scanning Viterbi threshold fix: MADE1 1.35s → 0.91s (1.5x), query_medium 5.34s → 2.85s (1.9x).
 
-## Phase 9: GPU Domain Rescoring — COMPLETE
+## Historical: GPU Domain Rescoring Experiment
 
 - [x] `p7_cuda_DomainRescoreBatch`: batched Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection
 - [x] 6 CUDA kernels: single-thread-per-block, one block per domain
@@ -56,7 +57,7 @@ Parallel-thread kernels: ~1.3-1.5x kernel speedup on domain rescoring. Forward-B
 
 ### Impact
 
-GPU domain rescoring replaces `rescore_isolated_domain` (the 67-91% bottleneck). Performance improvement: MADE1 34s → 1.74s (18x), query_short 120s → 2.07s (53x). Still ~5x slower than CPU-4 due to single-thread-per-block kernel design (short domains don't exploit GPU SIMT parallelism).
+This work proved cross-window batching and kernel parallelization ideas, but the accepted default currently keeps domain definition, null2, hit storage, thresholding, and output CPU-side after GPU parser handoff. See `nhmmer-gpu-progress.md` for the active architecture.
 
 ## Known Issues
 
@@ -64,9 +65,9 @@ GPU domain rescoring replaces `rescore_isolated_domain` (the 67-91% bottleneck).
 - **query_short parity**: GPU reports 363 vs CPU 363 (exact match)
 - **query_medium parity**: GPU reports 648 vs CPU 648 (exact match)
 - Remaining differences are from float32 vs double precision in Forward/Backward accumulation
-- **GPU slower than CPU-4**: CUDA init overhead + envelope-finding runtime (GPU FASTA is 1.8-3.3x slower; overlap-nucdb is 1.4-2.6x slower)
+- **Main remaining cost**: CPU domain workflow after GPU parser handoff
 
-## Latest Benchmark (2026-05-09, RTX 4090, chr22 50MB)
+## Historical Benchmark (2026-05-09, RTX 4090, chr22 50MB)
 
 | Config | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |--------|:---:|:---:|:---:|
@@ -88,13 +89,13 @@ GPU domain rescoring replaces `rescore_isolated_domain` (the 67-91% bottleneck).
 | GPU FB parser | 0.000s | 0.0% |
 | **CPU workers** | **0.203s** | **44.2%** |
 
-**Key finding**: CPU workers (domain definition + hit reporting) consume 44–94% of GPU wall time depending on model size. All GPU kernel stages combined are only 0.2–0.3s.
+**Historical finding**: CPU workers (domain definition + hit reporting) consumed 44–94% of GPU wall time depending on model size. Current query_medium fast `.nucdb` worker time is still dominated by CPU domain workflow, but total wall is now faster than CPU-4 in the smoke run after the scanning-Viterbi window fix.
 
 ## Open Performance Work
 
 ### P1 — Move envelope-finding to GPU (high impact, very high effort)
 
-CPU workers are 75–94% of total time. The bottleneck is `p7_domaindef_ByPosteriorHeuristics()` running per-envelope Forward/Backward on CPU. Moving envelope-finding to GPU would eliminate the single largest bottleneck.
+CPU workers are still the largest GPU timing bucket. The bottleneck is `p7_domaindef_ByPosteriorHeuristics()` and related CPU domain workflow after parser handoff. Moving this workflow to GPU would eliminate the largest remaining bottleneck, but it is high-risk because domain definition is tightly coupled to posterior decoding and hit reporting semantics.
 
 ### P2 — Parallelize OptAcc kernel (low impact, medium effort)
 
@@ -104,13 +105,13 @@ CPU workers are 75–94% of total time. The bottleneck is `p7_domaindef_ByPoster
 
 | Item | Effort | Impact | Notes |
 |------|--------|--------|-------|
-| GPU envelope-finding | Very high | Eliminate 75-94% bottleneck | Needs GPU posterior decoding heuristics |
+| GPU domain workflow | Very high | Reduce largest remaining bucket | Needs GPU posterior decoding/domain semantics |
 | OptAcc kernel parallelization | Medium | Small | Needs max-prefix scan |
 | Async strand overlap | Low | ~0.1-0.3s | Diminishing returns |
 | FM-index GPU path | High | Alternative to FASTA scanning | FM-index is CPU-optimized |
 | CUDA init amortization | N/A | Already done | Engine created once before query loop |
 | Redundant Forward elimination | N/A | Already done | Prefilter saves xf for Backward-only |
-| Skip-Forward optimization | N/A | Already done | `p7_pli_postFwd_LongTarget()` uses GPU xf |
+| GPU Fwd/Bwd parser handoff | N/A | Already done | `p7_pli_postFwd_LongTarget()` uses GPU xf |
 | Parallel-thread domain kernels | N/A | Already done | 4/6 kernels use T threads with prefix scan |
 | Domain rescore nj fix | N/A | Already done | GPU now uses nj=0 (unihit) matching CPU |
 | Overlap-nucdb GPU-resident path | N/A | Already done | Zero per-chunk H2D for SSV |

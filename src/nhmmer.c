@@ -1160,15 +1160,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_fwd_prefilter = 0;
         gpu_info.t_gpu_fb_parser = 0;
         gpu_info.t_cpu_workers   = 0;
-        gpu_info.t_envfind         = 0;
-        gpu_info.t_phase1_other    = 0;
-        gpu_info.t_dom_rescore_gpu = 0;
-        gpu_info.t_trim_gpu        = 0;
-        gpu_info.t_hit_report      = 0;
-#ifdef HMMER_THREADS
-        pthread_mutex_init(&gpu_info.gpu_domain_mutex, NULL);
-#endif
-
+        gpu_info.t_worker_null     = 0;
+        gpu_info.t_worker_bias     = 0;
+        gpu_info.t_worker_bck      = 0;
+        gpu_info.t_worker_domain   = 0;
+        gpu_info.t_worker_output   = 0;
         /* Detect nucdb format: check for .nucdb extension or .nucdb file alongside target */
         {
           P7_NUCDB *nucdb = NULL;
@@ -1185,9 +1181,6 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
           }
         }
 
-#ifdef HMMER_THREADS
-        pthread_mutex_destroy(&gpu_info.gpu_domain_mutex);
-#endif
         info[0].pli->nres  = gpu_nres;
         info[0].pli->nseqs = gpu_nseqs;
 
@@ -1210,11 +1203,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
             fprintf(stderr, "  Forward prefilter: %7.3fs  (%4.1f%%)\n", gpu_info.t_fwd_prefilter, 100.0*gpu_info.t_fwd_prefilter/t_total);
             fprintf(stderr, "  GPU FB parser:     %7.3fs  (%4.1f%%)\n", gpu_info.t_gpu_fb_parser, 100.0*gpu_info.t_gpu_fb_parser/t_total);
             fprintf(stderr, "  CPU workers:       %7.3fs  (%4.1f%%)\n", gpu_info.t_cpu_workers, 100.0*gpu_info.t_cpu_workers/t_total);
-            fprintf(stderr, "    envelope find:   %7.3fs  (%4.1f%%)\n", gpu_info.t_envfind, 100.0*gpu_info.t_envfind/t_total);
-            fprintf(stderr, "    phase1 other:    %7.3fs  (%4.1f%%)\n", gpu_info.t_phase1_other, 100.0*gpu_info.t_phase1_other/t_total);
-            fprintf(stderr, "    dom rescore GPU: %7.3fs  (%4.1f%%)\n", gpu_info.t_dom_rescore_gpu, 100.0*gpu_info.t_dom_rescore_gpu/t_total);
-            fprintf(stderr, "    trim GPU:        %7.3fs  (%4.1f%%)\n", gpu_info.t_trim_gpu, 100.0*gpu_info.t_trim_gpu/t_total);
-            fprintf(stderr, "    hit reporting:   %7.3fs  (%4.1f%%)\n", gpu_info.t_hit_report, 100.0*gpu_info.t_hit_report/t_total);
+            fprintf(stderr, "    null scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_null, 100.0*gpu_info.t_worker_null/t_total);
+            fprintf(stderr, "    bias scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bias, 100.0*gpu_info.t_worker_bias/t_total);
+            fprintf(stderr, "    CPU Backward:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bck, 100.0*gpu_info.t_worker_bck/t_total);
+            fprintf(stderr, "    domain workflow: %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_domain, 100.0*gpu_info.t_worker_domain/t_total);
+            fprintf(stderr, "    hit reporting:   %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_output, 100.0*gpu_info.t_worker_output/t_total);
           } else {
             fprintf(stderr, "GPU timing: all zeros (t_ssv=%.6f t_merge=%.6f t_batch=%.6f t_vit=%.6f t_fwd=%.6f t_cpu=%.6f)\n",
                     gpu_info.t_ssv, gpu_info.t_merge, gpu_info.t_batch_filter,

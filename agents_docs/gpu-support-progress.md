@@ -128,21 +128,22 @@ The fused SSV+null+bias+gate kernel is the default GPU MSV path:
 - Record CPU/GPU wall time, CUDA H2D/kernel/D2H time, batch sizes, CUDA batch counts, pass counts for MSV/bias/Viterbi/Forward, and final hit deltas.
 - Compare each proposed GPU stage against the last accepted GPU baseline, not only against CPU.
 
-## GPU nhmmer (Nucleotide Search) — 2026-05-09
+## GPU nhmmer (Nucleotide Search) — 2026-05-10
 
 A GPU-accelerated path for `nhmmer` is available via `--gpu`. Rebased on latest `h3-gpu` (fused SSV kernel, multi-warp-per-block, templated Viterbi).
 
-- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + batch MSV/bias/F1 filter + GPU Viterbi pre-filter + GPU scanning Viterbi + GPU Forward pre-filter + GPU FB parser + GPU domain rescoring + threaded CPU hit reporting.
-- **GPU domain rescoring** (`p7_cuda_DomainRescoreBatch`): Cross-window batching of all domains (6 kernels: Fwd/Bck/Decoding/OA/OATrace/Domcorr) + trim batching. Replaces `rescore_isolated_domain` (the 67-91% bottleneck). 4/6 kernels use T-thread-per-block with parallel prefix scan.
+- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + batch MSV/bias/F1 filter + GPU Viterbi pre-filter + GPU scanning Viterbi + exact-F3 GPU Forward pre-filter + GPU FB parser handoff + threaded CPU domain/hit processing.
+- **Nucdb default**: `hmmnucdb` now defaults to overlap chunking (`--overlap 2001`) so typical `.nucdb` targets enable the GPU-resident SSV path. Use `--overlap 0` only for ordinary no-overlap diagnostics.
 - **GPU FB parser** (`nhmmer_gpu_run_fb_parser_batch`): Batch Forward+Backward parser on GPU. Forward-Backward split: prefilter saves xf, Backward-only for F3 survivors.
-- **Forward pre-filter** (`nhmmer_gpu_forward_prefilter`): GPU Forward score-only with F3*2.0 relaxed gate. Removes 45-60% of sub-windows before FB parser.
+- **Forward pre-filter** (`nhmmer_gpu_forward_prefilter`): GPU Forward score-only with exact F3 gate. Removes about 40% of post-Viterbi sub-windows before FB parser on the current query_medium smoke run.
 - **Skip-Forward optimization**: `p7_pli_postFwd_LongTarget()` injects GPU-precomputed xf/fwdsc, skipping redundant CPU Forward. Default-on with `--gpu`; hidden `--gpu-no-fwd-prefilter` restores the older CPU Fwd/Bwd continuation for diagnostics.
 - **Batch filter** (`--gpu-batch`): Packs merged windows as synthetic ESL_DSQDATA_CHUNK (zero-copy), runs GPU MSV + null + bias batch scoring, applies F1 gating.
 - **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors (warps_per_block=1 for short windows). Windows below F2 threshold skipped before scanning Viterbi.
+- **Scanning Viterbi window fix**: GPU seeds are sorted by `(window_id, position, model_k)` and extended/merged in parent-window-local coordinates before conversion back to target coordinates. This fixed the inflated CPU domain workflow caused by unsorted `atomicAdd` output defeating adjacent-window merge.
 - **Threading**: Post-vit workers distributed across N CPU threads with deep-copied per-thread state.
 - **Engine reuse**: CUDA engine created once before query loop, saves ~250ms per additional query.
-- **Hit parity**: MADE1 462/465 (3-hit diff, <1%), query_short 363/363 (exact match), query_medium 648/648 (exact match). Remaining differences from float32 vs double precision.
-- **Performance**: GPU-4 FASTA: MADE1 1.01s, query_short 0.99s, query_medium 2.87s. GPU-4 overlap-nucdb: MADE1 0.64s, query_short 1.02s, query_medium 2.23s. CPU-4: 0.31s, 0.40s, 1.57s. GPU bottleneck: CPU workers (envelope-finding, 44-94% of wall time).
+- **Hit parity**: Current smoke parity is exact for query_short/query_medium output rows and within documented MADE1 tolerance; query_medium CPU-4 and GPU fast `.nucdb` both produced 648 output rows.
+- **Performance**: Current query_medium same-mode rerun on chr22, RTX 4090, 4 CPU threads: CPU-4 FASTA 1.87s HMMER elapsed (`/usr/bin/time` 1.89s), GPU default fast overlap `.nucdb` 1.40s HMMER elapsed (`/usr/bin/time` 1.75s). GPU timing total 1.297s: SSV 0.107s, batch filter 0.099s, scanning Viterbi 0.015s, Forward prefilter 0.038s, GPU FB parser 0.013s, CPU workers 1.024s. CPU worker time is almost entirely domain workflow; CPU Backward is 0.000s in the handoff path.
 - **Files**: `src/nhmmer_gpu.c`, `src/nhmmer_internal.h`, `src/cuda/p7_cuda_ssv_longtarget.cu`, `src/cuda/p7_cuda_viterbi_longtarget.cu`, `src/cuda/p7_cuda_domain_rescore.cu`, `src/cuda/p7_cuda_fb_parser.cu`
 - **Detailed docs**: See `nhmmer-gpu-progress.md` and `nhmmer-gpu-todo.md`.
 

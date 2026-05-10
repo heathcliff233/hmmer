@@ -137,15 +137,16 @@ Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.
 
 ### Current nhmmer GPU Performance (RTX 4090, chr22)
 
-| Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
-|------|:---:|:---:|:---:|
-| CPU-1 | 0.93s / 154 | 1.27s / 120 | 5.86s / 215 |
-| CPU-4 | 0.30s / 154 | 0.37s / 120 | 1.63s / 215 |
-| GPU-4 nucdb | 0.53s / 153 | 0.68s / 120 | 2.52s / 215 |
+Current same-mode smoke result for query_medium (M=501), 4 CPU threads:
 
-GPU nhmmer now supports a **skip-Forward optimization**: when `--gpu-fwd-prefilter` gates windows through the GPU Forward pre-filter, workers use `p7_pli_postFwd_LongTarget()` which injects GPU-precomputed xf matrices and skips redundant CPU Forward recomputation. Only Backward + domain definition + hit reporting run on CPU. Without `--gpu-fwd-prefilter`, the standard `p7_pli_postViterbi_LongTarget()` path runs full CPU Forward+Backward.
+| Path | Target | Output rows | HMMER elapsed | `/usr/bin/time` wall |
+|------|--------|:---:|:---:|:---:|
+| CPU-4 | `chr22.fa` | 648 | 1.87s | 1.89s |
+| GPU-4 default | `chr22-overlap.nucdb.nucdb` | 648 | 1.40s | 1.75s |
 
-GPU domain rescoring uses batched CUDA kernels (Forward+Backward+Decoding+OptimalAccuracy+OATrace+Domcorrection) with cross-window batching and trim batching. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior. Remaining gap vs CPU-4 is from CUDA init overhead (~0.4s) plus CPU workers (Forward/Backward/Domain, 59-89% of GPU pipeline time). GPU scanning Viterbi produces ~18% more windows than CPU due to warp-parallel evaluation order differences in int16 DP, causing proportionally more CPU worker time. Remaining hit count differences (0-1 hits, <1%) are from float32 vs double precision in Forward/Backward accumulation.
+`hmmnucdb` now defaults to overlap chunking (`--overlap 2001`), enabling the GPU-resident SSV path for typical queries; use `--overlap 0` only for ordinary no-overlap diagnostic databases. `nhmmer --gpu` defaults to GPU batch filtering, Viterbi prefilter, scanning Viterbi, exact-F3 Forward prefilter, and GPU Forward/Backward parser handoff. `--gpu-fwd-prefilter` is retained only as compatibility spelling; `--gpu-no-fwd-prefilter` restores the older CPU Forward/Backward continuation for diagnostics.
+
+The current bottleneck is CPU domain workflow after the GPU parser handoff, not CPU Forward/Backward. In the query_medium fast `.nucdb` smoke run, GPU timing total was 1.297s: SSV 0.107s, batch filter 0.099s, scanning Viterbi 0.015s, Forward prefilter 0.038s, GPU FB parser 0.013s, CPU workers 1.024s. Worker sub-buckets were domain workflow 1.013s, bias/null/output about 0.007s, and CPU Backward 0.000s.
 
 ## GPU Architecture Summary
 
@@ -185,7 +186,7 @@ These flags are not shown in `hmmsearch -h` output but are defined in `src/hmmse
 Nhmmer-specific expert flags (defined in `src/nhmmer.c`):
 
 ```
---gpu-fwd-prefilter    GPU Forward pre-filter: skip-Forward optimization (docgroup 12)
+--gpu-fwd-prefilter    Deprecated compatibility spelling; GPU Fwd/Bwd parser handoff is default
 --gpu-batch            GPU batch SSV/bias filtering on merged windows
 --gpu-vit-prefilter    GPU Viterbi as pre-filter before scanning Viterbi
 --gpu-vit-longtarget   GPU scanning Viterbi for sub-window detection

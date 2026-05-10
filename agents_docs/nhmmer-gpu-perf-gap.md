@@ -1,214 +1,73 @@
-# nhmmer GPU vs CPU Performance Gap
+# nhmmer GPU vs CPU Performance Breakdown
 
 Last updated: 2026-05-10
 
 ## TL;DR
 
-GPU-4 nhmmer is **~1.5-1.8x slower than CPU-4** on single-query nucdb workloads.
-After fixing the scanning Viterbi threshold bias filter precision bugs (per-window
-t00 computation, double-precision nullsc/invP, correct nullsc_loc subtraction),
-the GPU now has near-exact hit parity with CPU (0-1 hit difference). The remaining
-gap is CUDA init overhead (~0.4s) plus the GPU scanning Viterbi producing ~18%
-more windows than CPU (warp-parallel int16 DP evaluation order differences),
-causing proportionally more CPU worker time.
+The previous “GPU is slower because CPU workers redo Forward/Backward and GPU domain rescoring is mutex-bound” analysis is stale. Current default `nhmmer --gpu` uses the GPU Forward prefilter and GPU Forward/Backward parser handoff by default, so CPU Forward/Backward continuation is gone in the accepted path.
 
-## Current Benchmark (RTX 4090, chr22)
+The real issue behind the stale 1.91s versus 2.109s comparison was apples-to-oranges benchmarking plus a GPU scanning-Viterbi window merge bug. GPU Viterbi seeds are emitted with `atomicAdd`, so they were unsorted; `p7_pli_ExtendAndMergeWindows()` only merges adjacent windows. The GPU path also extended/merged seeds after converting them to absolute target coordinates, unlike CPU, which extends/merges in parent MSV-window-local coordinates. That inflated downstream CPU domain workflow. The current fix sorts seeds by `(window_id, position, model_k)`, extends/merges in local coordinates, then converts back to target coordinates.
 
-| Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
-|------|:---:|:---:|:---:|
-| CPU-1 | 0.93s / 154 | 1.27s / 120 | 5.86s / 215 |
-| CPU-4 | 0.30s / 154 | 0.37s / 120 | 1.63s / 215 |
-| GPU-4 nucdb | 0.53s / 153 | 0.68s / 120 | 2.52s / 215 |
-| Ratio (GPU-4 nucdb vs CPU-4) | 1.8x | 1.8x | 1.5x |
+## Current query_medium Result
 
-## Aligned per-stage Gantt — query_medium (M=501) on chr22
+Target: chr22/hg38 benchmark. Query: `query_medium.hmm` (M=501). Threads: `--cpu 4`. GPU: RTX 4090. Date: 2026-05-10.
 
-Same stage names on both rows. Each bar is positioned at where the stage
-actually runs in wall-time. Resolution: 1 char ≈ 0.1s. Both axes start at
-t = 0; CPU-4 finishes at 1.82s, GPU-4 at 5.32s.
+| Path | Target | Output rows | HMMER elapsed | `/usr/bin/time` wall |
+|------|--------|:---:|:---:|:---:|
+| CPU-4 | `chr22.fa` | 648 | 1.87s | 1.89s |
+| GPU default, no-overlap nucdb | `chr22.nucdb.nucdb` | 648 | 1.36s | 1.71s |
+| GPU default, fast overlap nucdb | `chr22-overlap.nucdb.nucdb` | 648 | 1.40s | 1.75s |
 
-```
-                            0     0.5    1.0    1.5    2.0    2.5    3.0    3.5    4.0    4.5    5.0
-                            |─────|──────|──────|──────|──────|──────|──────|──────|──────|──────|
+The small ordinary-vs-overlap reversal in this single run is within run-to-run noise and workload shape; overlap `.nucdb` remains the default construction because it enables GPU-resident SSV and avoids per-sequence SSV H2D transfers when the query fits the overlap.
 
-load + setup        CPU-4   ▏                                                                          0.05s
-                    GPU-4   █████████                                                                  0.88s
+## Stage Breakdown
 
-SSV                 CPU-4   ·██████                                                                    0.64s
-                    GPU-4            ██                                                                0.16s
+CPU-4 HMMER stage totals are summed across worker threads, so divide by four for a rough per-thread wall comparison. GPU `NHMMER_GPU_INFO` buckets are wall buckets around sequential GPU stages plus max-across-worker CPU continuation buckets.
 
-null + bias + MSV   CPU-4         █                                                                    0.13s
-                    GPU-4              █                                                               0.09s
-
-Viterbi             CPU-4          ███                                                                 0.33s
-                    GPU-4               ·                                                              0.01s
-
-Forward             CPU-4             █                                                                0.12s
-                    GPU-4               ████                                                           0.39s
-
-Backward            CPU-4              ▊                                                               0.07s
-                    GPU-4                   █                                                          0.12s
-
-envelope-find       CPU-4               █████                                                          0.50s
-                    GPU-4                    ███████████████████████                                   2.32s
-                                              (parallel across 4 worker threads)
-
-GPU dom rescore     CPU-4   —— (CPU rescores inline inside envelope-find) ——
-                    GPU-4                    ███████████████                                           1.49s
-                                              (mutex-serialized, overlaps envelope-find)
-
-GPU trim            CPU-4   ——
-                    GPU-4                                   █████████                                  0.91s
-                                                            (mutex-serialized, overlaps envelope-find)
-
-hit output          CPU-4                   ·                                                          ~0
-                    GPU-4                                                                       ██     0.18s
-
-────────────────────────────────────────────────────────────────────────────────────────────────
-WALL                CPU-4   ██████████████████                                                         1.82s
-                    GPU-4   █████████████████████████████████████████████████████                      5.32s
-```
-
-### How to read this
-
-- **CPU-4 stage values** come from `p7_pli_Statistics` (sums across 4 worker
-  threads, divided by 4 to give per-thread wall ≈ total wall when balanced).
-  CPU stages are interleaved per-window in reality, but cumulatively each
-  stage's total wall is what's shown — the bars are laid end-to-end in the
-  order each stage executes within a window.
-- **GPU-4 stage values** come from `NHMMER_GPU_INFO::t_*` (per-strand
-  stages, genuinely sequential) and worker sub-buckets in
-  `nhmmer_gpu_worker_process_post_vit_gpu`. The first six GPU rows are
-  truly back-to-back; the last four (envelope-find / dom rescore / trim /
-  output) all run **concurrently** inside the `t_cpu_workers = 3.66s`
-  block (1.67s → 5.32s) — envelope-find runs in parallel across threads,
-  dom rescore and trim hold a single CUDA mutex, output runs at the tail.
-
-### Stage-by-stage
-
-| Stage | CPU-4 wall | GPU-4 wall | Δ |
+| Stage | CPU-4 summed | CPU-4 approx wall | GPU fast `.nucdb` wall |
 |-------|:---:|:---:|:---:|
-| load + setup | 0.05s | 0.88s | **−0.83s** ← CUDA init + FASTA |
-| SSV | 0.64s | 0.16s | **+0.48s** ← GPU 4× faster |
-| null + bias + MSV | 0.13s | 0.09s | +0.04s |
-| Viterbi (prefilter + scanning) | 0.33s | 0.01s | **+0.32s** ← GPU 33× faster |
-| Forward | 0.12s | 0.39s | −0.27s ← GPU does 2 passes (prefilter + Backward-only) |
-| Backward | 0.07s | 0.12s | −0.05s |
-| envelope-find (`p7_domaindef`) | 0.50s | 2.32s | **−1.82s** ← biggest single regression |
-| GPU dom rescore + trim | (inline) | 2.40s ¹ | −2.40s ← new GPU-only stage, mutex-bound |
-| hit output | ~0 | 0.18s | −0.18s |
-| **WALL TOTAL** | **1.82s** | **5.32s** | **−3.50s** |
+| SSV | 2.597s | 0.649s | 0.107s |
+| MSV/null/bias | 0.562s | 0.141s | 0.099s batch filter + 0.002s worker bias/null |
+| Viterbi | 1.352s | 0.338s | 0.015s scanning Viterbi |
+| Forward | 0.484s | 0.121s | 0.038s Forward prefilter |
+| Backward | 0.290s | 0.072s | 0.013s GPU FB parser; 0.000s CPU Backward |
+| Domain workflow | 2.101s | 0.525s | 1.013s |
+| Output/null2 | 0.001s | ~0.000s | 0.005s |
+| Total elapsed | - | 1.87s | 1.40s HMMER elapsed |
 
-¹ summed wall of mutex-held calls; concurrent in real time with envelope-find.
+GPU device-side filtering is faster than CPU for SSV, Viterbi, and Forward/Backward. The dominant remaining GPU-side cost is not a CUDA kernel; it is CPU domain workflow after parser handoff.
 
-### Why each loss happens
+## Timing Breakdown From Current GPU Run
 
-- **envelope-find (−1.82s)**: GPU pipeline pushes **7,364 windows** into
-  `p7_domaindef_ByPosteriorHeuristics` vs ~3,800 the CPU pipeline lets
-  through its F3 P-value gate. GPU writes `xf`/`xb` into pinned-host
-  buffers, so the domaindef call hits cold L1/L2.
+```
+GPU pipeline: vit_lt_in=874 vit_lt_out=874 post_vit=874 post_fwd=511 hits=718
+GPU timing breakdown (1.297s total):
+  SSV longtarget:      0.107s
+  extend+merge:        0.001s
+  batch filter:        0.099s
+  scanning Viterbi:    0.015s
+  Forward prefilter:   0.038s
+  GPU FB parser:       0.013s
+  CPU workers:         1.024s
+    null scoring:      0.000s
+    bias scoring:      0.002s
+    CPU Backward:      0.000s
+    domain workflow:   1.013s
+    hit reporting:     0.005s
+```
 
-- **Forward (−0.27s)**: GPU runs Forward in two passes — a prefilter pass
-  that produces `xf` for the F3 gate, then a Backward-only batch that
-  re-uses the saved `xf`. CPU runs Forward once. PCIe D2H of `xf` costs
-  more than the kernel saves on small-M models.
-
-- **GPU dom rescore + trim (−2.40s)**: New stage with no CPU equivalent.
-  CPU does this inline inside envelope-find. Made worse by the
-  `pthread_mutex_lock(gpu_domain_mutex)` that serializes all four worker
-  threads through one CUDA context.
-
-- **CUDA init (−0.83s)**: First-query overhead. Multi-query workloads
-  amortize this away.
-
-## Direct comparison — query_medium (M=501)
-
-| Path | Wall | Hits | vs CPU-4 |
-|------|:---:|:---:|:---:|
-| CPU-1 | 6.40s | 215 | 3.5x slower |
-| **CPU-4** | **1.82s** | **215** | **1.0x** |
-| GPU-1 | 7.63s | 218 | 4.2x slower |
-| GPU-4 (FASTA) | 5.32s | 218 | 2.9x slower |
-
-GPU-4 is even slower than CPU-1, despite committing the GPU + 4 CPU threads.
-
-## What Would Further Improve It
-
-| Fix | Estimated savings (query_medium) | Effort | Status |
-|-----|---------|--------|--------|
-| Fix GPU scanning Viterbi threshold bug | **~2.5s** (halved wall time) | Low | **Done** |
-| Move envelope-finding to GPU | Eliminate ~1-2s bottleneck | Very high | Open |
-| Drop GPU domain-rescore mutex (per-thread streams) | ~0.5-1.0s @ cpu 4 | Medium | Open |
-| Pinned memory + async D2H | ~10-20ms per batch | Low | Open |
-| OptAcc kernel parallelization | Small | Medium | Open (needs max-prefix scan) |
-| Multi-query amortization | ~0.5s | Done | Engine reuse implemented |
-| Nucdb format | ~0.4s | Done | Eliminates FASTA parsing |
-| Overlap-nucdb (GPU-resident SSV) | ~0.3-0.6s | Done | Zero per-chunk H2D |
-| Skip-Forward optimization | Varies | Done | `p7_pli_postFwd_LongTarget()` uses GPU xf |
-| Redundant Forward elimination | ~0.5–5s | Done | Prefilter saves xf for Backward-only |
-| Parallel-thread domain kernels | ~0.04–0.4s | Done | 4/6 kernels use T threads |
-
-## Hit parity
-
-GPU domain rescoring uses nj=0 (unihit mode) matching CPU behavior.
-
-After the scanning Viterbi threshold fix:
-- **MADE1 (M=80)**: 462 vs 465 (3-hit difference, <1%)
-- **query_short (M=151)**: 363 vs 363 (exact match)
-- **query_medium (M=501)**: 648 vs 648 (exact match)
-
-Remaining differences are from float32 vs double precision in Forward/Backward
-accumulation.
-
-## Historical Improvement (MADE1)
-
-| Version | MADE1 time | Key change |
-|---------|:---:|:---:|
-| Pre-batching (per-domain GPU calls) | 34s | 5000+ individual GPU calls × 5ms overhead each |
-| Cross-window batching + trim batching | 1.74s | Single GPU call for all domains |
-| Parallel-thread domain kernels | 1.37s | T threads/block with prefix scan (4 of 6 kernels) |
-| Forward-Backward split (prefilter saves xf) | 1.35s | Eliminates redundant Forward computation |
-| **Scanning Viterbi threshold fix** | **0.91s** | Fix Gumbel invsurv + nullsc mismatch |
-
-**37x improvement** from serial per-domain calls to current design.
-
-## Root Cause of Prior 3-4x Slowdown (FIXED)
-
-Two bugs in `cuda_compute_viterbi_thresholds_kernel` caused GPU scanning
-Viterbi to produce ~7x more sub-windows than CPU, inflating `p7_domaindef`
-runtime (75-94% of wall) by ~7x:
-
-1. **Primary bug: wrong Gumbel inverse survival function** (~5000 int16 units).
-   `esl_gumbel_invsurv_device` computed `mu - log(-log(p))/lambda` (inverse
-   CDF) instead of `mu - log(-log(1-p))/lambda` (inverse survival). With
-   F2=0.003, this produced `invP ≈ -11.8` instead of the correct `≈ -1.3`,
-   lowering thresholds by `0.693 × 10.53 × 721.3 ≈ 5265` int16 units.
-
-2. **Secondary bug: nullsc mismatch for bias subtraction** (variable, up to
-   ~2500 units for long windows). The kernel subtracted `null(loc_window_len)`
-   from `bias_scores[i]` to isolate composition bias, but `bias_scores[i]` was
-   computed using `window_len`. When `window_len > max_length`, the kernel used
-   the wrong null model base, making `filtersc` more negative and further
-   lowering thresholds.
+`hits=718` in the diagnostic line is the internal `P7_TOPHITS` count before final output formatting. The comparable output-row count was 648 for both CPU-4 and GPU.
 
 ## Reproducing
 
 ```sh
-# CPU per-stage (sums across worker threads; divide by --cpu N for per-thread wall)
 src/nhmmer --cpu 4 --noali \
     benchmark-data/nucleotide-bench/work/query_medium.hmm \
-    benchmark-data/nucleotide-bench/work/chr22.fa \
-    2>&1 | grep '^# Stage'
+    benchmark-data/nucleotide-bench/work/chr22.fa
 
-# GPU per-stage (parallel CPU stages reported as max-across-workers,
-# mutex-serialized GPU stages summed)
 src/nhmmer --gpu --cpu 4 --noali \
     benchmark-data/nucleotide-bench/work/query_medium.hmm \
-    benchmark-data/nucleotide-bench/work/chr22.fa \
-    2>&1 | grep -E 'GPU timing|^  '
+    benchmark-data/nucleotide-bench/work/chr22-overlap.nucdb.nucdb
 ```
 
-## Benchmark Script
-
-Run `test-speed/x-nhmmer-gpu-bench` for quick CPU-1 / CPU-4 / GPU-4 wall
-comparison.
+Run commands sequentially to avoid GPU contention. For benchmark claims, report the query, target database, flags, HMMER elapsed, external wall time, output-row count, and GPU timing breakdown.
