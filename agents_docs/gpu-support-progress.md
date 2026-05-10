@@ -136,7 +136,7 @@ A GPU-accelerated path for `nhmmer` is available via `--gpu`. Rebased on latest 
 - **GPU domain rescoring** (`p7_cuda_DomainRescoreBatch`): Cross-window batching of all domains (6 kernels: Fwd/Bck/Decoding/OA/OATrace/Domcorr) + trim batching. Replaces `rescore_isolated_domain` (the 67-91% bottleneck). 4/6 kernels use T-thread-per-block with parallel prefix scan.
 - **GPU FB parser** (`nhmmer_gpu_run_fb_parser_batch`): Batch Forward+Backward parser on GPU. Forward-Backward split: prefilter saves xf, Backward-only for F3 survivors.
 - **Forward pre-filter** (`nhmmer_gpu_forward_prefilter`): GPU Forward score-only with F3*2.0 relaxed gate. Removes 45-60% of sub-windows before FB parser.
-- **Skip-Forward optimization**: `p7_pli_postFwd_LongTarget()` injects GPU-precomputed xf/fwdsc, skipping redundant CPU Forward. Gated on `--gpu-fwd-prefilter`.
+- **Skip-Forward optimization**: `p7_pli_postFwd_LongTarget()` injects GPU-precomputed xf/fwdsc, skipping redundant CPU Forward. Default-on with `--gpu`; hidden `--gpu-no-fwd-prefilter` restores the older CPU Fwd/Bwd continuation for diagnostics.
 - **Batch filter** (`--gpu-batch`): Packs merged windows as synthetic ESL_DSQDATA_CHUNK (zero-copy), runs GPU MSV + null + bias batch scoring, applies F1 gating.
 - **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors (warps_per_block=1 for short windows). Windows below F2 threshold skipped before scanning Viterbi.
 - **Threading**: Post-vit workers distributed across N CPU threads with deep-copied per-thread state.

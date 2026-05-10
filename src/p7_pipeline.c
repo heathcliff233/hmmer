@@ -1481,12 +1481,12 @@ ERROR:
  *            passes the pre-computed fwdsc. Runs Backward + domain definition
  *            + hit reporting.
  */
-int
-p7_pli_postFwd_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS *hitlist, const P7_SCOREDATA *data,
+static int
+postFwd_LongTarget_Core(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS *hitlist, const P7_SCOREDATA *data,
     int64_t seqidx, int window_start, int window_len, ESL_DSQ *subseq,
     int64_t seq_start, char *seq_name, char *seq_source, char* seq_acc, char* seq_desc, int seq_len,
     int complementarity, int *overlap, P7_PIPELINE_LONGTARGET_OBJS *pli_tmp,
-    float fwdsc)
+    int run_backward, int enforce_f3, float fwdsc)
 {
   P7_DOMAIN        *dom     = NULL;
   P7_HIT           *hit     = NULL;
@@ -1523,7 +1523,7 @@ p7_pli_postFwd_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHI
   filtersc =  nullsc + (bias_filtersc * ( F3_L>window_len ? 1.0 : (float)F3_L/window_len) );
   seq_score = (fwdsc - filtersc) / eslCONST_LOG2;
   P = esl_exp_surv(seq_score,  om->evparam[p7_FTAU],  om->evparam[p7_FLAMBDA]);
-  if (P > pli->F3 ) return eslOK;
+  if (enforce_f3 && P > pli->F3 ) return eslOK;
 
   pli->pos_past_fwd += window_len - *overlap;
 
@@ -1538,9 +1538,11 @@ p7_pli_postFwd_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHI
   dsq_holder = pli_tmp->tmpseq->dsq;
   pli_tmp->tmpseq->dsq = subseq;
 
-  /* Backwards parser pass using pre-filled oxf for scale factors */
-  p7_omx_GrowTo(pli->oxb, om->M, 0, window_len);
-  p7_BackwardParser(subseq, window_len, om, pli->oxf, pli->oxb, NULL);
+  if (run_backward) {
+    /* Backwards parser pass using pre-filled oxf for scale factors */
+    p7_omx_GrowTo(pli->oxb, om->M, 0, window_len);
+    p7_BackwardParser(subseq, window_len, om, pli->oxf, pli->oxb, NULL);
+  }
 
   status = p7_domaindef_ByPosteriorHeuristics(pli_tmp->tmpseq, NULL, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, TRUE,
                                               pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE);
@@ -1573,43 +1575,26 @@ p7_pli_postFwd_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHI
 
       dom_bias   = dom->domcorrection;
       p7_bg_SetLength(bg, ESL_MAX(om->max_length, env_len));
+      p7_bg_NullOne  (bg, subseq, ESL_MAX(om->max_length, env_len), &nullsc);
+      dom_score  = (bitscore - (nullsc))  / eslCONST_LOG2;
+      dom_lnP   = esl_exp_logsurv(dom_score, om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA]);
 
-      dom_score  = (bitscore - (nullsc + dom_bias))  / eslCONST_LOG2;
-      dom_lnP    = esl_exp_logsurv (dom_score,  om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA]);
-
-      if (exp(dom_lnP) * pli->Z > pli->E ) {
-        p7_alidisplay_Destroy(dom->ad);
-        pli->time_output += p7_pipeline_WallTime() - _t_out0;
-        continue;
-      }
+      if (pli->do_alignment_score_calc)
+        p7_pli_computeAliScores(dom, subseq, data, om->abc->Kp);
 
       p7_tophits_CreateNextHit(hitlist, &hit);
 
-      ESL_ALLOC(hit->dcl, sizeof(P7_DOMAIN));
-      hit->dcl[0] = pli->ddef->dcl[d];
-
-      if (seq_len)    hit->dcl[0].ad->L  = seq_len;
-      else            hit->dcl[0].ad->L  = 0;
-
-      if (pli->mode == p7_SCAN_MODELS) {
-        ESL_ALLOC(hit->name, sizeof(char) * (1 + strlen(om->name)));
-        ESL_ALLOC(hit->acc,  sizeof(char) * (1 + (om->acc  ? strlen(om->acc)  : 0)));
-        ESL_ALLOC(hit->desc, sizeof(char) * (1 + (om->desc ? strlen(om->desc) : 0)));
-        strcpy(hit->name, om->name);
-        strcpy(hit->acc,  (om->acc  ? om->acc  : "" ));
-        strcpy(hit->desc, (om->desc ? om->desc : "" ));
-      } else {
-        if ((status  = esl_strdup(seq_name, -1, &(hit->name)))  != eslOK) esl_fatal("allocation failure");
-        if ((status  = esl_strdup(seq_acc,  -1, &(hit->acc)))   != eslOK) esl_fatal("allocation failure");
-        if ((status  = esl_strdup(seq_desc, -1, &(hit->desc)))  != eslOK) esl_fatal("allocation failure");
-      }
-
-      hit->ndom       = 1;
+      hit->ndom        = 1;
       hit->best_domain = 0;
 
       hit->window_length = om->max_length;
       hit->seqidx = seqidx;
       hit->subseq_start = seq_start;
+
+      ESL_ALLOC(hit->dcl, sizeof(P7_DOMAIN));
+      hit->dcl[0] = pli->ddef->dcl[d];
+
+      hit->dcl[0].ad->L = seq_len;
 
       if (complementarity == p7_NOCOMPLEMENT) {
         hit->dcl[0].ienv       += seq_start + window_start - 2;
@@ -1628,40 +1613,39 @@ p7_pli_postFwd_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHI
       }
 
       hit->pre_score = bitscore  / eslCONST_LOG2;
-      hit->pre_lnP   = dom_lnP;
+      hit->pre_lnP   = esl_exp_logsurv (hit->pre_score,  om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA]);
 
       hit->dcl[0].dombias  = dom_bias;
-      hit->dcl[0].bitscore = dom_score;
-      hit->dcl[0].lnP      = dom_lnP;
+      hit->sum_score  = hit->score  = hit->dcl[0].bitscore = dom_score;
+      hit->sum_lnP    = hit->lnP    = hit->dcl[0].lnP  = dom_lnP;
 
-      if (data->prefix_lengths) {
-        p7_pli_computeAliScores(dom, subseq, data, om->abc->Kp);
+      if (pli->mode == p7_SEARCH_SEQS)
+      {
+        if (                       (status  = esl_strdup(seq_name, -1, &(hit->name)))  != eslOK) ESL_EXCEPTION(eslEMEM, "allocation failure");
+        if (seq_acc[0]  != '\0' && (status  = esl_strdup(seq_acc,  -1, &(hit->acc)))   != eslOK) ESL_EXCEPTION(eslEMEM, "allocation failure");
+        if (seq_desc[0] != '\0' && (status  = esl_strdup(seq_desc, -1, &(hit->desc)))  != eslOK) ESL_EXCEPTION(eslEMEM, "allocation failure");
+      } else {
+        if ((status  = esl_strdup(om->name, -1, &(hit->name)))  != eslOK) esl_fatal("allocation failure");
+        if ((status  = esl_strdup(om->acc,  -1, &(hit->acc)))   != eslOK) esl_fatal("allocation failure");
+        if ((status  = esl_strdup(om->desc, -1, &(hit->desc)))  != eslOK) esl_fatal("allocation failure");
       }
 
-      hit->score     = hit->pre_score;
-      hit->lnP       = hit->pre_lnP;
-      hit->sortkey   = (float) hit->lnP;
-      hit->sum_score = hit->score;
-      hit->sum_lnP   = hit->lnP;
-
-      hit->nexpected  = pli->ddef->nexpected;
-      hit->nregions   = pli->ddef->nregions;
-      hit->nclustered = pli->ddef->nclustered;
-      hit->noverlaps  = pli->ddef->noverlaps;
-      hit->nenvelopes = pli->ddef->nenvelopes;
-      hit->flags      = 0;
-
-      if (pli->use_bit_cutoffs) {
-        if (p7_pli_TargetReportable(pli, hit->score, hit->lnP)) {
+      if (pli->use_bit_cutoffs)
+      {
+        if (p7_pli_TargetReportable(pli, hit->score, hit->lnP))
+        {
           hit->flags |= p7_IS_REPORTED;
           if (p7_pli_TargetIncludable(pli, hit->score, hit->lnP))
             hit->flags |= p7_IS_INCLUDED;
         }
-        if (p7_pli_DomainReportable(pli, hit->dcl[0].bitscore, hit->dcl[0].lnP)) {
+
+        if (p7_pli_DomainReportable(pli, hit->dcl[0].bitscore, hit->dcl[0].lnP))
+        {
           hit->dcl[0].is_reported = TRUE;
           if (p7_pli_DomainIncludable(pli, hit->dcl[0].bitscore, hit->dcl[0].lnP))
             hit->dcl[0].is_included = TRUE;
         }
+
       }
       pli->time_output += p7_pipeline_WallTime() - _t_out0;
   }
@@ -1670,6 +1654,30 @@ p7_pli_postFwd_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHI
 
 ERROR:
   ESL_EXCEPTION(eslEMEM, "Error in LongTarget pipeline\n");
+}
+
+int
+p7_pli_postFwd_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS *hitlist, const P7_SCOREDATA *data,
+    int64_t seqidx, int window_start, int window_len, ESL_DSQ *subseq,
+    int64_t seq_start, char *seq_name, char *seq_source, char* seq_acc, char* seq_desc, int seq_len,
+    int complementarity, int *overlap, P7_PIPELINE_LONGTARGET_OBJS *pli_tmp,
+    float fwdsc)
+{
+  return postFwd_LongTarget_Core(pli, om, bg, hitlist, data, seqidx, window_start, window_len,
+                                 subseq, seq_start, seq_name, seq_source, seq_acc, seq_desc,
+                                 seq_len, complementarity, overlap, pli_tmp, TRUE, TRUE, fwdsc);
+}
+
+int
+p7_pli_postFwdBwd_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS *hitlist, const P7_SCOREDATA *data,
+    int64_t seqidx, int window_start, int window_len, ESL_DSQ *subseq,
+    int64_t seq_start, char *seq_name, char *seq_source, char* seq_acc, char* seq_desc, int seq_len,
+    int complementarity, int *overlap, P7_PIPELINE_LONGTARGET_OBJS *pli_tmp,
+    float fwdsc)
+{
+  return postFwd_LongTarget_Core(pli, om, bg, hitlist, data, seqidx, window_start, window_len,
+                                 subseq, seq_start, seq_name, seq_source, seq_acc, seq_desc,
+                                 seq_len, complementarity, overlap, pli_tmp, FALSE, TRUE, fwdsc);
 }
 
 

@@ -190,7 +190,8 @@ static ESL_OPTIONS options[] = {
   { "--gpu-batch",        eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU batch SSV/bias filtering on merged windows",            99 },
   { "--gpu-vit-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Viterbi as pre-filter before scanning Viterbi",         99 },
   { "--gpu-vit-longtarget",eslARG_NONE, FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU scanning Viterbi for longtarget sub-window detection",   99 },
-  { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU Forward as pre-filter for sub-windows",                 12 },
+  { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "deprecated: GPU Forward/Backward parser reuse is default with --gpu", 99 },
+  { "--gpu-no-fwd-prefilter",eslARG_NONE,FALSE, NULL, NULL,    NULL, "--gpu", "--gpu-fwd-prefilter", "diagnostic: disable default GPU Forward/Backward parser reuse", 99 },
   { "--gpu-cpu-postmsv", eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "bypass GPU scanning Viterbi/Fwd; use CPU postSSV for alignment testing", 99 },
   { "--gpu-compare",     eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "debug: compare GPU filter scores to CPU at each pipeline stage", 99 },
 #endif
@@ -1140,7 +1141,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.do_gpu_batch   = TRUE;
         gpu_info.do_gpu_vit     = TRUE;
         gpu_info.do_gpu_vit_lt  = TRUE;
-        gpu_info.do_gpu_fwd     = esl_opt_GetBoolean(go, "--gpu-fwd-prefilter");
+        gpu_info.do_gpu_fwd     = ! esl_opt_GetBoolean(go, "--gpu-no-fwd-prefilter");
         gpu_info.do_cpu_postmsv = esl_opt_GetBoolean(go, "--gpu-cpu-postmsv");
         gpu_info.do_compare     = esl_opt_GetBoolean(go, "--gpu-compare");
         gpu_info.h_ssv_scores   = NULL;
@@ -1151,6 +1152,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.n_vit_lt_windows_in  = 0;
         gpu_info.n_vit_lt_windows_out = 0;
         gpu_info.n_post_vit_windows   = 0;
+        gpu_info.n_fwd_survivor_windows = 0;
         gpu_info.t_ssv           = 0;
         gpu_info.t_merge         = 0;
         gpu_info.t_batch_filter  = 0;
@@ -1190,10 +1192,10 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         info[0].pli->nseqs = gpu_nseqs;
 
         if (gpu_info.n_post_vit_windows > 0)
-          fprintf(stderr, "GPU pipeline: vit_lt_in=%" PRId64 " vit_lt_out=%" PRId64 " post_vit=%" PRId64 " hits=%" PRId64 " (%.1f%% windows→hits)\n",
+          fprintf(stderr, "GPU pipeline: vit_lt_in=%" PRId64 " vit_lt_out=%" PRId64 " post_vit=%" PRId64 " post_fwd=%" PRId64 " hits=%" PRId64 " (%.1f%% windows kept by Fwd)\n",
                   gpu_info.n_vit_lt_windows_in, gpu_info.n_vit_lt_windows_out,
-                  gpu_info.n_post_vit_windows, (int64_t)info[0].th->N,
-                  100.0 * (double)info[0].th->N / (double)gpu_info.n_post_vit_windows);
+                  gpu_info.n_post_vit_windows, gpu_info.n_fwd_survivor_windows, (int64_t)info[0].th->N,
+                  100.0 * (double)gpu_info.n_fwd_survivor_windows / (double)gpu_info.n_post_vit_windows);
 
         {
           double t_total = gpu_info.t_ssv + gpu_info.t_merge + gpu_info.t_batch_filter
@@ -1995,6 +1997,3 @@ assign_Lengths(P7_TOPHITS *th, ID_LENGTH_LIST *id_length_list) {
 
   return eslOK;
 }
-
-
-

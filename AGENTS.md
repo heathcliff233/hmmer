@@ -22,18 +22,51 @@ Easel is not a leaf dependency. HMMER uses it for core runtime objects (`ESL_MSA
 
 Search results are reported as hits and domains with bit scores, E-values, coordinates, alignments, and per-stage pipeline statistics. Much of the code exists to make profile HMM searches fast while preserving their statistical behavior.
 
-GPU status snapshot:
+## Build Quick Reference
 
-- The current `hmmsearch --gpu` path is protein-only, opt-in, and requires `hmmseqdb`/Easel protein `dsqdata` input.
+CPU-only development build:
+
+```sh
+./configure --enable-threads
+make -j$(nproc)
+make check
+```
+
+CUDA development build:
+
+```sh
+./configure --enable-cuda --with-cuda-arch=sm_89 --enable-threads
+make -j$(nproc)
+```
+
+Important targets:
+
+- `make`: builds Easel, `libdivsufsort`, HMMER programs, and profmark.
+- `make dev`: also builds test drivers, benchmarks, examples, and extra development tools.
+- `make tests`: compiles test drivers.
+- `make check`: runs Easel and HMMER test suites.
+- `make -C src hmmsearch nhmmer hmmseqdb hmmnucdb`: rebuilds the main GPU-facing programs.
+- `make -C src/impl_sse msvfilter_utest`: rebuilds a selected optimized implementation unit test.
+
+## GPU Status Snapshot
+
+- The current `hmmsearch --gpu` path is protein-only, opt-in, and requires an `hmmseqdb`-built protein target database.
+- `hmmseqdb` also writes a `.gpudb` GPU-native mmap database. Current `.gpudb` v2 embeds sequence metadata (name, accession, description, taxid), so `hmmsearch --gpu` can skip `dsqdata` per-query I/O entirely when metadata is present.
+- The current `nhmmer --gpu` path is nucleotide long-target search, opt-in, and works on ordinary FASTA or a prebuilt `.nucdb` from `hmmnucdb`. `.nucdb` is mmap-based, pre-chunked, stores both strands by default, and can enable a GPU-resident SSV path when built with enough overlap for the query model length.
 - The repository applies an Easel `dsqdata` chunk-sizing patch at build time from `patches/easel-dsqdata-open-sized.patch`; do not edit the submodule in place for this work.
 - Keep GPU work in the existing autotools build. Do not add CMake to this repository for external CUDA-HMM references; those projects are design references only. Borrow high-level implementation ideas where useful, but do not copy code, vendor sources, link external libraries, or add external build support.
 - In this configured workspace, `nvcc` is `/usr/local/cuda/bin/nvcc`; exporting `CUDA_HOME=/usr/local/cuda` is useful for reproducibility but the generated Makefile already records the absolute compiler path.
-- CUDA currently accelerates MSV plus the biased-composition filter in the GPU path. Bias reuses the uploaded MSV sequence batch; avoid a second dsq transfer when adding adjacent GPU stages. For exact hit parity, the current GPU path still uses CPU `p7_bg_FilterScore()` and a CPU `p7_MSVFilter()` rescue at the bias/F1 boundary for GPU MSV survivors; do not remove that without all-13 profmark parity evidence.
-- `hmmsearch --gpu` separates dsqdata load sizing (`--gpu-load-seqs`, `--gpu-load-res`) from CUDA search-batch sizing (`--gpu-batch-seqs`, `--gpu-batch-res`) and can pack multiple loaded chunks into one CUDA filter batch. The measured default remains 32,768 sequences / 8M residues for both load and search; larger 12M search batches reduced launches but did not improve all-13 profmark wall time.
-- Current profmark runs show real end-to-end speedups on representative protein queries. The current all-13 non-compare refinement run in `benchmark-data/profmark-current/gpu-audit/postvit-fwdbck-refine-all13-nocompare-20260505/` with `--gpu-vit-prefilter --gpu-fwd-prefilter --gpu-fb-parser` recorded CPU wall 29.69 sec, GPU wall 16.57 sec, aggregate speedup 1.792x, `cpu_only=0`, and `gpu_only=0`. The paired all-13 compare run in `.../postvit-fwdbck-refine-all13-compare-20260505/` remained parity-clean at the hit-set level (`cpu_only=0`, `gpu_only=0`) with zero `CUDAVIT`/`CUDAFWD` mismatches and bounded `CUDAFB` domain-input diagnostics. Treat `benchmark-data/profmark-current` as the real benchmark, not tutorial-sized inputs.
-- The active sensitivity boundary is the bias-corrected F1 decision, where CPU SSE `p7_MSVFilter()` may accept the `p7_SSVFilter()` shortcut while GPU v1 computes full MSV. The current GPU path preserves all-13 parity by using CPU-compatible bias/MSV boundary checks. A standalone GPU SSV kernel is available via `--gpu-ssv` (register-optimized design: SSV fast-path with in-kernel MSV fallback for ~0.3% of sequences); it produces bitwise-identical results to the monolithic MSV kernel, is parity-verified on all-13 profmark, and achieves 1.36x kernel speedup over monolithic MSV via register-based DP, precomputed q/z lookups, and warp shuffle for boundary values.
-- Remaining GPU costs are mainly CPU survivor continuation after bias. In the current all-13 non-compare refinement run, the largest aggregate bucket is `gpu_survivor` (4.48 sec), followed by CPU `stage_msv_host` (3.12 sec), `stage_vit` (2.58 sec), and `stage_fwd` (2.19 sec). Forward/Backward kernel compute is faster (`CPU_FWD_BCK / GPU_KERNEL_FWD_BCK = 4.077x`) but end-to-end speed is still limited by host continuation.
-- Forward/Backward remains a coupled state-transfer problem: `p7_ForwardParser()` provides both the F3 score and `P7_OMX` state needed by Backward/domain. The current opt-in path uses pure GPU F3 decision policy in normal mode (no gray-zone CPU rerun at F3 gating), while compare flags remain for diagnostics (`--gpu-fwd-compare`, `--gpu-fb-compare`). Backward, domain definition, null2, hit storage, thresholding, and output should stay CPU-side for accepted/default paths.
+- GPU code lives in `src/cuda/`, with public declarations in `src/cuda/p7_cuda.h`. `src/cuda_msv.h` is a compatibility wrapper only; include `src/cuda/p7_cuda.h` for new CUDA-facing work. Non-CUDA builds use `src/cuda/p7_cuda_stub.c`; explicit `--gpu` must fail with a direct "HMMER was built without CUDA support" diagnostic rather than silently falling back.
+- `hmmsearch --gpu` is serial on the CPU side (`--cpu 0` required) and protein-only. It accelerates fused SSV/MSV + null + bias + F1 gate, Viterbi prefilter, Forward prefilter, and Forward/Backward parser by default. Domain definition, null2, hit storage, thresholding, and output remain CPU-side.
+- The default protein prefilter is `cuda_ssv_null_bias_gate_kernel<STRIDE, WARPS>` in `src/cuda/p7_cuda_ssv.cu`: one sequence per warp, fused SSV/null/bias/F1 gating, in-kernel MSV fallback for rare SSV misses, survivor compaction via `atomicAdd`, and survivor-indexed D2H transfers. The legacy separate-kernel path is only for diagnostics via `--gpu-legacy-pipeline`/compare flags.
+- Exact protein hit parity currently depends on GPU-side double-precision survivor bias recomputation (`p7_cuda_BiasFilterSurvivors`), not CPU `p7_bg_FilterScore()`/`p7_MSVFilter()` rescue. Do not reintroduce CPU fallback at the bias/F1 boundary without evidence that it is needed.
+- `hmmsearch --gpu` separates dsqdata load sizing (`--gpu-load-seqs`, `--gpu-load-res`) from CUDA search-batch sizing (`--gpu-batch-seqs`, `--gpu-batch-res`) and can pack multiple loaded chunks into one CUDA batch. Defaults remain 32,768 sequences / 8M residues for both load and search.
+- Protein GPU resident mode uploads the database once with `p7_cuda_engine_UploadDatabase()` when memory allows; otherwise it streams batches. Engine reuse creates the CUDA engine once before the query loop and resets stats per query, so multi-query profmark runs amortize CUDA initialization.
+- Current protein profmark snapshot: all-13 multi-query single-process run, resident `.gpudb` v2, all GPU stages on, exact hit parity (`cpu_only=0`, `gpu_only=0`), roughly 1.27s GPU wall versus ~9.3s CPU-1 and ~4.8s CPU-4 on the documented RTX 4090 setup. Treat `benchmark-data/profmark-current` as the real protein benchmark, not tutorial-sized inputs.
+- `nhmmer --gpu` currently enables GPU SSV long-target scanning, GPU batch MSV/null/bias filtering, GPU Viterbi prefilter, GPU scanning Viterbi, a GPU Forward prefilter for post-Viterbi survivor reduction, GPU Forward/Backward parser matrix reuse, and threaded CPU domain/hit processing by default. `--gpu-fwd-prefilter` is retained as a deprecated no-op compatibility flag; use hidden `--gpu-no-fwd-prefilter` only for diagnostics against the older conservative CPU Forward/Backward continuation.
+- A nucleotide `p7_cuda_DomainRescoreBatch()` API exists for cross-window domain/trim batches, but the accepted default `nhmmer --gpu` path still keeps domain definition, null2, hit storage, thresholding, and output CPU-side after the GPU parser handoff. Current chr22 smoke evidence is hit-count clean, while exact envelope coordinates can show the same 1 bp jitter already seen between repeated default GPU runs.
+- Current nucleotide benchmark snapshot: chr22/hg38 target, RTX 4090, 4 CPU threads. Controlled query_medium rerun: CPU-4 FASTA baseline 1.81s / 215 summary hits; old default on ordinary `.nucdb` 2.41s; old default on overlap `.nucdb` 1.92s; best observed GPU Fwd/Bwd handoff on overlap `.nucdb` 1.70s / 215 summary hits (1.06x versus CPU-4). After making the handoff default, verification showed default overlap `.nucdb` takes the handoff path (`GPU FB parser` nonzero and CPU Forward/Backward stage time zero), with observed elapsed times varying around 1.95-2.08s. Do not compare old `--gpu-fwd-prefilter` targeted timings to `test-speed/x-nhmmer-gpu-bench` overlap timings without matching the target database and GPU mode.
+- GPU timing output has three layers: `CUDA *` device event timings, `Stage *` CPU pipeline timings, and `Exact *` wall buckets. Some reported buckets intentionally overlap, especially `vit_fwd_dispatch` with GPU kernel time; check `Exact delta_vs_wall [OK]` before trusting timing changes.
 
 ## Core Terms
 
@@ -78,11 +111,20 @@ Key structures to recognize early:
 Major execution families:
 
 - Model build and I/O: `hmmbuild`, HMM readers/writers, `hmmpress`, `hmmfetch`, `hmmconvert`.
-- Protein search: `hmmsearch`, `phmmer`, `jackhmmer`, and `hmmscan`.
-- Nucleotide search: `nhmmer` and `nhmmscan`, using long-target window logic and nucleotide-specific E-values.
+- Protein search: `hmmsearch`, `phmmer`, `jackhmmer`, and `hmmscan`. GPU acceleration is currently in `hmmsearch --gpu` only.
+- Nucleotide search: `nhmmer` and `nhmmscan`, using long-target window logic and nucleotide-specific E-values. GPU acceleration is currently in `nhmmer --gpu` only.
 - FM-index databases: `makehmmerdb` plus `libdivsufsort` and FM-index search helpers.
 - Daemon/cache paths: `hmmpgmd`, `hmmpgmd_shard`, cached sequence/HMM data, and command/status serialization.
 - Tests/docs/benchmarks: `testsuite/`, `documentation/`, `tutorial/`, `profmark/`, `test-speed/`, and `autobuild/`.
+
+## Code Conventions
+
+- Follow Easel/HMMER error and allocation style: `eslOK` returns, `ESL_ALLOC`, `ESL_XFAIL`, and `ERROR:` cleanup labels.
+- Use `ESL_OPTIONS` tables for CLI parsing; do not hand-roll option parsing.
+- Use `P7_`/`p7_` prefixes for HMMER types and functions, and `ESL_`/`esl_` prefixes for Easel.
+- Unit tests are commonly compiled from source files via `p7*_TESTDRIVE` defines in `src/Makefile.in`.
+- CUDA support is additive. Do not turn it into an `impl_cuda` replacement for `src/impl_sse`, `src/impl_neon`, or `src/impl_vmx`.
+- Do not change pressed HMM database files (`.h3m/.h3i/.h3f/.h3p`) as part of GPU work unless that is explicitly the task.
 
 ## Task Index
 
@@ -98,8 +140,13 @@ Use `agents_docs/` only for files relevant to the task:
 - `agents_docs/nucleotide-and-fm-index.md`: `nhmmer`, `nhmmscan`, FM-index databases, nucleotide coordinate risks.
 - `agents_docs/parallel-daemon-cache.md`: threads, MPI, daemon programs, sequence/HMM caches.
 - `agents_docs/tests-docs-benchmarks.md`: build targets, tests, docs, benchmarks, local benchmark data.
-- `agents_docs/gpu-support-todo.md`: planned CUDA GPU support, `hmmsearch --gpu`, GPU-capable sequence database construction, and open validation/tuning work.
-- `agents_docs/gpu-support-progress.md`: current GPU implementation status, benchmark results, and remaining gaps.
+- `agents_docs/gpu-support-progress.md`: current protein `hmmsearch --gpu` implementation status, benchmark results, and remaining gaps. Prefer this over older stale GPU notes when docs disagree.
+- `agents_docs/gpu-support-todo.md`: protein GPU open work, validation checklist, and deferred scope. Some historical/deferred wording may lag current `nhmmer --gpu` support; verify against code.
+- `agents_docs/gpu-support-history.md`: dated protein GPU attempts, reversions, and lessons learned.
+- `agents_docs/gpu-timing-analysis.md`: GPU timing instrumentation semantics, overlap caveats, profiling results, and optimization opportunities.
+- `agents_docs/nhmmer-gpu-progress.md`: current nucleotide `nhmmer --gpu` architecture, file map, benchmark results, parity notes, and performance analysis.
+- `agents_docs/nhmmer-gpu-todo.md`: nucleotide GPU phase checklist, known issues, and remaining performance work.
+- `agents_docs/nhmmer-gpu-perf-gap.md`: why single-query GPU `nhmmer` remains slower than CPU-4, with root-cause timing analysis.
 - `agents_docs/cuda-hmm-reference.md`: reference notes for the external `divinrkz/cuda-hmm` Viterbi/Forward/Backward implementation, including which high-level CUDA DP ideas are useful and why its code/build system should not be copied into HMMER.
 - `agents_docs/nucleotide-benchmark.md`: nucleotide benchmark setup (chr22 target, query HMMs, FM-index, baseline timings, rebuild instructions).
 
@@ -112,6 +159,21 @@ For code changes, read in this order before editing:
 3. The owning implementation module named by the entrypoint or function prefix.
 4. `src/Makefile.in` to confirm whether changed code is library code, a program object, a unit-test driver, an example, a benchmark, or architecture-specific code.
 
+For protein GPU work, read:
+
+1. `src/hmmsearch.c` for CLI validation, GPU option defaults, engine lifecycle, `.gpudb`/`dsqdata` opening, and query loop integration.
+2. `src/hmmsearch_gpu.c` for batch assembly, fused SSV/null/bias/F1 orchestration, resident versus streaming paths, survivor processing, compare diagnostics, and CPU post-Fwd continuation.
+3. `src/cuda/p7_cuda.h` and `src/cuda/p7_cuda_internal.h` for CUDA API boundaries and engine-owned buffers.
+4. Stage-owned CUDA files: `p7_cuda_ssv.cu`, `p7_cuda_bias.cu`, `p7_cuda_viterbi.cu`, `p7_cuda_forward.cu`, `p7_cuda_fb_parser.cu`, and `p7_cuda_runtime.cu`.
+5. Database helpers: `src/hmmseqdb.c`, `src/p7_gpudb.c`, and `src/p7_gpudb.h`.
+
+For nucleotide GPU work, read:
+
+1. `src/nhmmer.c` for CLI options, engine lifecycle, `.nucdb` detection, and per-query GPU handoff.
+2. `src/nhmmer_internal.h` and `src/nhmmer_gpu.c` for `NHMMER_GPU_INFO`, window batches, GPU long-target orchestration, GPU Forward survivor reduction, default parser-matrix reuse, CPU domain handoff, and hit reporting.
+3. `src/cuda/p7_cuda_ssv_longtarget.cu`, `src/cuda/p7_cuda_viterbi_longtarget.cu`, `src/cuda/p7_cuda_fb_parser.cu`, and `src/cuda/p7_cuda_domain_rescore.cu`.
+4. Database helpers: `src/hmmnucdb.c`, `src/p7_nucdb.c`, and `src/p7_nucdb.h`.
+
 Prefer existing project patterns and helper APIs over new layering.
 
 ## Verification And Data
@@ -120,4 +182,6 @@ Do not report full configure/build/check verification unless `easel/` is present
 
 Benchmark datasets are local working data, not repository content. Put downloaded/generated benchmark data under ignored `benchmark-data/`; see `agents_docs/tests-docs-benchmarks.md` for the protein `profmark` dataset and nucleotide benchmark smoke data.
 
-For GPU work, prefer the protein `profmark` dataset plus an `hmmseqdb`-built `dsqdata` target database. Record both CPU and GPU wall time, kernel time, transfer time, batch size, and sensitivity deltas in `agents_docs/gpu-support-progress.md` as the work lands.
+For protein GPU work, prefer the protein `profmark` dataset plus an `hmmseqdb`-built target database (`dsqdata` and `.gpudb`). Record CPU/GPU wall time, CUDA H2D/kernel/D2H time, batch sizes/counts, pass counts for MSV/bias/Viterbi/Forward, and final hit deltas in `agents_docs/gpu-support-progress.md` as the work lands.
+
+For nucleotide GPU work, use the chr22 nucleotide benchmark under `benchmark-data/nucleotide-bench/` and the scripts in `test-speed/` (`x-nhmmer-gpu-bench`, `x-nhmmer-gpu-parity`) when available. Record CPU-1, CPU-4, GPU FASTA, GPU `.nucdb`, overlap `.nucdb`, hit counts, per-stage timing, and parity notes in `agents_docs/nhmmer-gpu-progress.md`.

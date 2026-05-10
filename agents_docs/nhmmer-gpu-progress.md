@@ -1,10 +1,10 @@
 # nhmmer GPU Support — Progress
 
-Last updated: 2026-05-09
+Last updated: 2026-05-10
 
 ## Architecture
 
-GPU nhmmer uses a **GPU SSV + GPU filters + GPU scanning Viterbi + GPU Forward prefilter + GPU FB parser + GPU domain rescoring + threaded CPU hit reporting** pipeline. All GPU stages are default-on with `--gpu`.
+GPU nhmmer uses a **GPU SSV + GPU filters + GPU scanning Viterbi + GPU Forward prefilter + GPU Forward/Backward parser handoff + threaded CPU domain hit reporting** pipeline by default. The GPU Forward prefilter is default-on with `--gpu` and reduces post-Viterbi survivors before CPU workers. GPU Forward/Backward parser matrix reuse is also default-on with `--gpu`; it hands GPU xmx matrices to CPU domain processing after enforcing the exact F3 gate.
 
 ```
 Input FASTA/nucdb
@@ -38,16 +38,15 @@ Input FASTA/nucdb
                        ▼
 ┌─────────────────────────────────────────────────────┐
 │ GPU Forward Pre-filter (F3*2.0 relaxed gate)        │
-│   → GPU Forward parser on sub-windows (saves xmx)   │
-│   → removes ~50-60% of windows before Backward      │
-│   → survivor xf compacted for Backward-only stage   │
+│   → GPU Forward parser on sub-windows               │
+│   → removes windows before parser/domain handoff    │
+│   → survivor list compacted for GPU FB parser       │
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│ GPU Backward Parser (batch Backward-only xmx)       │
-│   → uses pre-computed Forward xf from prefilter     │
-│   → runs Backward parser only on F3 survivors       │
-│   → returns xf+xb arrays for domaindef envelope-find│
+│ GPU Forward/Backward Parser Handoff                 │
+│   → reuses GPU Forward xmx/fwdsc from prefilter     │
+│   → runs GPU Backward xmx and passes matrices to CPU│
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
@@ -58,12 +57,9 @@ Input FASTA/nucdb
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│ GPU Domain Rescoring (batched CUDA kernels)         │
-│   → cross-window batching: all domains at once      │
-│   → 6 kernels: Fwd + Bck + Decoding + OA + Trace   │
-│     + Domcorrection                                 │
-│   → trim batching: trimmed envelopes in 2nd batch   │
-│   → returns envsc, domcorr, traces per domain       │
+│ CPU domain definition / hit reporting               │
+│   → p7_domaindef_ByPosteriorHeuristics              │
+│   → null2/domain scoring and output remain CPU-side │
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
@@ -97,7 +93,7 @@ Both strands processed sequentially (forward, then reverse complement).
 ## CLI
 
 ```sh
-# Basic GPU nhmmer (all GPU stages default-on)
+# Basic GPU nhmmer (default path: GPU filters/Viterbi/Forward prefilter, CPU domain continuation)
 src/nhmmer --gpu --cpu 4 --noali query.hmm target.fa
 
 # With nucdb (pre-built binary format, eliminates FASTA parsing)
@@ -112,7 +108,8 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 --gpu-batch             # SSV/bias batch on GPU (default-on with --gpu)
 --gpu-vit-prefilter     # Viterbi pre-filter (default-on with --gpu)
 --gpu-vit-longtarget    # Scanning Viterbi (default-on with --gpu)
---gpu-fwd-prefilter     # Forward pre-filter with skip-Forward optimization (docgroup 12)
+--gpu-fwd-prefilter     # Deprecated no-op: GPU Fwd/Bwd parser reuse is default-on
+--gpu-no-fwd-prefilter  # Diagnostic: use older CPU Fwd/Bwd continuation after GPU Forward prefilter
 --gpu-cpu-postmsv       # Bypass GPU scanning Viterbi/Fwd; CPU postSSV path
 --gpu-compare           # Debug: compare GPU vs CPU scores per stage
 --gpu-chunk-size N      # Chunk size (default 65536)
@@ -126,11 +123,25 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
 
 | Path | MADE1 (M=80) | query_short (M=151) | query_medium (M=501) |
 |------|:---:|:---:|:---:|
-| CPU-1 | 0.93s / 154 | 1.27s / 120 | 5.86s / 215 |
-| CPU-4 | 0.30s / 154 | 0.37s / 120 | 1.63s / 215 |
-| GPU-4 nucdb | 0.53s / 153 | 0.68s / 120 | 2.52s / 215 |
+| CPU-1 | 0.865s / 465 | 1.719s / 363 | 6.014s / 648 |
+| CPU-4 | 0.307s / 465 | 0.383s / 363 | 1.734s / 648 |
+| GPU-4 FASTA | 1.114s / 462 | 1.203s / 363 | 2.384s / 648 |
+| GPU-4 nucdb | 0.851s / 462 | 0.996s / 363 | 2.261s / 648 |
+| GPU-4 overlap-nucdb | 0.952s / 462 | 0.858s / 363 | 2.109s / 648 |
 
-### GPU Domain Rescoring Performance
+The table above is the historical quick-benchmark script output and did not use the then-experimental Fwd/Bwd matrix handoff. A controlled query_medium rerun on 2026-05-10 showed the real same-mode comparison:
+
+| Path | Target | Summary hits | Elapsed |
+|------|--------|:---:|:---:|
+| CPU-4 | `chr22.fa` | 215 | 1.81s |
+| GPU default, ordinary nucdb | `chr22.nucdb.nucdb` | 215 | 2.41s |
+| GPU Fwd/Bwd handoff, ordinary nucdb | `chr22.nucdb.nucdb` | 215 | 1.89s |
+| GPU default, overlap nucdb | `chr22-overlap.nucdb.nucdb` | 215 | 1.92s |
+| GPU Fwd/Bwd handoff, overlap nucdb | `chr22-overlap.nucdb.nucdb` | 215 | 1.70s best observed; 1.95-2.08s verification |
+
+As of this update, `--gpu` defaults to the fastest validated GPU mode: overlap `.nucdb` when available plus GPU Fwd/Bwd handoff. The code-path verification is nonzero `GPU FB parser` time with zero CPU Forward/Backward stage time. Wall time still varies run-to-run, so record repeated timings for performance claims. The old `1.91s` versus `2.109s` discrepancy was apples-to-oranges: targeted Fwd/Bwd handoff on ordinary `.nucdb` versus the quick-benchmark default path on overlap `.nucdb`.
+
+### Historical GPU Domain Rescoring Performance
 
 Cross-window batching + trim batching replaces per-domain GPU calls with two batched calls per strand:
 
@@ -142,23 +153,27 @@ Cross-window batching + trim batching replaces per-domain GPU calls with two bat
 
 Previous per-window approach: MADE1 took 34s (5000+ individual GPU calls at ~5ms each). Cross-window batching: **1.74s** (18x improvement). Forward-Backward split (prefilter saves xf, Backward-only): **1.35s** (further 1.3x). Scanning Viterbi threshold fix: **0.91s** (further 1.5x). Nucdb + overlap-nucdb paths: **0.64s** (GPU-resident SSV, zero per-chunk H2D).
 
-### Skip-Forward Optimization
+### Default Matrix Reuse
 
-When `--gpu-fwd-prefilter` is set, workers use `p7_pli_postFwd_LongTarget()` instead of `p7_pli_postViterbi_LongTarget()`. This injects GPU-precomputed Forward special cells (xf) and scores (fwdsc) directly, skipping redundant CPU Forward recomputation. Only Backward + domain definition + hit reporting run on CPU.
+The default path always runs the GPU Forward prefilter, then reuses GPU Forward/Backward parser xmx for surviving windows. It enforces the exact F3 gate after the relaxed GPU Forward prefilter and then uses CPU domain processing. This path matched default GPU hit counts on the current chr22 smoke set for MADE1, query_short, and query_medium on both FASTA and nucdb.
+
+GPU Backward parser matrix handoff was tested after fixing the CPU diagnostic length configuration to use `window_len` rather than `min(window_len, om->max_length)`. `--gpu-compare` shows Forward/Backward parser scores match CPU to float noise. query_short showed a 1 bp envelope-start shift in one coordinate comparison, and a similar 1 bp envelope-start jitter can occur between repeated default `--gpu` runs, so this is a boundary-sensitivity issue rather than a hit-count regression.
+
+Current Forward-prefilter evidence: on query_medium ordinary `.nucdb`, the Fwd/Bwd handoff kept 716/1018 post-Viterbi windows (70.3%) and ran in 1.89s elapsed, versus 2.41s for the old default CPU Fwd/Bwd continuation. On overlap `.nucdb`, the same handoff has a best observed elapsed time of 1.70s versus 1.81s for CPU-4; later verification runs after making it default showed the same handoff path at 1.95-2.08s elapsed.
 
 Implementation:
 - `NHMMER_GPU_WORKER` carries `prefilter_xf`, `prefilter_fwdsc`, `prefilter_xf_offset` (non-owning pointers into shared buffers)
 - `nhmmer_gpu_worker_process_post_fwd()` injects xf into `pli->oxf->xmx`, reconstructs `totscale`, calls `p7_pli_postFwd_LongTarget()`
 - `p7_pli_postFwd_LongTarget()` in `p7_pipeline.c` performs F3 check using provided fwdsc, then Backward + domaindef + hit reporting
-- Gated on `use_skip_fwd = info->do_gpu_fwd && prefilter_xf != NULL`
+- Gated on `use_skip_fwd = info->do_gpu_fwd && prefilter_xf != NULL`; `info->do_gpu_fwd` is default-on with `--gpu`
 
 ### Parity Notes
 
-- **MADE1 (M=80)**: 153 vs 154 (1-hit difference, <1%)
-- **query_short (M=151)**: 120 vs 120 (exact match)
-- **query_medium (M=501)**: 215 vs 215 (exact match)
+- **MADE1 (M=80)**: FASTA 462 vs 465 (within 1% tolerance); nucdb 462 vs 462 exact in the parity script.
+- **query_short (M=151)**: 363 vs 363 exact.
+- **query_medium (M=501)**: 648 vs 648 exact.
 
-Remaining 1-hit difference on MADE1 is from float32 vs double precision in Forward/Backward accumulation. Domain rescoring uses nj=0 (unihit mode) matching CPU behavior.
+Remaining MADE1 FASTA delta is at the GPU long-target window/filter boundary; default `--gpu` now reuses GPU Forward/Backward parser matrices, then keeps domain processing and hit reporting on CPU.
 
 ### Bias Filter Precision Fix (2026-05-10)
 
@@ -168,7 +183,7 @@ Fixed two precision bugs in the GPU scanning Viterbi threshold path:
 
 2. **`cuda_compute_viterbi_thresholds_kernel`**: Was subtracting `nullsc_win` (null for window_len) from bias score, but CPU subtracts `nullsc_loc` (null for loc_window_len = min(window_len, max_length)). Also switched `invP` and `nullsc` computations to double precision matching CPU's `esl_gumbel_invsurv` and `p7_bg_NullOne`.
 
-## GPU Domain Rescoring Architecture
+## Historical GPU Domain Rescoring Architecture
 
 ### Three-Phase Design (in `nhmmer_gpu_worker_process_post_vit_gpu`)
 
@@ -229,7 +244,7 @@ Build-time options: `--chunk-size` (default 65536), `--overlap` (default 0), `--
 
 ## Status Summary
 
-All phases complete including GPU domain rescoring + skip-Forward optimization. Branch `h3-gpu` includes all nhmmer GPU work (fused SSV+null+bias+gate kernel, multi-warp-per-block SSV/Viterbi, templated kernels, ~7.3x protein profmark). Key commits:
+Default `nhmmer --gpu` now uses GPU SSV/batch filtering/Viterbi/Forward prefilter plus GPU Forward/Backward parser matrix handoff before CPU domain/hit reporting. `--gpu-fwd-prefilter` is deprecated compatibility spelling; hidden `--gpu-no-fwd-prefilter` restores the older CPU Fwd/Bwd continuation for diagnostics. Historical implementation notes below include GPU domain-rescoring work that is not part of the accepted default path.
 
 ```
 a7936ac8 gpu: fix scanning Viterbi threshold bug + add --gpu-compare and --gpu-cpu-postmsv

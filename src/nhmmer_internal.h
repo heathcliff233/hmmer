@@ -41,7 +41,7 @@ typedef struct {
   int               do_gpu_batch;       /* --gpu-batch: batch SSV/bias on GPU */
   int               do_gpu_vit;         /* --gpu-vit-prefilter */
   int               do_gpu_vit_lt;      /* --gpu-vit-longtarget: scanning Viterbi on GPU */
-  int               do_gpu_fwd;         /* --gpu-fwd-prefilter */
+  int               do_gpu_fwd;         /* default GPU Fwd/Bwd parser handoff */
   int               do_cpu_postmsv;     /* --gpu-cpu-postmsv: bypass GPU Vit+Fwd, use CPU postSSV */
   int               do_compare;         /* --gpu-compare: print GPU vs CPU score mismatches */
   /* Persistent scratch arrays (grow-only, freed at end) */
@@ -53,7 +53,8 @@ typedef struct {
   /* Instrumentation counters (accumulated across strands/blocks) */
   int64_t           n_vit_lt_windows_in;   /* windows entering scanning Viterbi */
   int64_t           n_vit_lt_windows_out;  /* sub-windows from scanning Viterbi */
-  int64_t           n_post_vit_windows;    /* windows sent to CPU ForwardParser */
+  int64_t           n_post_vit_windows;    /* windows entering GPU Forward prefilter / post-Vit continuation */
+  int64_t           n_fwd_survivor_windows;/* windows surviving GPU Forward prefilter */
   /* Timing breakdown (seconds, accumulated across strands) */
   double            t_ssv;           /* GPU SSV longtarget kernel */
   double            t_merge;         /* window extend + merge */

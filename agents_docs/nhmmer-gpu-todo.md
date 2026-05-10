@@ -9,13 +9,13 @@ Phases 1–8 are done. Phase 9 (GPU Domain Rescoring) is complete. Phase 10 (ker
 - [x] `p7_pli_postFwd_LongTarget()` in `p7_pipeline.c`: skips Forward recomputation, uses GPU-precomputed xf/fwdsc
 - [x] `nhmmer_gpu_worker_process_post_fwd()`: injects GPU xf into pli->oxf->xmx, reconstructs totscale
 - [x] Per-window xf offset computation for multi-worker partitioning (`surv_xf_offsets`)
-- [x] Gated on `use_skip_fwd = info->do_gpu_fwd && prefilter_xf != NULL`
+- [x] Gated on `use_skip_fwd = info->do_gpu_fwd && prefilter_xf != NULL`; `info->do_gpu_fwd` is default-on with `--gpu`
 - [x] Thread dispatch: `nhmmer_gpu_thread_func_post_fwd` for skip-Forward, `nhmmer_gpu_thread_func_post_vit` for standard path
 - [x] `--gpu-compare` and `--gpu-cpu-postmsv` flags for debug/comparison
 
 ### Impact
 
-Eliminates redundant CPU Forward computation in post-filter workers when GPU Forward prefilter has already computed xf. Savings most visible on workloads with many Forward survivors (query_medium). Standard path (without `--gpu-fwd-prefilter`) unchanged.
+Eliminates redundant CPU Forward computation in post-filter workers when GPU Forward prefilter has already computed xf. Savings most visible on workloads with many Forward survivors (query_medium). This is now the default `--gpu` path; hidden `--gpu-no-fwd-prefilter` is the diagnostic fallback to the older CPU Fwd/Bwd continuation.
 
 ## Phase 10: Kernel Parallelization + Forward-Backward Split — COMPLETE
 
