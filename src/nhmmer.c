@@ -1139,7 +1139,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.gpu_chunk_size = esl_opt_GetInteger(go, "--gpu-chunk-size");
         gpu_info.ncpus          = ncpus;
         gpu_info.do_gpu_batch   = TRUE;
-        gpu_info.do_gpu_vit     = TRUE;
+        gpu_info.do_gpu_vit     = esl_opt_GetBoolean(go, "--gpu-vit-prefilter");
         gpu_info.do_gpu_vit_lt  = TRUE;
         gpu_info.do_gpu_fwd     = ! esl_opt_GetBoolean(go, "--gpu-no-fwd-prefilter");
         gpu_info.do_cpu_postmsv = esl_opt_GetBoolean(go, "--gpu-cpu-postmsv");

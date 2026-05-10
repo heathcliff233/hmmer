@@ -6,7 +6,7 @@ Last updated: 2026-05-10
 
 The previous “GPU is slower because CPU workers redo Forward/Backward and GPU domain rescoring is mutex-bound” analysis is stale. Current default `nhmmer --gpu` uses the GPU Forward prefilter and GPU Forward/Backward parser handoff by default, so CPU Forward/Backward continuation is gone in the accepted path.
 
-The real issue behind the stale 1.91s versus 2.109s comparison was apples-to-oranges benchmarking plus a GPU scanning-Viterbi window merge bug. GPU Viterbi seeds are emitted with `atomicAdd`, so they were unsorted; `p7_pli_ExtendAndMergeWindows()` only merges adjacent windows. The GPU path also extended/merged seeds after converting them to absolute target coordinates, unlike CPU, which extends/merges in parent MSV-window-local coordinates. That inflated downstream CPU domain workflow. The current fix sorts seeds by `(window_id, position, model_k)`, extends/merges in local coordinates, then converts back to target coordinates.
+The real issue behind the stale 1.91s versus 2.109s comparison was apples-to-oranges benchmarking plus GPU window merge bugs. GPU SSV windows and GPU Viterbi seeds are emitted with `atomicAdd`, so they are unordered; `p7_pli_ExtendAndMergeWindows()` only merges adjacent windows. The GPU path also needed to extend/merge scanning-Viterbi seeds in parent MSV-window-local coordinates, matching CPU, before converting back to target coordinates. These issues inflated downstream CPU domain workflow. The current fix sorts SSV windows before the first long-target merge, sorts Viterbi seeds by `(window_id, position, model_k)`, extends/merges Viterbi seeds in local coordinates, then converts back to target coordinates.
 
 ## Current query_medium Result
 

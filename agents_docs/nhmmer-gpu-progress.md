@@ -4,7 +4,7 @@ Last updated: 2026-05-10
 
 ## Architecture
 
-GPU nhmmer uses a **GPU SSV + GPU filters + GPU scanning Viterbi + GPU Forward prefilter + GPU Forward/Backward parser handoff + threaded CPU domain hit reporting** pipeline by default. The GPU Forward prefilter is default-on with `--gpu` and reduces post-Viterbi survivors before CPU workers. GPU Forward/Backward parser matrix reuse is also default-on with `--gpu`; it hands GPU xmx matrices to CPU domain processing after enforcing the exact F3 gate.
+GPU nhmmer uses a **GPU SSV + GPU filters + GPU scanning Viterbi + GPU Forward prefilter + GPU Forward/Backward parser handoff + threaded CPU domain hit reporting** pipeline by default. The GPU Forward prefilter is default-on with `--gpu` and reduces post-Viterbi survivors before CPU workers. GPU Forward/Backward parser matrix reuse is also default-on with `--gpu`; it hands GPU xmx matrices to CPU domain processing after enforcing the exact F3 gate. The single-score GPU Viterbi prefilter is no longer default; enable hidden `--gpu-vit-prefilter` only for diagnostics.
 
 ```
 Input FASTA/nucdb
@@ -26,8 +26,8 @@ Input FASTA/nucdb
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│ GPU Viterbi Pre-filter (single-score, F2 gating)    │
-│   → removes windows that can't produce sub-windows  │
+│ Optional GPU Viterbi Pre-filter (single-score F2)   │
+│   → hidden --gpu-vit-prefilter diagnostic path      │
 └──────────────────────┬──────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────┐
@@ -93,7 +93,7 @@ Both strands processed sequentially (forward, then reverse complement).
 ## CLI
 
 ```sh
-# Basic GPU nhmmer (default path: GPU filters/Viterbi/Forward prefilter, CPU domain continuation)
+# Basic GPU nhmmer (default path: GPU filters/scanning Viterbi/Forward prefilter, CPU domain continuation)
 src/nhmmer --gpu --cpu 4 --noali query.hmm target.fa
 
 # With fast nucdb (default overlap enables GPU-resident SSV when overlap >= model max_length)
@@ -106,7 +106,7 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-o0.nucdb.nucdb
 
 # Hidden flags (group 99, not shown in help)
 --gpu-batch             # SSV/bias batch on GPU (default-on with --gpu)
---gpu-vit-prefilter     # Viterbi pre-filter (default-on with --gpu)
+--gpu-vit-prefilter     # Optional single-score Viterbi pre-filter before scanning Viterbi
 --gpu-vit-longtarget    # Scanning Viterbi (default-on with --gpu)
 --gpu-fwd-prefilter     # Deprecated no-op: GPU Fwd/Bwd parser reuse is default-on
 --gpu-no-fwd-prefilter  # Diagnostic: use older CPU Fwd/Bwd continuation after GPU Forward prefilter
@@ -129,7 +129,7 @@ src/nhmmer --gpu --cpu 4 --noali query.hmm target-o0.nucdb.nucdb
 | GPU-4 nucdb | 0.851s / 462 | 0.996s / 363 | 2.261s / 648 |
 | GPU-4 overlap-nucdb | 0.952s / 462 | 0.858s / 363 | 2.109s / 648 |
 
-The table above is historical quick-benchmark output. It is useful as old context, but not as the current default result: it predates the GPU scanning-Viterbi seed ordering/local-coordinate fix and mixed old default runs with targeted Fwd/Bwd handoff runs.
+The table above is historical quick-benchmark output. It is useful as old context, but not as the current default result: it predates the GPU window-ordering fixes and mixed old default runs with targeted Fwd/Bwd handoff runs.
 
 Current controlled query_medium rerun on 2026-05-10:
 
@@ -139,7 +139,7 @@ Current controlled query_medium rerun on 2026-05-10:
 | GPU default, ordinary no-overlap nucdb | `chr22.nucdb.nucdb` | 648 | 1.36s | 1.71s |
 | GPU default, fast overlap nucdb | `chr22-overlap.nucdb.nucdb` | 648 | 1.40s | 1.75s |
 
-As of this update, `hmmnucdb` defaults to the fast overlap construction (`--overlap 2001`) and `nhmmer --gpu` defaults to GPU Fwd/Bwd parser handoff. The code-path verification is nonzero `GPU FB parser` time with zero CPU Forward/Backward stage time. The old `1.91s` versus `2.109s` discrepancy was apples-to-oranges and stale: a targeted handoff/no-overlap run was compared to an older quick-benchmark overlap run before GPU Viterbi window sorting/local-coordinate merging fixed downstream worker inflation.
+As of this update, `hmmnucdb` defaults to the fast overlap construction (`--overlap 2001`) and `nhmmer --gpu` defaults to GPU Fwd/Bwd parser handoff. The code-path verification is nonzero `GPU FB parser` time with zero CPU Forward/Backward stage time. The old `1.91s` versus `2.109s` discrepancy was apples-to-oranges and stale: a targeted handoff/no-overlap run was compared to an older quick-benchmark overlap run before GPU SSV window sorting and GPU Viterbi seed local-coordinate merging fixed downstream worker inflation.
 
 Current fast `.nucdb` GPU breakdown for query_medium:
 
@@ -189,15 +189,24 @@ Implementation:
 
 Remaining MADE1 FASTA delta is at the GPU long-target window/filter boundary; default `--gpu` now reuses GPU Forward/Backward parser matrices, then keeps domain processing and hit reporting on CPU.
 
-### Scanning Viterbi Window Fixes (2026-05-10)
+### Window Ordering Fixes (2026-05-10)
 
-The root cause of inflated GPU worker time was not CPU Forward/Backward. GPU scanning Viterbi emits seeds via `atomicAdd`, so seeds were unsorted. `p7_pli_ExtendAndMergeWindows()` only merges adjacent windows, so unsorted GPU seeds defeated merge and inflated downstream domain-definition work. The GPU path also converted seeds to absolute full-sequence coordinates before extension/merge; the CPU path extends/merges in parent MSV-window-local coordinates, then converts to target coordinates.
+The root cause of inflated GPU worker time was not CPU Forward/Backward. GPU kernels emit windows via `atomicAdd`, so output order is not guaranteed. `p7_pli_ExtendAndMergeWindows()` only merges adjacent windows, so unsorted GPU windows defeated merge and inflated downstream domain-definition work. The first affected boundary is the SSV long-target output before the MSV-window extend/merge. The scanning-Viterbi path has the same ordering requirement, and it must merge seeds in parent MSV-window-local coordinates before converting to target coordinates.
 
 Fixes:
+- Sort GPU SSV windows by strand/sequence/coordinate before the first `p7_pli_ExtendAndMergeWindows()` call.
 - Sort GPU Viterbi seeds by `(window_id, position, model_k)` before extension/merge.
 - Extend and merge GPU scanning-Viterbi seeds in parent-window-local coordinates, then convert merged windows back to target coordinates.
 - Clamp overlap accounting for `pos_past_vit` and `pos_past_fwd` so overlapping windows cannot underflow residue counters.
 - Use exact F3 gating in the GPU Forward prefilter.
+
+### Default Viterbi Prefilter Policy (2026-05-10)
+
+The single-score GPU Viterbi prefilter (`--gpu-vit-prefilter`) is opt-in. It is useful for stage diagnostics, but the fastest accepted default is `.nucdb` overlap input with GPU SSV, GPU batch MSV/null/bias filtering, GPU scanning Viterbi, GPU Forward prefilter, and GPU Fwd/Bwd parser handoff. Keeping the single-score prefilter out of the default also avoids adding another sensitivity boundary before scanning Viterbi unless a benchmark shows a clear win.
+
+### Nucdb Reverse-Strand Coordinate Fix (2026-05-10)
+
+For `.nucdb` reverse-complement chunks, reconstructed `ESL_SQ` metadata now mirrors `esl_sq_ReverseComplement()` by setting `start = n` and `end = 1`. This prevents negative reverse-strand coordinate transforms in GPU `.nucdb` output and allowed strict CPU FASTA versus GPU overlap `.nucdb` tabular rows to match for query_medium in the smoke audit.
 
 ### Bias Filter Precision Fix (2026-05-10)
 
@@ -206,6 +215,8 @@ Fixed two precision bugs in the GPU scanning Viterbi threshold path:
 1. **`cuda_bias_filter_kernel`**: Was using a fixed `t[0][0]` transition for all windows (uploaded once at init). Now computes per-window `t00 = L/(L+1)` matching CPU's `p7_bg_SetLength` per-window behavior. Also switched from `logf()` to `(float)log()` matching CPU's double-precision log in `esl_hmm_Forward`.
 
 2. **`cuda_compute_viterbi_thresholds_kernel`**: The bias score is computed against the full parent `window_len`, so the kernel must subtract `nullsc_win` to isolate composition bias before scaling it to the local window length. The compare-side diagnostic uses the same calculation.
+
+3. **Compare-side Viterbi diagnostic**: The CPU reference path in `--gpu-compare` now recomputes `nullsc_win` for each shortened candidate window before subtracting it from the bias filter score. This matches `p7_pli_postSSV_LongTarget()` and removes a diagnostic-only threshold mismatch.
 
 ## Historical GPU Domain Rescoring Architecture
 

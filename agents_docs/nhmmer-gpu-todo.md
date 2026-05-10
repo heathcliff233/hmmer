@@ -89,7 +89,7 @@ This work proved cross-window batching and kernel parallelization ideas, but the
 | GPU FB parser | 0.000s | 0.0% |
 | **CPU workers** | **0.203s** | **44.2%** |
 
-**Historical finding**: CPU workers (domain definition + hit reporting) consumed 44–94% of GPU wall time depending on model size. Current query_medium fast `.nucdb` worker time is still dominated by CPU domain workflow, but total wall is now faster than CPU-4 in the smoke run after the scanning-Viterbi window fix.
+**Historical finding**: CPU workers (domain definition + hit reporting) consumed 44–94% of GPU wall time depending on model size. Current query_medium fast `.nucdb` worker time is still dominated by CPU domain workflow, but total wall is now faster than CPU-4 in the smoke run after the GPU window-ordering fixes.
 
 ## Open Performance Work
 

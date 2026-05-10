@@ -48,6 +48,20 @@ nhmmer_gpu_vit_window_compare(const void *a, const void *b)
 }
 
 static int
+nhmmer_gpu_hmm_window_compare(const void *a, const void *b)
+{
+  const P7_HMM_WINDOW *wa = (const P7_HMM_WINDOW *)a;
+  const P7_HMM_WINDOW *wb = (const P7_HMM_WINDOW *)b;
+
+  if (wa->complementarity != wb->complementarity) return (wa->complementarity < wb->complementarity) ? -1 : 1;
+  if (wa->id              != wb->id)              return (wa->id              < wb->id)              ? -1 : 1;
+  if (wa->n               != wb->n)               return (wa->n               < wb->n)               ? -1 : 1;
+  if (wa->k               != wb->k)               return (wa->k               < wb->k)               ? -1 : 1;
+  if (wa->length          != wb->length)          return (wa->length          < wb->length)          ? -1 : 1;
+  return 0;
+}
+
+static int
 nhmmer_gpu_window_batch_init(NHMMER_GPU_WINDOW_BATCH *wb, int alloc)
 {
   int status;
@@ -1559,9 +1573,11 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
 
         bias_filtersc = 0;
         if (pli->do_biasfilter) {
+          float nullsc_win;
           p7_bg_SetLength(bg, window_len);
+          p7_bg_NullOne(bg, subseq, window_len, &nullsc_win);
           p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
-          bias_filtersc -= nullsc;
+          bias_filtersc -= nullsc_win;
         }
         int F2_L = ESL_MIN(window_len, pli->B2);
         filtersc = nullsc + (bias_filtersc * ((F2_L > window_len) ? 1.0f : (float)F2_L / window_len));
@@ -1724,6 +1740,9 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
 
   if (info->scoredata->prefix_lengths == NULL)
     p7_hmm_ScoreDataComputeRest(om, info->scoredata);
+
+  qsort(msv_windowlist.windows, msv_windowlist.count, sizeof(P7_HMM_WINDOW),
+        nhmmer_gpu_hmm_window_compare);
 
   p7_pli_ExtendAndMergeWindows(om, info->scoredata, &msv_windowlist, 0);
   clock_gettime(CLOCK_MONOTONIC, &ts1);
@@ -2326,6 +2345,9 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   if (info->scoredata->prefix_lengths == NULL)
     p7_hmm_ScoreDataComputeRest(om, info->scoredata);
 
+  qsort(msv_windowlist.windows, msv_windowlist.count, sizeof(P7_HMM_WINDOW),
+        nhmmer_gpu_hmm_window_compare);
+
   p7_pli_ExtendAndMergeWindows(om, info->scoredata, &msv_windowlist, 0);
   clock_gettime(CLOCK_MONOTONIC, &ts1);
   info->t_merge += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
@@ -2822,8 +2844,8 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
       sq_rc->n = sidx->length;
       sq_rc->dsq[0] = eslDSQ_SENTINEL;
       sq_rc->dsq[sq_rc->n + 1] = eslDSQ_SENTINEL;
-      sq_rc->start = 1;
-      sq_rc->end   = sq_rc->n;
+      sq_rc->start = sq_rc->n;
+      sq_rc->end   = 1;
       sq_rc->L     = sq_rc->n;
       nres += sq_rc->n;
 

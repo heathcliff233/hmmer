@@ -132,14 +132,14 @@ The fused SSV+null+bias+gate kernel is the default GPU MSV path:
 
 A GPU-accelerated path for `nhmmer` is available via `--gpu`. Rebased on latest `h3-gpu` (fused SSV kernel, multi-warp-per-block, templated Viterbi).
 
-- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + batch MSV/bias/F1 filter + GPU Viterbi pre-filter + GPU scanning Viterbi + exact-F3 GPU Forward pre-filter + GPU FB parser handoff + threaded CPU domain/hit processing.
+- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + batch MSV/bias/F1 filter + GPU scanning Viterbi + exact-F3 GPU Forward pre-filter + GPU FB parser handoff + threaded CPU domain/hit processing. The single-score GPU Viterbi pre-filter is available only when `--gpu-vit-prefilter` is set.
 - **Nucdb default**: `hmmnucdb` now defaults to overlap chunking (`--overlap 2001`) so typical `.nucdb` targets enable the GPU-resident SSV path. Use `--overlap 0` only for ordinary no-overlap diagnostics.
 - **GPU FB parser** (`nhmmer_gpu_run_fb_parser_batch`): Batch Forward+Backward parser on GPU. Forward-Backward split: prefilter saves xf, Backward-only for F3 survivors.
 - **Forward pre-filter** (`nhmmer_gpu_forward_prefilter`): GPU Forward score-only with exact F3 gate. Removes about 40% of post-Viterbi sub-windows before FB parser on the current query_medium smoke run.
 - **Skip-Forward optimization**: `p7_pli_postFwd_LongTarget()` injects GPU-precomputed xf/fwdsc, skipping redundant CPU Forward. Default-on with `--gpu`; hidden `--gpu-no-fwd-prefilter` restores the older CPU Fwd/Bwd continuation for diagnostics.
 - **Batch filter** (`--gpu-batch`): Packs merged windows as synthetic ESL_DSQDATA_CHUNK (zero-copy), runs GPU MSV + null + bias batch scoring, applies F1 gating.
-- **Viterbi pre-filter** (`--gpu-vit-prefilter`): GPU single-score Viterbi on batch survivors (warps_per_block=1 for short windows). Windows below F2 threshold skipped before scanning Viterbi.
-- **Scanning Viterbi window fix**: GPU seeds are sorted by `(window_id, position, model_k)` and extended/merged in parent-window-local coordinates before conversion back to target coordinates. This fixed the inflated CPU domain workflow caused by unsorted `atomicAdd` output defeating adjacent-window merge.
+- **Viterbi pre-filter** (`--gpu-vit-prefilter`): Optional GPU single-score Viterbi on batch survivors (warps_per_block=1 for short windows). Windows below F2 threshold are skipped before scanning Viterbi. This is not part of the default `--gpu` path.
+- **Window ordering fixes**: GPU SSV windows are sorted by strand/sequence/coordinate before the first long-target extend/merge. GPU scanning-Viterbi seeds are sorted by `(window_id, position, model_k)` and extended/merged in parent-window-local coordinates before conversion back to target coordinates. These fixes prevent unordered `atomicAdd` output from defeating adjacent-window merge and inflating downstream CPU domain workflow.
 - **Threading**: Post-vit workers distributed across N CPU threads with deep-copied per-thread state.
 - **Engine reuse**: CUDA engine created once before query loop, saves ~250ms per additional query.
 - **Hit parity**: Current smoke parity is exact for query_short/query_medium output rows and within documented MADE1 tolerance; query_medium CPU-4 and GPU fast `.nucdb` both produced 648 output rows.
