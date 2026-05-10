@@ -1,7 +1,9 @@
 #include "p7_cuda_internal.h"
 
 #define VIT_LT_MAX_WINDOWS_PER_INPUT 64
-#define VIT_LT_WARPS_PER_BLOCK       8
+#define VIT_LT_LANES                 8
+#define VIT_LT_GROUPS_PER_WARP       (32 / VIT_LT_LANES)
+#define VIT_LT_GROUPS_PER_BLOCK      4
 
 __device__ static inline double
 esl_gumbel_invsurv_device(double p, double mu, double lambda)
@@ -77,18 +79,18 @@ cuda_viterbi_longtarget_kernel(
     P7_CUDA_VIT_LT_WINDOW *d_windows, int *d_win_count, int max_windows)
 {
   extern __shared__ int16_t vlt_mem[];
-  int groups_per_block = blockDim.x >> 5;
-  int group = threadIdx.x >> 5;
-  int lane = threadIdx.x & 31;
+  int groups_per_block = blockDim.x / VIT_LT_LANES;
+  int group = threadIdx.x / VIT_LT_LANES;
+  int lane = threadIdx.x & (VIT_LT_LANES - 1);
+  int warp_lane = threadIdx.x & 31;
+  unsigned int mask = 0xffu << (warp_lane & ~(VIT_LT_LANES - 1));
   int bi = blockIdx.x * groups_per_block + group;
-  int N = Q * 8;
+  int N = Q * VIT_LT_LANES;
   size_t group_stride = (size_t) N * 3 * 2;
+  if (group >= groups_per_block || bi >= nwindows) return;
   int16_t *group_mem = vlt_mem + ((size_t) group * group_stride);
   int16_t *prev = group_mem;
   int16_t *curr = prev + (size_t) N * 3;
-  unsigned int mask = 0xff;
-
-  if (bi >= nwindows || lane >= 8) return;
 
   int L = lengths[bi];
   const uint8_t *s = dsq + offsets[bi];
@@ -115,13 +117,13 @@ cuda_viterbi_longtarget_kernel(
     uint8_t x = s[i];
     if (x >= Kp) continue;
 
-    xB = (int16_t) __shfl_sync(mask, (int) xB, 0);
+    xB = (int16_t) __shfl_sync(mask, (int) xB, 0, VIT_LT_LANES);
     int16_t mpv = prev[((Q - 1) + lane * Q) * 3 + 0];
     int16_t dpv = prev[((Q - 1) + lane * Q) * 3 + 1];
     int16_t ipv = prev[((Q - 1) + lane * Q) * 3 + 2];
-    mpv = (int16_t) __shfl_up_sync(mask, (int) mpv, 1);
-    dpv = (int16_t) __shfl_up_sync(mask, (int) dpv, 1);
-    ipv = (int16_t) __shfl_up_sync(mask, (int) ipv, 1);
+    mpv = (int16_t) __shfl_up_sync(mask, (int) mpv, 1, VIT_LT_LANES);
+    dpv = (int16_t) __shfl_up_sync(mask, (int) dpv, 1, VIT_LT_LANES);
+    ipv = (int16_t) __shfl_up_sync(mask, (int) ipv, 1, VIT_LT_LANES);
     if (lane == 0) mpv = dpv = ipv = -32768;
 
     int16_t dcv = -32768;
@@ -155,13 +157,13 @@ cuda_viterbi_longtarget_kernel(
     int xEi = (int) xE_lane;
     int dmaxi = (int) dmax_lane;
     for (int off = 4; off > 0; off >>= 1) {
-      int other = __shfl_down_sync(mask, xEi, off);
-      if (lane + off < 8 && other > xEi) xEi = other;
-      other = __shfl_down_sync(mask, dmaxi, off);
-      if (lane + off < 8 && other > dmaxi) dmaxi = other;
+      int other = __shfl_down_sync(mask, xEi, off, VIT_LT_LANES);
+      if (lane + off < VIT_LT_LANES && other > xEi) xEi = other;
+      other = __shfl_down_sync(mask, dmaxi, off, VIT_LT_LANES);
+      if (lane + off < VIT_LT_LANES && other > dmaxi) dmaxi = other;
     }
 
-    int16_t xE = (int16_t) __shfl_sync(mask, xEi, 0);
+    int16_t xE = (int16_t) __shfl_sync(mask, xEi, 0, VIT_LT_LANES);
 
     if (xE >= my_thresh) {
       /* Emit windows for ALL model positions k where M[k] == xE */
@@ -205,12 +207,12 @@ cuda_viterbi_longtarget_kernel(
         int16_t b2 = vlt_i16_add_sat(xN, xw_move);
         xB = b1 > b2 ? b1 : b2;
       }
-      xB = (int16_t) __shfl_sync(mask, (int) xB, 0);
+      xB = (int16_t) __shfl_sync(mask, (int) xB, 0, VIT_LT_LANES);
 
       /* Lazy-F D-state propagation */
-      int dmax_all = __shfl_sync(mask, dmaxi, 0);
+      int dmax_all = __shfl_sync(mask, dmaxi, 0, VIT_LT_LANES);
       if (dmax_all + ddbound_w > xB) {
-        dcv = (int16_t) __shfl_up_sync(mask, (int) dcv, 1);
+        dcv = (int16_t) __shfl_up_sync(mask, (int) dcv, 1, VIT_LT_LANES);
         if (lane == 0) dcv = -32768;
         for (int q = 0; q < Q; q++) {
           int cell = (q + lane * Q) * 3;
@@ -220,7 +222,7 @@ cuda_viterbi_longtarget_kernel(
         int completed;
         do {
           completed = 1;
-          dcv = (int16_t) __shfl_up_sync(mask, (int) dcv, 1);
+          dcv = (int16_t) __shfl_up_sync(mask, (int) dcv, 1, VIT_LT_LANES);
           if (lane == 0) dcv = -32768;
           for (int q = 0; q < Q; q++) {
             int cell = (q + lane * Q) * 3;
@@ -234,7 +236,7 @@ cuda_viterbi_longtarget_kernel(
           }
         } while (__all_sync(mask, completed));
       } else {
-        dcv = (int16_t) __shfl_up_sync(mask, (int) dcv, 1);
+        dcv = (int16_t) __shfl_up_sync(mask, (int) dcv, 1, VIT_LT_LANES);
         if (lane == 0) dcv = -32768;
         curr[lane * Q * 3 + 1] = dcv;
       }
@@ -269,10 +271,6 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   P7_CUDA_VIT_LT_WINDOW *h_windows = NULL;
   P7_CUDA_VIT_LT_STATS local_stats;
   double t0, t1, t_stream0, t_stream1;
-  cudaEvent_t h2d0 = NULL, h2d1 = NULL;
-  cudaEvent_t th0  = NULL, th1  = NULL;
-  cudaEvent_t k0   = NULL, k1   = NULL;
-  cudaEvent_t d2h0 = NULL, d2h1 = NULL;
 
   memset(&local_stats, 0, sizeof(local_stats));
   local_stats.nwindows_in = nwindows;
@@ -366,10 +364,6 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   /* Upload and compute thresholds concurrently using streams */
   {
     cudaStream_t stream_copy, stream_thresh;
-    if ((status = cuda_status(cudaEventCreate(&h2d0), errbuf, errbuf_size, "cudaEventCreate(vlt h2d0)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaEventCreate(&h2d1), errbuf, errbuf_size, "cudaEventCreate(vlt h2d1)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaEventCreate(&th0),  errbuf, errbuf_size, "cudaEventCreate(vlt th0)"))  != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaEventCreate(&th1),  errbuf, errbuf_size, "cudaEventCreate(vlt th1)"))  != eslOK) goto ERROR;
     t_stream0 = host_seconds();
     cudaStreamCreate(&stream_copy);
     cudaStreamCreate(&stream_thresh);
@@ -377,10 +371,10 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     local_stats.stream_seconds += t_stream1 - t_stream0;
 
     /* Stream 1: upload DSQ data (large transfer) */
-    cudaEventRecord(h2d0, stream_copy);
+    cudaEventRecord(engine->evt_h2d0, stream_copy);
     cudaMemcpyAsync(engine->d_vlt_dsq, engine->h_vlt_dsq, total_packed, cudaMemcpyHostToDevice, stream_copy);
     cudaMemcpyAsync(engine->d_vlt_offsets, h_offsets, sizeof(int) * nwindows, cudaMemcpyHostToDevice, stream_copy);
-    cudaEventRecord(h2d1, stream_copy);
+    cudaEventRecord(engine->evt_h2d1, stream_copy);
 
     /* Stream 2 (default): upload lengths + bias + compute thresholds */
     if ((status = cuda_status(cudaMemcpy(engine->d_vlt_lengths, h_lengths, sizeof(int) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt lengths)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
@@ -391,12 +385,12 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
       d_bias = engine->d_vlt_bias;
       if ((status = cuda_status(cudaMemcpy(d_bias, bias_scores, sizeof(float) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt bias)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
     }
-    cudaEventRecord(th0, stream_thresh);
+    cudaEventRecord(engine->evt_d2h0, stream_thresh);
     cuda_compute_viterbi_thresholds_kernel<<<(nwindows + 127) / 128, 128, 0, stream_thresh>>>(
         NULL, d_bias, engine->d_vlt_lengths, nwindows, do_biasfilter,
         B2, F2, vmu, vlambda, scale_w, xw_e_move, nj, base_w,
         max_length, engine->d_vlt_thresholds);
-    cudaEventRecord(th1, stream_thresh);
+    cudaEventRecord(engine->evt_d2h1, stream_thresh);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "vlt threshold kernel launch")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
 
     /* Wait for both streams to complete before launching main kernel */
@@ -405,8 +399,8 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     cudaStreamSynchronize(stream_thresh);
     t_stream1 = host_seconds();
     local_stats.stream_seconds += t_stream1 - t_stream0;
-    local_stats.h2d_seconds += elapsed_seconds(h2d0, h2d1);
-    local_stats.threshold_kernel_seconds += elapsed_seconds(th0, th1);
+    local_stats.h2d_seconds += elapsed_seconds(engine->evt_h2d0, engine->evt_h2d1);
+    local_stats.threshold_kernel_seconds += elapsed_seconds(engine->evt_d2h0, engine->evt_d2h1);
     t_stream0 = host_seconds();
     cudaStreamDestroy(stream_copy);
     cudaStreamDestroy(stream_thresh);
@@ -416,19 +410,17 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
 
   /* Launch kernel: dynamically choose warps-per-block for occupancy */
   {
-    if ((status = cuda_status(cudaEventCreate(&k0), errbuf, errbuf_size, "cudaEventCreate(vlt k0)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaEventCreate(&k1), errbuf, errbuf_size, "cudaEventCreate(vlt k1)")) != eslOK) goto ERROR;
-    size_t shmem_per_warp = (size_t) Q * 8 * 3 * 2 * sizeof(int16_t);
-    int wpb = VIT_LT_WARPS_PER_BLOCK;
-    /* Reduce warps/block for large M to fit in shared memory and increase occupancy.
-     * Target: shmem <= 24KB to allow 2+ blocks/SM on RTX 4090 (48KB default). */
-    while (wpb > 1 && shmem_per_warp * wpb > 24 * 1024)
-      wpb >>= 1;
-    int nblocks = (nwindows + wpb - 1) / wpb;
-    size_t shmem = shmem_per_warp * wpb;
-    local_stats.warps_per_block = wpb;
+    size_t shmem_per_group = (size_t) Q * VIT_LT_LANES * 3 * 2 * sizeof(int16_t);
+    int groups_per_block = VIT_LT_GROUPS_PER_BLOCK;
+    while (groups_per_block > 1 && shmem_per_group * groups_per_block > 24 * 1024)
+      groups_per_block >>= 1;
+    int block_threads = groups_per_block * VIT_LT_LANES;
+    int physical_warps_per_block = (block_threads + 31) / 32;
+    int nblocks = (nwindows + groups_per_block - 1) / groups_per_block;
+    size_t shmem = shmem_per_group * groups_per_block;
+    local_stats.warps_per_block = physical_warps_per_block;
     local_stats.grid_blocks        = nblocks;
-    local_stats.block_threads      = wpb * 32;
+    local_stats.block_threads      = block_threads;
     local_stats.dynamic_smem_bytes = (int) shmem;
     {
       cudaDeviceProp prop;
@@ -438,9 +430,9 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
           cudaGetDeviceProperties(&prop, dev) == cudaSuccess &&
           cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks,
                                                         cuda_viterbi_longtarget_kernel,
-                                                        wpb * 32, shmem) == cudaSuccess) {
+                                                        block_threads, shmem) == cudaSuccess) {
         local_stats.active_blocks_per_sm  = active_blocks;
-        local_stats.active_warps_per_sm   = active_blocks * wpb;
+        local_stats.active_warps_per_sm   = active_blocks * physical_warps_per_block;
         local_stats.max_warps_per_sm      = prop.maxThreadsPerMultiProcessor / 32;
         local_stats.sm_count              = prop.multiProcessorCount;
         local_stats.theoretical_occupancy = local_stats.max_warps_per_sm > 0
@@ -451,8 +443,8 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
                                             : 0.0;
       }
     }
-    cudaEventRecord(k0);
-    cuda_viterbi_longtarget_kernel<<<nblocks, wpb * 32, shmem>>>(
+    cudaEventRecord(engine->evt_k0);
+    cuda_viterbi_longtarget_kernel<<<nblocks, block_threads, shmem>>>(
       engine->d_vlt_dsq, engine->d_vlt_offsets, engine->d_vlt_lengths,
       nwindows,
       cuom->d_rwv, cuom->d_twv, M, Q, cuom->Kp,
@@ -461,16 +453,14 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
       cuom->base_w, cuom->ddbound_w,
       engine->d_vlt_thresholds,
       engine->d_vlt_windows, engine->d_vlt_win_count, engine->vlt_win_alloc);
-    cudaEventRecord(k1);
+    cudaEventRecord(engine->evt_k1);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_longtarget_kernel launch")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_viterbi_longtarget sync")) != eslOK) goto ERROR;
-    local_stats.kernel_seconds += elapsed_seconds(k0, k1);
+    local_stats.kernel_seconds += elapsed_seconds(engine->evt_k0, engine->evt_k1);
   }
 
   /* Download results */
-  if ((status = cuda_status(cudaEventCreate(&d2h0), errbuf, errbuf_size, "cudaEventCreate(vlt d2h0)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaEventCreate(&d2h1), errbuf, errbuf_size, "cudaEventCreate(vlt d2h1)")) != eslOK) goto ERROR;
-  cudaEventRecord(d2h0);
+  cudaEventRecord(engine->evt_d2h0);
   if ((status = cuda_status(cudaMemcpy(&h_win_count, engine->d_vlt_win_count, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vlt win_count)")) != eslOK) goto ERROR;
   if (h_win_count > engine->vlt_win_alloc) h_win_count = engine->vlt_win_alloc;
 
@@ -479,9 +469,9 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     if (!h_windows) { status = eslEMEM; goto ERROR; }
     if ((status = cuda_status(cudaMemcpy(h_windows, engine->d_vlt_windows, sizeof(P7_CUDA_VIT_LT_WINDOW) * h_win_count, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vlt windows)")) != eslOK) goto ERROR;
   }
-  cudaEventRecord(d2h1);
-  cudaEventSynchronize(d2h1);
-  local_stats.d2h_seconds += elapsed_seconds(d2h0, d2h1);
+  cudaEventRecord(engine->evt_d2h1);
+  cudaEventSynchronize(engine->evt_d2h1);
+  local_stats.d2h_seconds += elapsed_seconds(engine->evt_d2h0, engine->evt_d2h1);
   local_stats.nwindows_out = h_win_count;
   local_stats.device_active_seconds = local_stats.threshold_kernel_seconds + local_stats.kernel_seconds;
 
@@ -495,27 +485,11 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   *ret_windows  = h_windows;
   *ret_nwindows = h_win_count;
   if (stats) *stats = local_stats;
-  if (h2d0) cudaEventDestroy(h2d0);
-  if (h2d1) cudaEventDestroy(h2d1);
-  if (th0)  cudaEventDestroy(th0);
-  if (th1)  cudaEventDestroy(th1);
-  if (k0)   cudaEventDestroy(k0);
-  if (k1)   cudaEventDestroy(k1);
-  if (d2h0) cudaEventDestroy(d2h0);
-  if (d2h1) cudaEventDestroy(d2h1);
   free(h_offsets);
   free(h_lengths);
   return eslOK;
 
 ERROR:
-  if (h2d0) cudaEventDestroy(h2d0);
-  if (h2d1) cudaEventDestroy(h2d1);
-  if (th0)  cudaEventDestroy(th0);
-  if (th1)  cudaEventDestroy(th1);
-  if (k0)   cudaEventDestroy(k0);
-  if (k1)   cudaEventDestroy(k1);
-  if (d2h0) cudaEventDestroy(d2h0);
-  if (d2h1) cudaEventDestroy(d2h1);
   free(h_offsets);
   free(h_lengths);
   *ret_windows  = NULL;

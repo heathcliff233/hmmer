@@ -14,6 +14,7 @@ NHMMER="$BUILDDIR/src/nhmmer"
 WORKDIR="$BUILDDIR/benchmark-data/nucleotide-bench/work"
 TARGET="$WORKDIR/chr22.fa"
 NUCDB="$WORKDIR/chr22.nucdb.nucdb"
+CPU_THREADS="${NHMMER_GPU_BENCH_CPU:-16}"
 
 PASS=0
 FAIL=0
@@ -23,8 +24,8 @@ check_parity() {
     local hmm="$WORKDIR/$query.hmm"
 
     local cpu_hits gpu_hits
-    cpu_hits=$("$NHMMER" --cpu 4 --noali "$hmm" "$target" 2>/dev/null | grep -c "^  " || echo 0)
-    gpu_hits=$("$NHMMER" --gpu --cpu 4 --noali "$hmm" "$target" 2>/dev/null | grep -c "^  " || echo 0)
+    cpu_hits=$("$NHMMER" --cpu "$CPU_THREADS" --noali "$hmm" "$target" 2>/dev/null | grep -c "^  " || echo 0)
+    gpu_hits=$("$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$hmm" "$target" 2>/dev/null | grep -c "^  " || echo 0)
 
     if [ "$cpu_hits" -eq "$gpu_hits" ]; then
         printf "  PASS  %-15s %-12s %d = %d\n" "$query" "$label" "$cpu_hits" "$gpu_hits"
@@ -49,13 +50,14 @@ check_parity() {
 
 echo "nhmmer GPU Parity Check"
 echo "========================"
+echo "CPU threads: $CPU_THREADS"
 
 # MADE1 must match exactly (strict)
 check_parity "MADE1" "$TARGET" "FASTA" "strict"
 if [ -f "$NUCDB" ]; then
     # nucdb only works with --gpu; compare GPU nucdb hits vs GPU FASTA hits
-    local_gpu_fasta=$("$NHMMER" --gpu --cpu 4 --noali "$WORKDIR/MADE1.hmm" "$TARGET" 2>/dev/null | grep -c "^  " || echo 0)
-    local_gpu_nucdb=$("$NHMMER" --gpu --cpu 4 --noali "$WORKDIR/MADE1.hmm" "$NUCDB" 2>/dev/null | grep -c "^  " || echo 0)
+    local_gpu_fasta=$("$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$WORKDIR/MADE1.hmm" "$TARGET" 2>/dev/null | grep -c "^  " || echo 0)
+    local_gpu_nucdb=$("$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$WORKDIR/MADE1.hmm" "$NUCDB" 2>/dev/null | grep -c "^  " || echo 0)
     if [ "$local_gpu_fasta" -eq "$local_gpu_nucdb" ]; then
         printf "  PASS  %-15s %-12s %d = %d\n" "MADE1" "nucdb" "$local_gpu_fasta" "$local_gpu_nucdb"
         PASS=$((PASS + 1))

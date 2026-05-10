@@ -8,7 +8,7 @@ The previous “GPU is slower because CPU workers redo Forward/Backward and GPU 
 
 The real issue behind the stale 1.91s versus 2.109s comparison was apples-to-oranges benchmarking plus GPU window merge bugs. GPU SSV windows and GPU Viterbi seeds are emitted with `atomicAdd`, so they are unordered; `p7_pli_ExtendAndMergeWindows()` only merges adjacent windows. The GPU path also needed to extend/merge scanning-Viterbi seeds in parent MSV-window-local coordinates, matching CPU, before converting back to target coordinates. These issues inflated downstream CPU domain workflow. The current fix sorts SSV windows before the first long-target merge, sorts Viterbi seeds by `(window_id, position, model_k)`, extends/merges Viterbi seeds in local coordinates, then converts back to target coordinates.
 
-## Current query_medium Result
+## Historical query_medium Result
 
 Target: chr22/hg38 benchmark. Query: `query_medium.hmm` (M=501). Threads: `--cpu 4`. GPU: RTX 4090. Date: 2026-05-10.
 
@@ -22,17 +22,17 @@ The speed-script result now shows the expected fast-overlap `.nucdb` win after r
 
 ## Current Combined Benchmark
 
-`test-speed/x-nhmmer-gpu-bench` now defaults to a combined all-sample benchmark. It runs `MADE1`, `query_short`, and `query_medium` in one `nhmmer` process per path, so CUDA engine creation and resident `.nucdb` upload are measured once instead of repeated for each query.
+`test-speed/x-nhmmer-gpu-bench` now defaults to a combined all-sample benchmark with `--cpu 16` for CPU and GPU paths. It runs `MADE1`, `query_short`, and `query_medium` in one `nhmmer` process per path, so CUDA engine creation and resident `.nucdb` upload are measured once instead of repeated for each query.
 
 Current all-sample result on 2026-05-10:
 
 | Path | Time | Hits |
 |------|:---:|:---:|
-| CPU-1 | 8.209s | 1476 |
-| CPU-4 | 2.373s | 1476 |
-| GPU-4 FASTA | 2.159s | 1476 |
-| GPU-4 no-overlap `.nucdb` | 1.864s | 1476 |
-| GPU-4 overlap `.nucdb` | 1.684s | 1476 |
+| CPU-1 | 8.535s | 1476 |
+| CPU-16 | 1.008s | 1476 |
+| GPU-16 FASTA | 2.035s | 1476 |
+| GPU-16 no-overlap `.nucdb` | 1.710s | 1476 |
+| GPU-16 overlap `.nucdb` | 1.536s | 1476 |
 
 Parity after the update was clean: MADE1 FASTA 465=465, MADE1 `.nucdb` 465=465, query_short FASTA 363=363, query_medium FASTA 648=648.
 
@@ -50,9 +50,9 @@ The combined overlap `.nucdb` timing run accounted for the previously confusing 
 
 Shared setup/teardown for that process: CUDA engine create 0.446s, `.nucdb` open/mmap 0.000s, `.nucdb` upload 0.029s, CUDA destroy 0.003s, summed GPU loop wall 1.710s, process outside search 0.495s, process elapsed 2.205s.
 
-The previous in-search mismatch was static GPU CPU-continuation scheduling. GPU workers were assigned contiguous equal-window slices, but domain-definition cost depends on region/envelope complexity. Dynamic survivor-window scheduling now lets workers pull work from a shared index and brings GPU-16 query_medium domain wall time (`0.239-0.258s`) in line with the CPU-16 wall-stage trace (`0.250s`). The remaining gap is mostly CUDA setup, `.nucdb` reconstruction, and GPU-side kernel/allocation variance rather than inflated CPU domain workflow.
+The previous in-search mismatch was static GPU CPU-continuation scheduling. GPU workers were assigned contiguous equal-window slices, but domain-definition cost depends on region/envelope complexity. Dynamic survivor-window scheduling now lets workers pull work from a shared index and brings GPU-16 query_medium domain wall time (`0.248s` in the latest focused run) in line with the CPU-16 wall-stage trace (`0.250s`). The remaining gap against CPU-16 is not a worker imbalance; it is CUDA setup, `.nucdb` reconstruction, GPU SSV/Viterbi/Forward parser work, and residual CPU domain workflow added together.
 
-## Stage Breakdown
+## Historical CPU-4 Stage Breakdown
 
 CPU-4 HMMER stage totals are summed across worker threads, so divide by four for a rough per-thread wall comparison. GPU `NHMMER_GPU_INFO` buckets are wall buckets around sequential GPU stages plus max-across-worker CPU continuation buckets. The GPU column shows the focused repeat range after removing the extra single-score Viterbi prefilter.
 
@@ -67,48 +67,50 @@ CPU-4 HMMER stage totals are summed across worker threads, so divide by four for
 | Output/null2 | 0.000s | ~0.000s | 0.002-0.004s hit reporting |
 | Total measured wall | - | 1.77s focused | 1.53-1.86s focused repeats |
 
-GPU device-side filtering is faster than CPU for SSV, Viterbi, and Forward/Backward. After dynamic scheduling, CPU domain workflow is no longer the unexplained mismatch against CPU-16; the remaining GPU-side cost is setup/reconstruction plus CUDA Viterbi/parser overhead.
+GPU device-side filtering is faster than CPU-4 stage approximations, but CPU-16 is the relevant baseline now and it is much stronger. After dynamic scheduling, CPU domain workflow is no longer the unexplained mismatch against CPU-16; the combined GPU path is slower because it pays CUDA setup/reconstruction plus GPU SSV/Viterbi/Forward parser overhead before the remaining CPU domain workflow.
 
 Current launch occupancy from the instrumented query_medium fast overlap `.nucdb` run:
 
 | Stage | Last launch | Theoretical occupancy | Grid/SM coverage |
 |-------|-------------|:---:|:---:|
-| SSV longtarget | grid=800, block=32, smem=1002B | 50.0% (24 active warps/SM of 48), 97.5% device-active in SSV wall | 6.25x |
-| Scanning Viterbi | grid=1097, block=128, smem=24192B | 33.3% (16 active warps/SM of 48), 94.6% device-active in Viterbi CUDA call | 8.51x |
+| SSV longtarget | grid=800, block=32, smem=1002B | 50.0% (24 active warps/SM of 48), 97.3% device-active in SSV wall | 6.25x |
+| Scanning Viterbi | grid=1097, block=32, smem=24192B | 8.3% physical-warp occupancy (4 active warps/SM of 48), 46.5-94.0% device-active in Viterbi CUDA call depending on first-call allocation | 8.51x |
 
-The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times and their measured GPU-processing buckets are mostly device-active. SSV occupancy is capped by one warp per block, while scanning Viterbi occupancy is capped by dynamic shared memory. The current small GPU-side optimization keeps the Viterbi bias-score device buffer persistent on the CUDA engine, removing per-call `cudaMalloc`/`cudaFree`. Further optimization should focus on improving per-window DP efficiency/allocation reuse or reducing CPU domain workflow and `.nucdb` reconstruction cost, not on creating more CUDA engines.
+The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times. SSV occupancy is capped by one warp per block, but the kernel is already device-active and two-/four-warp-per-block experiments raised theoretical occupancy without improving wall time. Scanning Viterbi was the better target: the old kernel used only lanes 0-7 of each physical warp. The current kernel maps four independent 8-lane nucleotide DP groups into each physical warp. That lowers the physical-warp occupancy percentage but improves useful lane occupancy and reduced the repeated scan kernel from about `0.125-0.128s` to about `0.112-0.116s` in focused runs. End-to-end GPU-16 overlap `.nucdb` remained volatile after the change (`1.374-1.536s` observed), so further optimization should focus on persistent Viterbi allocation/warmup, CPU domain workflow, `.nucdb` reconstruction, and parser/Forward costs, not on creating more CUDA engines.
 
 ## Timing Breakdown From Current GPU Run
 
 ```
 GPU pipeline: vit_lt_in=8710 vit_lt_out=707 post_vit=707 post_fwd=341 hits=478
-GPU timing breakdown (0.975s search stages; 1.024s GPU loop wall):
+GPU timing breakdown (0.729s search stages; 0.762s GPU loop wall):
   SSV longtarget:      0.109s
-    utilization:       97.5% device-active in SSV wall
-  extend+merge:        0.002s
+    utilization:       97.3% device-active in SSV wall
+  extend+merge:        0.003s
   batch filter:        0.054s
-  scanning Viterbi:    0.132s
-    utilization:       94.6% device-active in Viterbi CUDA call
-  Forward prefilter:   0.025s
-  GPU FB parser:       0.010s
-  CPU workers:         0.643s
+  scanning Viterbi:    0.242s
+    scan kernel:       0.112s
+    alloc/grow:        0.125s
+    utilization:       46.5% device-active in Viterbi CUDA call
+  Forward prefilter:   0.026s
+  GPU FB parser:       0.011s
+  CPU workers:         0.283s
     null scoring:      0.000s
-    bias scoring:      0.002s
+    bias scoring:      0.005s
     CPU Backward:      0.000s
-    domain workflow:   0.633s
-    hit reporting:     0.000s
+    domain workflow:   0.255s
+    hit reporting:     0.002s
 ```
 
-`hits=478` in the diagnostic line is the internal `P7_TOPHITS` count before final output formatting. The comparable main-output hit-line count was 648 for both CPU-4 and GPU; strict `--tblout` rows were 215 for both with no diff.
+`hits=478` in the diagnostic line is the internal `P7_TOPHITS` count before final output formatting. The comparable main-output hit-line count was 648 for both CPU-16 and GPU-16; strict `--tblout` rows were 215 for both with no diff.
 
 ## Reproducing
 
 ```sh
-src/nhmmer --cpu 4 --noali \
+src/nhmmer --cpu 16 --noali \
     benchmark-data/nucleotide-bench/work/query_medium.hmm \
     benchmark-data/nucleotide-bench/work/chr22.fa
 
-src/nhmmer --gpu --cpu 4 --noali \
+src/nhmmer --gpu --cpu 16 --noali \
     benchmark-data/nucleotide-bench/work/query_medium.hmm \
     benchmark-data/nucleotide-bench/work/chr22-overlap.nucdb.nucdb
 ```

@@ -33,6 +33,7 @@ NUCDB="$WORKDIR/chr22.nucdb.nucdb"
 OVERLAP_NUCDB="$WORKDIR/chr22-overlap.nucdb.nucdb"
 QUERIES=("MADE1" "query_short" "query_medium")
 MODE="${NHMMER_GPU_BENCH_MODE:-all}"
+CPU_THREADS="${NHMMER_GPU_BENCH_CPU:-16}"
 
 if [ ! -f "$TARGET" ]; then
     echo "ERROR: $TARGET not found. See agents_docs/nucleotide-benchmark.md" >&2
@@ -79,6 +80,7 @@ echo "================================================================"
 echo "nhmmer GPU Benchmark — $(date '+%Y-%m-%d %H:%M')"
 echo "Target: chr22.fa (50MB)"
 echo "Mode: ${MODE}"
+echo "CPU threads: ${CPU_THREADS}"
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo 'unknown')"
 echo "================================================================"
 echo
@@ -91,17 +93,17 @@ if [ "$MODE" = "all" ]; then
 
     echo "--- all samples (${QUERIES[*]}) ---"
     run_bench "CPU-1" "$NHMMER" --cpu 1 --noali "$combined_hmm" "$TARGET"
-    run_bench "CPU-4" "$NHMMER" --cpu 4 --noali "$combined_hmm" "$TARGET"
+    run_bench "CPU-${CPU_THREADS}" "$NHMMER" --cpu "$CPU_THREADS" --noali "$combined_hmm" "$TARGET"
 
     if "$NHMMER" -h 2>&1 | grep -q "\-\-gpu"; then
-        run_bench "GPU-4 (FASTA)" "$NHMMER" --gpu --cpu 4 --noali "$combined_hmm" "$TARGET"
+        run_bench "GPU-${CPU_THREADS} (FASTA)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$combined_hmm" "$TARGET"
 
         if [ -f "$NUCDB" ]; then
-            run_bench "GPU-4 (nucdb-o0)" "$NHMMER" --gpu --cpu 4 --noali "$combined_hmm" "$NUCDB"
+            run_bench "GPU-${CPU_THREADS} (nucdb-o0)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$combined_hmm" "$NUCDB"
         fi
 
         if [ -f "$OVERLAP_NUCDB" ]; then
-            run_bench "GPU-4 (nucdb-fast)" "$NHMMER" --gpu --cpu 4 --noali "$combined_hmm" "$OVERLAP_NUCDB"
+            run_bench "GPU-${CPU_THREADS} (nucdb-fast)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$combined_hmm" "$OVERLAP_NUCDB"
         fi
     else
         echo "  (GPU not available — build with --enable-cuda)"
@@ -118,18 +120,18 @@ for q in "${QUERIES[@]}"; do
     echo "--- $q ($(grep '^LENG' "$HMM" | awk '{print $2}') nodes) ---"
 
     run_bench "CPU-1" "$NHMMER" --cpu 1 --noali "$HMM" "$TARGET"
-    run_bench "CPU-4" "$NHMMER" --cpu 4 --noali "$HMM" "$TARGET"
+    run_bench "CPU-${CPU_THREADS}" "$NHMMER" --cpu "$CPU_THREADS" --noali "$HMM" "$TARGET"
 
     # GPU requires --enable-cuda build
     if "$NHMMER" -h 2>&1 | grep -q "\-\-gpu"; then
-        run_bench "GPU-4 (FASTA)" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$TARGET"
+        run_bench "GPU-${CPU_THREADS} (FASTA)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$HMM" "$TARGET"
 
         if [ -f "$NUCDB" ]; then
-            run_bench "GPU-4 (nucdb-o0)" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$NUCDB"
+            run_bench "GPU-${CPU_THREADS} (nucdb-o0)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$HMM" "$NUCDB"
         fi
 
         if [ -f "$OVERLAP_NUCDB" ]; then
-            run_bench "GPU-4 (nucdb-fast)" "$NHMMER" --gpu --cpu 4 --noali "$HMM" "$OVERLAP_NUCDB"
+            run_bench "GPU-${CPU_THREADS} (nucdb-fast)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$HMM" "$OVERLAP_NUCDB"
         fi
     else
         echo "  (GPU not available — build with --enable-cuda)"
@@ -140,6 +142,6 @@ done
 fi
 
 echo "================================================================"
-echo "Parity check: CPU-4 hit count is reference. GPU hit counts should"
+echo "Parity check: CPU-${CPU_THREADS} hit count is reference. GPU hit counts should"
 echo "match or stay within the documented smoke-test tolerance."
 echo "================================================================"
