@@ -191,10 +191,10 @@ Current fast `.nucdb` GPU breakdown for query_medium:
 | extend+merge | 0.002s |
 | batch filter | 0.055s |
 | scanning Viterbi | 0.122-0.242s |
-| Forward prefilter | 0.025s |
+| Forward prefilter | 0.050s |
 | GPU FB parser | 0.011s |
-| CPU workers | 0.272s |
-| worker domain workflow | 0.248s |
+| CPU workers | 0.288s |
+| worker domain workflow | 0.256s |
 | worker CPU Backward | 0.000s |
 
 Current query_medium launch/occupancy instrumentation on fast overlap `.nucdb`:
@@ -204,7 +204,7 @@ Current query_medium launch/occupancy instrumentation on fast overlap `.nucdb`:
 | SSV longtarget | 2 launches, last grid=800, block=32, smem=1002B | 50.0% theoretical, 24 active warps/SM of 48; 97.3% device-active in SSV wall | 6.25x on 128 SMs |
 | Scanning Viterbi | 2 launches, last grid=1097, block=32, smem=24192B | 8.3% theoretical, 4 active physical warps/SM of 48; 46.5-94.0% device-active in Viterbi CUDA call depending on first-call allocation | 8.51x on 128 SMs |
 
-The 16-thread baseline changes the conclusion: GPU-16 remains hit-clean but is slower than CPU-16 on the combined all-sample benchmark. Focused query_medium shows why the occupancy counter alone was misleading. SSV is a one-warp-per-block kernel with only 50% theoretical occupancy, but it is already about 97% device-active; grouping multiple chunks per block raised theoretical occupancy and did not improve wall time. Scanning Viterbi was wasting lanes 8-31 of each physical warp for nucleotide DP; it now packs four 8-lane DP groups per physical warp, reducing the repeated scan kernel from about `0.125-0.128s` to about `0.112-0.116s` in focused runs. The final combined benchmark remains run-to-run volatile (`1.374-1.536s` observed for GPU-16 overlap `.nucdb` after the subwarp change), so the measured kernel improvement does not yet translate to a stable end-to-end win over CPU-16. The remaining combined gap is CUDA setup, `.nucdb` reconstruction, SSV, Forward/parser work, Viterbi allocation variance, and residual CPU domain workflow together exceeding the strong CPU-16 baseline.
+The 16-thread baseline changes the conclusion: GPU-16 remains hit-clean but is slower than CPU-16 on the combined all-sample benchmark. Focused query_medium shows why the occupancy counter alone was misleading. SSV is a one-warp-per-block kernel with only 50% theoretical occupancy, but it is already about 97% device-active; grouping multiple chunks per block raised theoretical occupancy and did not improve wall time. Scanning Viterbi was wasting lanes 8-31 of each physical warp for nucleotide DP; it now packs four 8-lane DP groups per physical warp, reducing the repeated scan kernel from about `0.125-0.128s` to about `0.112-0.116s` in focused runs. A score-only Forward prefilter experiment failed parity badly because `p7_cuda_ForwardScoreDsqdataSubset()` is not parser-equivalent for this nucleotide F3 gate, so the accepted path still uses the GPU Forward parser xmx handoff. The final combined benchmark remains run-to-run volatile (`1.374-1.536s` observed for GPU-16 overlap `.nucdb` after the subwarp change; `1.418s` after parser event reuse), so the measured kernel improvement does not yet translate to a stable end-to-end win over CPU-16. The remaining combined gap is CUDA setup, `.nucdb` reconstruction, SSV, Forward/parser work, Viterbi allocation variance, and residual CPU domain workflow together exceeding the strong CPU-16 baseline.
 
 Focused repeats show run-to-run variance in CUDA engine setup and scanning Viterbi. After dynamic survivor-window scheduling, GPU CPU-domain workflow is no longer inflated relative to CPU-16 for query_medium: CPU-16 wall-stage trace measured domain at `0.250s`; GPU-16 focused repeats measured worker domain at `0.239-0.258s` and GPU loop wall at `0.617-0.814s` depending mostly on CUDA Viterbi allocation variance.
 
