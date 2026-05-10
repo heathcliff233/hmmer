@@ -163,6 +163,22 @@ nhmmer_gpu_hmm_window_compare(const void *a, const void *b)
   return 0;
 }
 
+typedef struct {
+  int   idx;
+  float filtersc;
+  int   status;
+} NHMMER_GPU_F1_SURVIVOR;
+
+static int
+nhmmer_gpu_f1_survivor_compare(const void *a, const void *b)
+{
+  const NHMMER_GPU_F1_SURVIVOR *wa = (const NHMMER_GPU_F1_SURVIVOR *)a;
+  const NHMMER_GPU_F1_SURVIVOR *wb = (const NHMMER_GPU_F1_SURVIVOR *)b;
+  if (wa->idx < wb->idx) return -1;
+  if (wa->idx > wb->idx) return 1;
+  return 0;
+}
+
 static int
 nhmmer_gpu_window_batch_init(NHMMER_GPU_WINDOW_BATCH *wb, int alloc)
 {
@@ -318,41 +334,46 @@ nhmmer_gpu_batch_filter(NHMMER_GPU_INFO *info, NHMMER_GPU_WINDOW_BATCH *wb,
   int       N = wb->nwindows;
   int       nsurv = 0;
   int       i;
-  double    P;
-  float     seq_score;
   P7_OPROFILE *om = info->om;
   P7_PIPELINE *pli = info->pli;
+  int      *survivor_idx = NULL;
+  int      *survivor_status = NULL;
+  float    *survivor_bias = NULL;
+  NHMMER_GPU_F1_SURVIVOR *survivors = NULL;
 
   status = nhmmer_gpu_ensure_scratch(info, N);
   if (status != eslOK) return status;
 
-  float *ssv_scores  = info->h_ssv_scores;
-  int   *ssv_status  = info->h_ssv_status;
-  float *null_scores = info->h_null_scores;
   float *bias_scores = info->h_bias_scores;
 
-  status = p7_cuda_MSVFilterDsqdataChunk(info->cuda_engine, info->cuda_msv,
-                                         &wb->chu, ssv_scores, ssv_status,
-                                         errbuf, errbuf_size);
-  if (status != eslOK) return status;
+  ESL_ALLOC(survivor_idx,    sizeof(int)   * N);
+  ESL_ALLOC(survivor_status, sizeof(int)   * N);
+  ESL_ALLOC(survivor_bias,   sizeof(float) * N);
 
-  status = p7_cuda_NullScoreDsqdataChunk(info->cuda_engine, info->bg,
-                                         &wb->chu, null_scores,
-                                         errbuf, errbuf_size);
-  if (status != eslOK) return status;
+  status = p7_cuda_NhmmerF1GateDsqdataChunk(info->cuda_engine, info->cuda_msv,
+                                            info->bg, &wb->chu, pli->do_biasfilter,
+                                            pli->B1,
+                                            om->evparam[p7_MMU], om->evparam[p7_MLAMBDA], pli->F1,
+                                            survivor_idx, &nsurv,
+                                            survivor_bias, survivor_status,
+                                            4, errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
 
-  if (pli->do_biasfilter) {
-    status = p7_cuda_BiasFilterDsqdataChunk(info->cuda_engine, info->bg,
-                                            &wb->chu, bias_scores,
-                                            errbuf, errbuf_size);
-    if (status != eslOK) return status;
+  if (nsurv > 0) {
+    ESL_ALLOC(survivors, sizeof(NHMMER_GPU_F1_SURVIVOR) * nsurv);
+    for (i = 0; i < nsurv; i++) {
+      survivors[i].idx      = survivor_idx[i];
+      survivors[i].filtersc = survivor_bias[i];
+      survivors[i].status   = survivor_status[i];
+    }
+    qsort(survivors, nsurv, sizeof(NHMMER_GPU_F1_SURVIVOR),
+          nhmmer_gpu_f1_survivor_compare);
   }
 
   /* --gpu-compare Stage A: compare GPU batch MSV/null/bias scores to CPU */
   if (info->do_compare) {
     P7_BG *bg = info->bg;
     for (i = 0; i < N; i++) {
-      if (ssv_status[i] != eslOK && ssv_status[i] != eslERANGE) continue;
       int    window_len = (int)wb->lengths[i];
       ESL_DSQ *subseq   = wb->chu.dsq[i];
       float  cpu_usc, cpu_nullsc, cpu_bias_filtersc, cpu_filtersc, cpu_seq_score;
@@ -364,20 +385,11 @@ nhmmer_gpu_batch_filter(NHMMER_GPU_INFO *info, NHMMER_GPU_WINDOW_BATCH *wb,
       p7_bg_SetLength(bg, window_len);
       p7_bg_NullOne(bg, subseq, window_len, &cpu_nullsc);
 
-      int gpu_pass = (ssv_status[i] == eslERANGE) ? 1 : 0;
+      int gpu_pass = 0;
       int cpu_pass = 0;
-      float gpu_seq_score = 0;
-      if (ssv_status[i] == eslOK) {
-        int F1_L = ESL_MIN(window_len, pli->B1);
-        if (pli->do_biasfilter) {
-          float gpu_bias = bias_scores[i] - null_scores[i];
-          float gpu_fs = null_scores[i] + (gpu_bias * ((F1_L > window_len) ? 1.0f : (float)F1_L / window_len));
-          gpu_seq_score = (ssv_scores[i] - gpu_fs) / eslCONST_LOG2;
-        } else {
-          gpu_seq_score = (ssv_scores[i] - null_scores[i]) / eslCONST_LOG2;
-        }
-        double gpu_P = esl_gumbel_surv(gpu_seq_score, om->evparam[p7_MMU], om->evparam[p7_MLAMBDA]);
-        gpu_pass = (gpu_P <= pli->F1) ? 1 : 0;
+
+      for (int sj = 0; sj < nsurv; sj++) {
+        if (survivor_idx[sj] == i) { gpu_pass = 1; break; }
       }
 
       if (pli->do_biasfilter) {
@@ -392,50 +404,35 @@ nhmmer_gpu_batch_filter(NHMMER_GPU_INFO *info, NHMMER_GPU_WINDOW_BATCH *wb,
       cpu_P = esl_gumbel_surv(cpu_seq_score, om->evparam[p7_MMU], om->evparam[p7_MLAMBDA]);
       cpu_pass = (cpu_P <= pli->F1) ? 1 : 0;
 
-      if (gpu_pass != cpu_pass || (gpu_pass && cpu_pass && fabsf(gpu_seq_score - cpu_seq_score) > 0.01f))
-        fprintf(stderr, "NHMMER_GPU_COMPARE_BATCH win=%d n=%" PRId64 " len=%d gpu_usc=%.4f cpu_usc=%.4f gpu_null=%.4f cpu_null=%.4f gpu_ss=%.4f cpu_ss=%.4f gpu_pass=%d cpu_pass=%d\n",
-                i, (int64_t)wl->windows[i].n, window_len, ssv_scores[i], cpu_usc, null_scores[i], cpu_nullsc, gpu_seq_score, cpu_seq_score, gpu_pass, cpu_pass);
+      if (gpu_pass != cpu_pass)
+        fprintf(stderr, "NHMMER_GPU_COMPARE_BATCH win=%d n=%" PRId64 " len=%d cpu_usc=%.4f cpu_null=%.4f cpu_ss=%.4f gpu_pass=%d cpu_pass=%d\n",
+                i, (int64_t)wl->windows[i].n, window_len, cpu_usc, cpu_nullsc, cpu_seq_score, gpu_pass, cpu_pass);
     }
   }
 
-  for (i = 0; i < N; i++) {
-    if (ssv_status[i] == eslERANGE) {
-      if (nsurv != i) {
-        wl->windows[nsurv] = wl->windows[i];
-        if (pli->do_biasfilter) bias_scores[nsurv] = bias_scores[i];
-      }
-      nsurv++;
-      continue;
-    }
-    if (ssv_status[i] != eslOK) continue;
-
-    int    window_len = (int)wb->lengths[i];
-    float  nullsc     = null_scores[i];
-    float  usc        = ssv_scores[i];
-    int    F1_L       = ESL_MIN(window_len, pli->B1);
-    float  filtersc;
-
-    if (pli->do_biasfilter) {
-      float bias_filtersc = bias_scores[i] - nullsc;
-      filtersc = nullsc + (bias_filtersc * ((F1_L > window_len) ? 1.0f : (float)F1_L / window_len));
-      seq_score = (usc - filtersc) / eslCONST_LOG2;
-    } else {
-      seq_score = (usc - nullsc) / eslCONST_LOG2;
-    }
-
-    P = esl_gumbel_surv(seq_score, om->evparam[p7_MMU], om->evparam[p7_MLAMBDA]);
-    if (P > pli->F1) continue;
-
-    if (nsurv != i) {
-      wl->windows[nsurv] = wl->windows[i];
-      if (pli->do_biasfilter) bias_scores[nsurv] = bias_scores[i];
-    }
-    nsurv++;
+  for (i = 0; i < nsurv; i++) {
+    int src = survivors[i].idx;
+    if (src < 0 || src >= N) { status = eslEINVAL; goto ERROR; }
+    if (i != src)
+      wl->windows[i] = wl->windows[src];
+    if (pli->do_biasfilter) bias_scores[i] = survivors[i].filtersc;
   }
 
   wl->count = nsurv;
   *ret_nsurv = nsurv;
+  free(survivor_idx);
+  free(survivor_status);
+  free(survivor_bias);
+  free(survivors);
   return eslOK;
+
+ERROR:
+  free(survivor_idx);
+  free(survivor_status);
+  free(survivor_bias);
+  free(survivors);
+  *ret_nsurv = 0;
+  return status;
 }
 
 typedef struct {

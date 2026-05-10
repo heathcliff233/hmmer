@@ -82,6 +82,7 @@ struct p7_cuda_msv_engine_s {
   int                *d_f1_survivor_idx;
   int                *d_f1_counter;
   float              *d_f1_survivor_usc;
+  float              *d_f1_survivor_filtersc;
   int                *d_f1_survivor_status;
   int                 f1_result_alloc;
   float              *d_bias_surv_filtersc;

@@ -332,6 +332,7 @@ cuda_ssv_null_bias_gate_kernel(
     /* bias filter params */
     const float *bias_pi, const float *bias_t, const float *bias_eo,
     int do_biasfilter,
+    int bias_gate_B,
     /* F1 Gumbel gate params */
     float ev_mu, float ev_lambda, float F1, float log2_inv,
     /* outputs: raw scores still stored for --gpu-ssv-compare compatibility */
@@ -339,7 +340,7 @@ cuda_ssv_null_bias_gate_kernel(
     /* outputs: null/bias/survivors for downstream stages */
     float *nullsc_out, float *filtersc_out,
     int *survivor_idx, int *survivor_counter,
-    float *survivor_usc, int *survivor_status)
+    float *survivor_usc, float *survivor_filtersc, int *survivor_status)
 {
   /* Block layout: WARPS warps per block, one sequence per warp.
    * Shared memory layout (extern):
@@ -562,7 +563,14 @@ SSV_DONE:
       usc = ((float)(raw_result - (int) seq_tjb_b) - (float) base_b) / scale_b - 3.0f;
     }
 
-    float seq_score = (usc - nullsc) * log2_inv;
+    float gate_filtersc = nullsc;
+    if (do_biasfilter && bias_gate_B > 0) {
+      int F1_L = (L < bias_gate_B) ? L : bias_gate_B;
+      float ratio = (F1_L > L) ? 1.0f : (float)F1_L / (float)L;
+      gate_filtersc = nullsc + (filtersc - nullsc) * ratio;
+    }
+
+    float seq_score = (usc - gate_filtersc) * log2_inv;
     float y = ev_lambda * (seq_score - ev_mu);
     float ey = -expf(-y);
     float P = (fabsf(ey) < 1e-7f) ? -ey : 1.0f - expf(ey);
@@ -570,7 +578,7 @@ SSV_DONE:
     if (overflow_result) P = 0.0f;
     if (P > F1) return;
 
-    if (do_biasfilter) {
+    if (do_biasfilter && bias_gate_B <= 0) {
       float bias_score = (usc - filtersc) * log2_inv;
       float by = ev_lambda * (bias_score - ev_mu);
       float bey = -expf(-by);
@@ -581,6 +589,7 @@ SSV_DONE:
     int idx = atomicAdd(survivor_counter, 1);
     survivor_idx[idx] = seq;
     survivor_usc[idx] = usc;
+    if (survivor_filtersc) survivor_filtersc[idx] = filtersc;
     survivor_status[idx] = overflow_result ? 4 : 0;  /* eslERANGE=4, eslOK=0 */
   }
 }
@@ -595,12 +604,26 @@ SSV_DONE:
     cuom->tbm_b, cuom->tec_b, cuom->tjb_b, \
     cuom->base_b, cuom->bias_b, cuom->scale_b, \
     engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo, \
-    do_biasfilter, \
+    do_biasfilter, 0, \
     (float) ev_mu, (float) ev_lambda, (float) F1, log2_inv, \
     engine->d_raw, engine->d_overflow, \
     engine->d_null_scores, engine->d_bias_filtersc, \
     engine->d_f1_survivor_idx, engine->d_f1_counter, \
-    engine->d_f1_survivor_usc, engine->d_f1_survivor_status)
+    engine->d_f1_survivor_usc, engine->d_f1_survivor_filtersc, engine->d_f1_survivor_status)
+
+#define SSV_NHMMER_FUSED_LAUNCH(STRIDE_VAL, WARPS_VAL) \
+  cuda_ssv_null_bias_gate_kernel<STRIDE_VAL, WARPS_VAL><<<(nseq + (WARPS_VAL) - 1) / (WARPS_VAL), 32 * (WARPS_VAL), shmem>>>( \
+    d_dsq_ptr, d_off_ptr, d_len_ptr, d_tjb_ptr, nseq, \
+    cuom->d_rbv, cuom->d_rbv_lin, cuom->M, cuom->Q, cuom->Kp, \
+    cuom->tbm_b, cuom->tec_b, cuom->tjb_b, \
+    cuom->base_b, cuom->bias_b, cuom->scale_b, \
+    engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo, \
+    do_biasfilter, B1, \
+    (float) ev_mu, (float) ev_lambda, (float) F1, log2_inv, \
+    engine->d_raw, engine->d_overflow, \
+    engine->d_null_scores, engine->d_bias_filtersc, \
+    engine->d_f1_survivor_idx, engine->d_f1_counter, \
+    engine->d_f1_survivor_usc, engine->d_f1_survivor_filtersc, engine->d_f1_survivor_status)
 
 /* 2D switch: one branch per (STRIDE, WARPS) value pair. */
 #define SSV_FUSED_DISPATCH_STRIDES(WARPS_VAL) \
@@ -626,6 +649,31 @@ SSV_DONE:
     case 19: SSV_FUSED_LAUNCH(19, WARPS_VAL); break; \
     case 20: SSV_FUSED_LAUNCH(20, WARPS_VAL); break; \
     default: SSV_FUSED_LAUNCH(20, WARPS_VAL); break; \
+  }
+
+#define SSV_NHMMER_FUSED_DISPATCH_STRIDES(WARPS_VAL) \
+  switch (stride) { \
+    case  1: SSV_NHMMER_FUSED_LAUNCH( 1, WARPS_VAL); break; \
+    case  2: SSV_NHMMER_FUSED_LAUNCH( 2, WARPS_VAL); break; \
+    case  3: SSV_NHMMER_FUSED_LAUNCH( 3, WARPS_VAL); break; \
+    case  4: SSV_NHMMER_FUSED_LAUNCH( 4, WARPS_VAL); break; \
+    case  5: SSV_NHMMER_FUSED_LAUNCH( 5, WARPS_VAL); break; \
+    case  6: SSV_NHMMER_FUSED_LAUNCH( 6, WARPS_VAL); break; \
+    case  7: SSV_NHMMER_FUSED_LAUNCH( 7, WARPS_VAL); break; \
+    case  8: SSV_NHMMER_FUSED_LAUNCH( 8, WARPS_VAL); break; \
+    case  9: SSV_NHMMER_FUSED_LAUNCH( 9, WARPS_VAL); break; \
+    case 10: SSV_NHMMER_FUSED_LAUNCH(10, WARPS_VAL); break; \
+    case 11: SSV_NHMMER_FUSED_LAUNCH(11, WARPS_VAL); break; \
+    case 12: SSV_NHMMER_FUSED_LAUNCH(12, WARPS_VAL); break; \
+    case 13: SSV_NHMMER_FUSED_LAUNCH(13, WARPS_VAL); break; \
+    case 14: SSV_NHMMER_FUSED_LAUNCH(14, WARPS_VAL); break; \
+    case 15: SSV_NHMMER_FUSED_LAUNCH(15, WARPS_VAL); break; \
+    case 16: SSV_NHMMER_FUSED_LAUNCH(16, WARPS_VAL); break; \
+    case 17: SSV_NHMMER_FUSED_LAUNCH(17, WARPS_VAL); break; \
+    case 18: SSV_NHMMER_FUSED_LAUNCH(18, WARPS_VAL); break; \
+    case 19: SSV_NHMMER_FUSED_LAUNCH(19, WARPS_VAL); break; \
+    case 20: SSV_NHMMER_FUSED_LAUNCH(20, WARPS_VAL); break; \
+    default: SSV_NHMMER_FUSED_LAUNCH(20, WARPS_VAL); break; \
   }
 
 extern "C" int
@@ -719,19 +767,25 @@ p7_cuda_SSVNullBiasGateResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_bias_filtersc, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(fused bias)")) != eslOK) goto ERROR;
     engine->bias_result_alloc = nseq;
   }
-  if (engine->f1_result_alloc < nseq) {
+  if (engine->f1_result_alloc < nseq ||
+      engine->d_f1_survivor_idx == NULL || engine->d_f1_counter == NULL ||
+      engine->d_f1_survivor_usc == NULL || engine->d_f1_survivor_filtersc == NULL ||
+      engine->d_f1_survivor_status == NULL) {
     if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
     if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
     if (engine->d_f1_survivor_usc) cudaFree(engine->d_f1_survivor_usc);
+    if (engine->d_f1_survivor_filtersc) cudaFree(engine->d_f1_survivor_filtersc);
     if (engine->d_f1_survivor_status) cudaFree(engine->d_f1_survivor_status);
     engine->d_f1_survivor_idx = NULL;
     engine->d_f1_counter = NULL;
     engine->d_f1_survivor_usc = NULL;
+    engine->d_f1_survivor_filtersc = NULL;
     engine->d_f1_survivor_status = NULL;
     engine->f1_result_alloc = 0;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_idx, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(fused f1 idx)")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_counter, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(fused f1 ctr)")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_usc, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(fused f1 usc)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_filtersc, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(fused f1 filtersc)")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_status, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(fused f1 status)")) != eslOK) goto ERROR;
     engine->f1_result_alloc = nseq;
   }
@@ -944,19 +998,25 @@ p7_cuda_SSVNullBiasGateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPRO
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_bias_filtersc, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(fused bias)")) != eslOK) goto ERROR;
     engine->bias_result_alloc = nseq;
   }
-  if (engine->f1_result_alloc < nseq) {
+  if (engine->f1_result_alloc < nseq ||
+      engine->d_f1_survivor_idx == NULL || engine->d_f1_counter == NULL ||
+      engine->d_f1_survivor_usc == NULL || engine->d_f1_survivor_filtersc == NULL ||
+      engine->d_f1_survivor_status == NULL) {
     if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
     if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
     if (engine->d_f1_survivor_usc) cudaFree(engine->d_f1_survivor_usc);
+    if (engine->d_f1_survivor_filtersc) cudaFree(engine->d_f1_survivor_filtersc);
     if (engine->d_f1_survivor_status) cudaFree(engine->d_f1_survivor_status);
     engine->d_f1_survivor_idx = NULL;
     engine->d_f1_counter = NULL;
     engine->d_f1_survivor_usc = NULL;
+    engine->d_f1_survivor_filtersc = NULL;
     engine->d_f1_survivor_status = NULL;
     engine->f1_result_alloc = 0;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_idx, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(fused f1 idx)")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_counter, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(fused f1 ctr)")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_usc, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(fused f1 usc)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_filtersc, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(fused f1 filtersc)")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_status, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(fused f1 status)")) != eslOK) goto ERROR;
     engine->f1_result_alloc = nseq;
   }
@@ -1051,6 +1111,240 @@ p7_cuda_SSVNullBiasGateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPRO
   }
   if ((status = cuda_status(cudaMemcpy(nullsc, engine->d_null_scores, sizeof(float) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(fused nullsc)")) != eslOK) goto CUDA_ERROR;
   if ((status = cuda_status(cudaMemcpy(filtersc, engine->d_bias_filtersc, sizeof(float) * nseq, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(fused filtersc)")) != eslOK) goto CUDA_ERROR;
+  engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
+  cudaEventRecord(d2h1);
+
+  *ret_nsurv = h_counter;
+  engine->stats.h2d_seconds    += elapsed_seconds(h2d0, h2d1);
+  engine->stats.kernel_seconds += elapsed_seconds(k0, k1);
+  engine->stats.ssv_kernel_seconds += elapsed_seconds(k0, k1);
+  engine->stats.d2h_seconds    += elapsed_seconds(d2h0, d2h1);
+  engine->stats.nseqs          += nseq;
+  engine->stats.nres           += total - (2 * nseq);
+  engine->stats.nbatches       += 1;
+  engine->batch_owner           = chu;
+  engine->batch_nseq            = nseq;
+  engine->batch_total           = total;
+  engine->last_cuom             = cuom;
+
+CUDA_ERROR:
+ERROR:
+  ht0 = host_seconds();
+  free(h_offsets);
+  free(h_lengths);
+  free(h_tjb_by_seq);
+  engine->stats.host_malloc_free_seconds += host_seconds() - ht0;
+  return status;
+}
+
+extern "C" int
+p7_cuda_NhmmerF1GateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                 const P7_BG *bg, ESL_DSQDATA_CHUNK *chu, int do_biasfilter,
+                                 int B1, double ev_mu, double ev_lambda, double F1,
+                                 int *survivor_idx, int *ret_nsurv,
+                                 float *survivor_filtersc, int *survivor_statuses,
+                                 int warps_per_block,
+                                 char *errbuf, int errbuf_size)
+{
+  int        status = eslOK;
+  int        nseq;
+  int        total = 0;
+  int       *h_offsets = NULL;
+  int       *h_lengths = NULL;
+  uint8_t   *h_tjb_by_seq = NULL;
+  int        WARPS = warps_per_block;
+  size_t     shmem;
+  cudaEvent_t h2d0 = engine->evt_h2d0, h2d1 = engine->evt_h2d1;
+  cudaEvent_t k0 = engine->evt_k0, k1 = engine->evt_k1;
+  cudaEvent_t d2h0 = engine->evt_d2h0, d2h1 = engine->evt_d2h1;
+  double     ht0;
+  int        h_counter = 0;
+  float      log2_inv = 1.0f / 0.693147180559945f;
+
+  if (!engine || !cuom || !bg || !chu || !survivor_idx || !ret_nsurv || !survivor_filtersc) return eslEINVAL;
+  nseq = chu->N;
+  if (nseq <= 0) { *ret_nsurv = 0; return eslOK; }
+  if (WARPS != 1 && WARPS != 2 && WARPS != 3 && WARPS != 4 && WARPS != 6 && WARPS != 8) WARPS = 4;
+  shmem = (size_t) (2 * cuom->M) + (size_t) WARPS * 2 * (cuom->M + 1);
+  if (shmem > 96 * 1024) {
+    while (WARPS > 1 && shmem > 96 * 1024) {
+      WARPS = (WARPS == 8 ? 6 : (WARPS == 6 ? 4 : (WARPS == 4 ? 3 : (WARPS == 3 ? 2 : 1))));
+      shmem = (size_t) (2 * cuom->M) + (size_t) WARPS * 2 * (cuom->M + 1);
+    }
+    if (shmem > 96 * 1024) {
+      if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "CUDA nhmmer F1 profile M=%d exceeds shared-memory limit", cuom->M);
+      return eslERANGE;
+    }
+  }
+
+  ht0 = host_seconds();
+  h_offsets    = (int *)     malloc(sizeof(int) * nseq);
+  h_lengths    = (int *)     malloc(sizeof(int) * nseq);
+  h_tjb_by_seq = (uint8_t *) malloc(sizeof(uint8_t) * nseq);
+  if (!h_offsets || !h_lengths || !h_tjb_by_seq) { status = eslEMEM; goto ERROR; }
+  engine->stats.host_malloc_free_seconds += host_seconds() - ht0;
+
+  ht0 = host_seconds();
+  for (int i = 0; i < nseq; i++) {
+    h_offsets[i] = total;
+    if (chu->L[i] > INT32_MAX) {
+      if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "dsqdata sequence length exceeds CUDA nhmmer F1 limit");
+      status = eslERANGE; goto ERROR;
+    }
+    h_lengths[i] = (int) chu->L[i];
+    if ((status = cuda_msvprofile_GrowLengthLookup((P7_CUDA_MSVPROFILE *) cuom, h_lengths[i])) != eslOK) goto ERROR;
+    h_tjb_by_seq[i] = cuom->h_tjb_by_len[h_lengths[i]];
+    total += h_lengths[i] + 1;
+  }
+  total += 1;
+  engine->stats.host_metadata_loop_seconds += host_seconds() - ht0;
+
+  if (engine->dsq_alloc < total) {
+    if (engine->d_dsq) cudaFree(engine->d_dsq);
+    if (engine->h_dsq) cudaFreeHost(engine->h_dsq);
+    engine->d_dsq = NULL; engine->h_dsq = NULL;
+    engine->dsq_alloc = 0; engine->h_dsq_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_dsq, total), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 dsq)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMallocHost((void **) &engine->h_dsq, total), errbuf, errbuf_size, "cudaMallocHost(nhmmer f1 dsq)")) != eslOK) goto ERROR;
+    engine->dsq_alloc = total; engine->h_dsq_alloc = total;
+  }
+  if (engine->meta_alloc < nseq) {
+    if (engine->d_offsets) cudaFree(engine->d_offsets);
+    if (engine->d_lengths) cudaFree(engine->d_lengths);
+    if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
+    engine->d_offsets = NULL; engine->d_lengths = NULL; engine->d_tjb_by_seq = NULL;
+    engine->meta_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_offsets, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 offsets)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_lengths, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 lengths)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_tjb_by_seq, sizeof(uint8_t) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 tjb)")) != eslOK) goto ERROR;
+    engine->meta_alloc = nseq;
+  }
+  if (engine->result_alloc < nseq) {
+    if (engine->d_raw) cudaFree(engine->d_raw);
+    if (engine->d_overflow) cudaFree(engine->d_overflow);
+    engine->d_raw = NULL; engine->d_overflow = NULL;
+    engine->result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_raw, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 raw)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_overflow, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 overflow)")) != eslOK) goto ERROR;
+    engine->result_alloc = nseq;
+  }
+  if (engine->null_result_alloc < nseq) {
+    if (engine->d_null_scores) cudaFree(engine->d_null_scores);
+    engine->d_null_scores = NULL; engine->null_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_null_scores, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 null)")) != eslOK) goto ERROR;
+    engine->null_result_alloc = nseq;
+  }
+  if (engine->bias_result_alloc < nseq) {
+    if (engine->d_bias_filtersc) cudaFree(engine->d_bias_filtersc);
+    engine->d_bias_filtersc = NULL; engine->bias_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_bias_filtersc, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 bias)")) != eslOK) goto ERROR;
+    engine->bias_result_alloc = nseq;
+  }
+  if (engine->f1_result_alloc < nseq ||
+      engine->d_f1_survivor_idx == NULL || engine->d_f1_counter == NULL ||
+      engine->d_f1_survivor_usc == NULL || engine->d_f1_survivor_filtersc == NULL ||
+      engine->d_f1_survivor_status == NULL) {
+    if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
+    if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
+    if (engine->d_f1_survivor_usc) cudaFree(engine->d_f1_survivor_usc);
+    if (engine->d_f1_survivor_filtersc) cudaFree(engine->d_f1_survivor_filtersc);
+    if (engine->d_f1_survivor_status) cudaFree(engine->d_f1_survivor_status);
+    engine->d_f1_survivor_idx = NULL;
+    engine->d_f1_counter = NULL;
+    engine->d_f1_survivor_usc = NULL;
+    engine->d_f1_survivor_filtersc = NULL;
+    engine->d_f1_survivor_status = NULL;
+    engine->f1_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_idx, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 idx)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_counter, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 ctr)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_usc, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 usc)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_filtersc, sizeof(float) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 filtersc)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **) &engine->d_f1_survivor_status, sizeof(int) * nseq), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 status)")) != eslOK) goto ERROR;
+    engine->f1_result_alloc = nseq;
+  }
+
+  if (!engine->bias_params_uploaded && do_biasfilter && bg->fhmm) {
+    float h_pi[3], h_t[6];
+    size_t eo_bytes = (size_t) bg->fhmm->abc->Kp * 2 * sizeof(float);
+    h_pi[0] = bg->fhmm->pi[0]; h_pi[1] = bg->fhmm->pi[1]; h_pi[2] = bg->fhmm->pi[2];
+    h_t[0] = bg->fhmm->t[0][0]; h_t[1] = bg->fhmm->t[0][1]; h_t[2] = bg->fhmm->t[0][2];
+    h_t[3] = bg->fhmm->t[1][0]; h_t[4] = bg->fhmm->t[1][1]; h_t[5] = bg->fhmm->t[1][2];
+    if (engine->d_bias_pi == NULL) {
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_bias_pi, sizeof(float) * 3), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 bias pi)")) != eslOK) goto ERROR;
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_bias_t, sizeof(float) * 6), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 bias t)")) != eslOK) goto ERROR;
+    }
+    if (engine->d_bias_eo == NULL) {
+      if ((status = cuda_status(cudaMalloc((void **) &engine->d_bias_eo, eo_bytes), errbuf, errbuf_size, "cudaMalloc(nhmmer f1 bias eo)")) != eslOK) goto ERROR;
+    }
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_pi, h_pi, sizeof(h_pi), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 bias pi)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_t, h_t, sizeof(h_t), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 bias t)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_eo, bg->fhmm->eo[0], eo_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 bias eo)")) != eslOK) goto CUDA_ERROR;
+    engine->bias_params_uploaded = 1;
+  }
+
+  if ((status = cuda_status(cudaMemcpy(engine->d_f1_counter, &h_counter, sizeof(int), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 counter reset)")) != eslOK) goto CUDA_ERROR;
+
+  ht0 = host_seconds();
+  if (chu->smem != NULL) {
+    memcpy(engine->h_dsq, chu->smem, total);
+  } else {
+    for (int i = 0; i < nseq; i++)
+      memcpy(engine->h_dsq + h_offsets[i], chu->dsq[i], h_lengths[i] + 1);
+  }
+  engine->stats.host_pack_loop_seconds += host_seconds() - ht0;
+
+  cudaEventRecord(h2d0);
+  ht0 = host_seconds();
+  if ((status = cuda_status(cudaMemcpy(engine->d_dsq, engine->h_dsq, total, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 dsq)")) != eslOK) goto CUDA_ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_offsets, h_offsets, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 offsets)")) != eslOK) goto CUDA_ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_lengths, h_lengths, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 lengths)")) != eslOK) goto CUDA_ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_tjb_by_seq, h_tjb_by_seq, sizeof(uint8_t) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 tjb)")) != eslOK) goto CUDA_ERROR;
+  engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
+  cudaEventRecord(h2d1);
+
+  {
+    const uint8_t *d_dsq_ptr = engine->d_dsq;
+    const int     *d_off_ptr = engine->d_offsets;
+    const int     *d_len_ptr = engine->d_lengths;
+    const uint8_t *d_tjb_ptr = engine->d_tjb_by_seq;
+    int stride = (cuom->M + 31) / 32;
+    if (shmem > 48 * 1024) {
+      switch (WARPS) {
+        case 1: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 2: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 3: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 3>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 4: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 4>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 6: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 6>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+        case 8: cudaFuncSetAttribute((const void *) cuda_ssv_null_bias_gate_kernel<20, 8>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) shmem); break;
+      }
+    }
+
+    cudaEventRecord(k0);
+    switch (WARPS) {
+      case 1: SSV_NHMMER_FUSED_DISPATCH_STRIDES(1); break;
+      case 2: SSV_NHMMER_FUSED_DISPATCH_STRIDES(2); break;
+      case 3: SSV_NHMMER_FUSED_DISPATCH_STRIDES(3); break;
+      case 4: SSV_NHMMER_FUSED_DISPATCH_STRIDES(4); break;
+      case 6: SSV_NHMMER_FUSED_DISPATCH_STRIDES(6); break;
+      case 8: SSV_NHMMER_FUSED_DISPATCH_STRIDES(8); break;
+      default: SSV_NHMMER_FUSED_DISPATCH_STRIDES(4); break;
+    }
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_nhmmer_f1_gate launch")) != eslOK) goto CUDA_ERROR;
+    cudaEventRecord(k1);
+  }
+  ht0 = host_seconds();
+  cudaEventSynchronize(k1);
+  engine->stats.host_sync_seconds += host_seconds() - ht0;
+
+  cudaEventRecord(d2h0);
+  ht0 = host_seconds();
+  if ((status = cuda_status(cudaMemcpy(&h_counter, engine->d_f1_counter, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 counter)")) != eslOK) goto CUDA_ERROR;
+  if (h_counter > 0) {
+    if ((status = cuda_status(cudaMemcpy(survivor_idx, engine->d_f1_survivor_idx, sizeof(int) * h_counter, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 survivors)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(survivor_filtersc, engine->d_f1_survivor_filtersc, sizeof(float) * h_counter, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 filtersc)")) != eslOK) goto CUDA_ERROR;
+    if (survivor_statuses)
+      if ((status = cuda_status(cudaMemcpy(survivor_statuses, engine->d_f1_survivor_status, sizeof(int) * h_counter, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(nhmmer f1 status)")) != eslOK) goto CUDA_ERROR;
+  }
   engine->stats.host_cudamemcpy_seconds += host_seconds() - ht0;
   cudaEventRecord(d2h1);
 

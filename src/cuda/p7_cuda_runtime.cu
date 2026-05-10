@@ -102,6 +102,7 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
   if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
   if (engine->d_f1_survivor_usc) cudaFree(engine->d_f1_survivor_usc);
+  if (engine->d_f1_survivor_filtersc) cudaFree(engine->d_f1_survivor_filtersc);
   if (engine->d_f1_survivor_status) cudaFree(engine->d_f1_survivor_status);
   if (engine->d_bias_surv_filtersc) cudaFree(engine->d_bias_surv_filtersc);
   if (engine->d_resident_dsq)     cudaFree(engine->d_resident_dsq);

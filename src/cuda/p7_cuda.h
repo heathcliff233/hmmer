@@ -188,6 +188,13 @@ extern int  p7_cuda_SSVNullBiasGateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7
                                                  float *survivor_scores, int *survivor_statuses,
                                                  int warps_per_block,
                                                  char *errbuf, int errbuf_size);
+extern int  p7_cuda_NhmmerF1GateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                              const P7_BG *bg, ESL_DSQDATA_CHUNK *chu, int do_biasfilter,
+                                              int B1, double ev_mu, double ev_lambda, double F1,
+                                              int *survivor_idx, int *ret_nsurv,
+                                              float *survivor_filtersc, int *survivor_statuses,
+                                              int warps_per_block,
+                                              char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, int64_t dsq_size,
                                            const int64_t *offsets, const int32_t *lengths, int64_t nseq,

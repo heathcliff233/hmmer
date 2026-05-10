@@ -318,6 +318,21 @@ p7_cuda_SSVFilterDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
 }
 
 int
+p7_cuda_NhmmerF1GateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                 const P7_BG *bg, ESL_DSQDATA_CHUNK *chu, int do_biasfilter,
+                                 int B1, double ev_mu, double ev_lambda, double F1,
+                                 int *survivor_idx, int *ret_nsurv,
+                                 float *survivor_filtersc, int *survivor_statuses,
+                                 int warps_per_block,
+                                 char *errbuf, int errbuf_size)
+{
+  if (ret_nsurv) *ret_nsurv = 0;
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
 p7_cuda_SSVFilterResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                           int64_t seq0, int nseq, float *scores, int *statuses,
                           char *errbuf, int errbuf_size)

@@ -64,11 +64,21 @@ Latest all-sample result after also making compact GPU F3/Backward handoff the F
 | GPU-16 no-overlap `.nucdb` | 1.666s | 1476 |
 | GPU-16 overlap `.nucdb` | 1.450s | 1476 |
 
+Latest all-sample result after adding a nucleotide-specific GPU F1 gate:
+
+| Path | Time | Hits |
+|------|:---:|:---:|
+| CPU-1 | 8.823s | 1476 |
+| CPU-16 | 1.090s | 1476 |
+| GPU-16 FASTA | 2.380s | 1476 |
+| GPU-16 no-overlap `.nucdb` | 1.568s | 1476 |
+| GPU-16 overlap `.nucdb` | 1.202s | 1476 |
+
 Parity after the update was clean: MADE1 FASTA 465=465, MADE1 `.nucdb` 465=465, query_short FASTA 363=363, query_medium FASTA 648=648.
 
 The cache reduced one concrete CPU island in multi-query `.nucdb` runs: a direct combined overlap `.nucdb` timing run reported `nucdb reconstruct` as `0.075s`, then `0.000s`, then `0.000s` for MADE1/query_short/query_medium. Process elapsed was `1.439s` with `1.079s` summed GPU loop wall. The end-to-end speed script remains noisy, so this should be read as a reduction in the reconstruction bucket, not a stable wall-time win over CPU-16.
 
-A follow-up attempt to move nucleotide batch F1 survivor selection to an existing CUDA F1 gate failed parity (`MADE1` FASTA CPU=465, GPU=255; `.nucdb` FASTA/nucdb 252/258), so it was reverted. The existing protein gate does not preserve the nucleotide batch filter's exact `B1`-scaled bias semantics. Keep this listed as open work until a nucleotide-specific GPU gate is implemented and parity-proven.
+The accepted nucleotide GPU F1 gate is separate from the older failed protein-gate experiment. The failed path did not preserve `B1`-scaled bias semantics and reordered survivors. The accepted path uses the nucleotide gate and then restores original window order before CPU-side window compaction.
 
 The combined overlap `.nucdb` timing run accounted for the previously confusing wall-time gap:
 
@@ -93,7 +103,7 @@ CPU-4 HMMER stage totals are summed across worker threads, so divide by four for
 | Stage | CPU-4 summed | CPU-4 approx wall | GPU fast `.nucdb` wall |
 |-------|:---:|:---:|:---:|
 | SSV | 2.343s | 0.586s | 0.103-0.109s |
-| MSV/null/bias | 0.536s | 0.134s | 0.054-0.064s batch filter + 0.002s worker bias/null |
+| MSV/null/bias | 0.536s | 0.134s | 0.009-0.036s batch filter in the latest combined `.nucdb` timing + 0.002s worker bias/null |
 | Viterbi | 1.307s | 0.327s | 0.138-0.289s scanning Viterbi |
 | Forward | 0.469s | 0.117s | 0.028-0.039s Forward prefilter |
 | Backward | 0.278s | 0.070s | 0.011-0.014s GPU FB parser; 0.000s CPU Backward |
@@ -120,7 +130,7 @@ GPU timing breakdown (0.602s search stages; 0.650s GPU loop wall):
   SSV longtarget:      0.109s
     utilization:       97.3% device-active in SSV wall
   extend+merge:        0.002s
-  batch filter:        0.054s
+  batch filter:        0.036s
   scanning Viterbi:    0.119s
     scan kernel:       0.111s
     alloc/grow:        0.003s
