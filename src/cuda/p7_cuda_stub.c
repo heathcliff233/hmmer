@@ -229,10 +229,36 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
 
 int
 p7_cuda_ForwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
-                                   ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
-                                   const size_t *x_offsets, size_t total_xcells,
-                                   float *xf, float *scores, int *statuses,
+                                    ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                    const size_t *x_offsets, size_t total_xcells,
+                                    float *xf, float *scores, int *statuses,
                                    char *errbuf, int errbuf_size)
+{
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
+p7_cuda_ForwardParserDsqdataSubsetScoresOnly(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                             ESL_DSQDATA_CHUNK *chu, const int *seqidx, int nidx,
+                                             const size_t *x_offsets, size_t total_xcells,
+                                             float *scores, int *statuses,
+                                             char *errbuf, int errbuf_size)
+{
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
+p7_cuda_BackwardParserDsqdataSubsetStoredForward(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                 ESL_DSQDATA_CHUNK *chu,
+                                                 const int *surv_srcidx, int nsurv,
+                                                 const size_t *orig_x_offsets,
+                                                 const size_t *surv_x_offsets, size_t surv_total_xcells,
+                                                 float *xf, float *xb, float *scores, int *statuses,
+                                                 char *errbuf, int errbuf_size)
 {
   if (errbuf && errbuf_size > 0)
     snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");

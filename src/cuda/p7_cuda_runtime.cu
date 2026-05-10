@@ -96,6 +96,9 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_parser_statuses) cudaFree(engine->d_parser_statuses);
   if (engine->d_parser_seqidx) cudaFree(engine->d_parser_seqidx);
   if (engine->d_parser_x_offsets) cudaFree(engine->d_parser_x_offsets);
+  if (engine->d_parser_surv_idx) cudaFree(engine->d_parser_surv_idx);
+  if (engine->d_parser_surv_x_offsets) cudaFree(engine->d_parser_surv_x_offsets);
+  if (engine->d_parser_xf_compact) cudaFree(engine->d_parser_xf_compact);
   if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
   if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
   if (engine->d_f1_survivor_usc) cudaFree(engine->d_f1_survivor_usc);

@@ -71,9 +71,14 @@ struct p7_cuda_msv_engine_s {
   int                *d_parser_statuses;
   int                *d_parser_seqidx;
   size_t             *d_parser_x_offsets;
+  int                *d_parser_surv_idx;
+  size_t             *d_parser_surv_x_offsets;
   int                 parser_allocL;
   int                 parser_result_alloc;
+  int                 parser_surv_alloc;
   size_t              parser_cell_alloc;
+  float              *d_parser_xf_compact;
+  size_t              parser_compact_cell_alloc;
   int                *d_f1_survivor_idx;
   int                *d_f1_counter;
   float              *d_f1_survivor_usc;
