@@ -42,6 +42,102 @@ nhmmer_gpu_elapsed(const struct timespec *ts0, const struct timespec *ts1)
 }
 
 static int
+nhmmer_gpu_nucdb_reconstruct_sq(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
+                                int64_t si, int complementarity, ESL_SQ **ret_sq)
+{
+  const P7_NUCDB_SEQ_IDX *sidx;
+  const char *seqname;
+  ESL_SQ *sq;
+  int c;
+
+  if (!ndb || !abc || !ret_sq) return eslEINVAL;
+  if (si < 0 || si >= (int64_t)ndb->hdr.nseq) return eslEINVAL;
+
+  sidx = &ndb->seq_idx[si];
+  seqname = ndb->name_blob + sidx->name_offset;
+
+  sq = esl_sq_CreateDigital(abc);
+  if (!sq) return eslEMEM;
+  esl_sq_SetName(sq, seqname);
+  esl_sq_GrowTo(sq, sidx->length);
+
+  if (complementarity == p7_NOCOMPLEMENT) {
+    int64_t step = (int64_t)ndb->hdr.chunk_size - (int64_t)ndb->hdr.overlap;
+    if (step < 1) step = 1;
+    for (c = 0; c < sidx->fwd_chunk_count; c++) {
+      P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[sidx->fwd_chunk_start + c];
+      uint8_t *chunk_dsq = ndb->chunk_data + ci->data_offset;
+      int64_t copy_start = 0;
+      int64_t copy_len   = ci->length;
+      if (c > 0) {
+        int64_t already_copied = ci->seq_offset;
+        int64_t prev_end = ndb->chunk_idx[sidx->fwd_chunk_start + c - 1].seq_offset +
+                           ndb->chunk_idx[sidx->fwd_chunk_start + c - 1].length;
+        if (prev_end > already_copied) {
+          copy_start = prev_end - already_copied;
+          copy_len  -= copy_start;
+        }
+      }
+      if (copy_len > 0)
+        memcpy(sq->dsq + 1 + ci->seq_offset + copy_start,
+               chunk_dsq + 1 + copy_start, copy_len);
+    }
+    sq->start = 1;
+    sq->end   = sq->n = sidx->length;
+  } else {
+    for (c = 0; c < sidx->rc_chunk_count; c++) {
+      P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[sidx->rc_chunk_start + c];
+      uint8_t *chunk_dsq = ndb->chunk_data + ci->data_offset;
+      int64_t copy_start = 0;
+      int64_t copy_len   = ci->length;
+      if (c > 0) {
+        int64_t prev_end = ndb->chunk_idx[sidx->rc_chunk_start + c - 1].seq_offset +
+                           ndb->chunk_idx[sidx->rc_chunk_start + c - 1].length;
+        if (prev_end > ci->seq_offset) {
+          copy_start = prev_end - ci->seq_offset;
+          copy_len  -= copy_start;
+        }
+      }
+      if (copy_len > 0)
+        memcpy(sq->dsq + 1 + ci->seq_offset + copy_start,
+               chunk_dsq + 1 + copy_start, copy_len);
+    }
+    sq->start = sq->n = sidx->length;
+    sq->end   = 1;
+  }
+  sq->L = sq->n;
+  sq->dsq[0] = eslDSQ_SENTINEL;
+  sq->dsq[sq->n + 1] = eslDSQ_SENTINEL;
+  *ret_sq = sq;
+  return eslOK;
+}
+
+static int
+nhmmer_gpu_nucdb_get_cached_sq(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
+                               int64_t si, int complementarity,
+                               ESL_SQ **ret_sq, int *ret_built)
+{
+  ESL_SQ **slot = NULL;
+  int status;
+
+  if (!ndb || !abc || !ret_sq) return eslEINVAL;
+  if (ret_built) *ret_built = FALSE;
+  if (si < 0 || si >= (int64_t)ndb->hdr.nseq) return eslEINVAL;
+
+  if (complementarity == p7_NOCOMPLEMENT) slot = ndb->sq_cache_top;
+  else                                    slot = ndb->sq_cache_rc;
+  if (!slot) return eslEINVAL;
+
+  if (slot[si] == NULL) {
+    status = nhmmer_gpu_nucdb_reconstruct_sq(ndb, abc, si, complementarity, &slot[si]);
+    if (status != eslOK) return status;
+    if (ret_built) *ret_built = TRUE;
+  }
+  *ret_sq = slot[si];
+  return eslOK;
+}
+
+static int
 nhmmer_gpu_vit_window_compare(const void *a, const void *b)
 {
   const P7_CUDA_VIT_LT_WINDOW *wa = (const P7_CUDA_VIT_LT_WINDOW *)a;
@@ -2015,7 +2111,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     size_t  *gpu_fb_x_offsets = NULL;
     int      gpu_fb_ok = FALSE;
     int      use_skip_fwd = FALSE;
-    int      use_compact_fb = getenv("HMMER_NHMMER_GPU_COMPACT_FB") != NULL && info->do_gpu_fwd;
+    int      use_compact_fb = info->do_gpu_fwd;
     if (use_compact_fb) {
       clock_gettime(CLOCK_MONOTONIC, &ts0);
       status = nhmmer_gpu_forward_backward_compact(info, sq, seq_id, complementarity,
@@ -3002,50 +3098,15 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
 
   for (int64_t si = 0; si < (int64_t)ndb->hdr.nseq; si++) {
     P7_NUCDB_SEQ_IDX *sidx = &ndb->seq_idx[si];
-    const char       *seqname = ndb->name_blob + sidx->name_offset;
-
-    /* Build forward-strand ESL_SQ from nucdb data.
-     * The full sequence is reconstructed from its chunks (stripping overlaps). */
-    ESL_SQ *sq = esl_sq_CreateDigital(om->abc);
-    if (!sq) return eslEMEM;
+    int sq_built = FALSE;
+    ESL_SQ *sq = NULL;
     clock_gettime(CLOCK_MONOTONIC, &ts0);
-    esl_sq_SetName(sq, seqname);
-    esl_sq_GrowTo(sq, sidx->length);
-
-    /* Reconstruct the full digitized sequence from forward chunks */
-    int64_t step = (int64_t)ndb->hdr.chunk_size - (int64_t)ndb->hdr.overlap;
-    if (step < 1) step = 1;
-
-    for (int c = 0; c < sidx->fwd_chunk_count; c++) {
-      P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[sidx->fwd_chunk_start + c];
-      uint8_t *chunk_dsq = ndb->chunk_data + ci->data_offset;
-      /* chunk_dsq[0] = sentinel, chunk_dsq[1..clen] = residues */
-
-      int64_t copy_start = 0;
-      int64_t copy_len   = ci->length;
-      if (c > 0) {
-        /* Skip the overlap region (already copied from previous chunk) */
-        int64_t already_copied = ci->seq_offset;
-        int64_t prev_end = ndb->chunk_idx[sidx->fwd_chunk_start + c - 1].seq_offset +
-                           ndb->chunk_idx[sidx->fwd_chunk_start + c - 1].length;
-        if (prev_end > already_copied) {
-          copy_start = prev_end - already_copied;
-          copy_len  -= copy_start;
-        }
-      }
-
-      if (copy_len > 0)
-        memcpy(sq->dsq + 1 + ci->seq_offset + copy_start,
-               chunk_dsq + 1 + copy_start, copy_len);
+    status = nhmmer_gpu_nucdb_get_cached_sq(ndb, om->abc, si, p7_NOCOMPLEMENT, &sq, &sq_built);
+    if (status != eslOK) return status;
+    if (sq_built) {
+      clock_gettime(CLOCK_MONOTONIC, &ts1);
+      info->t_nucdb_reconstruct += nhmmer_gpu_elapsed(&ts0, &ts1);
     }
-    sq->n = sidx->length;
-    sq->dsq[0] = eslDSQ_SENTINEL;
-    sq->dsq[sq->n + 1] = eslDSQ_SENTINEL;
-    sq->start = 1;
-    sq->end   = sq->n;
-    sq->L     = sq->n;
-    clock_gettime(CLOCK_MONOTONIC, &ts1);
-    info->t_nucdb_reconstruct += nhmmer_gpu_elapsed(&ts0, &ts1);
 
     p7_pli_NewSeq(info->pli, sq);
 
@@ -3058,46 +3119,25 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
                                                 errbuf, sizeof(errbuf));
       if (status != eslOK) {
         fprintf(stderr, "GPU nhmmer nucdb forward strand failed: %s\n", errbuf);
-        esl_sq_Destroy(sq);
         goto ERROR;
       }
     }
 
     /* Reverse complement strand — reconstruct directly from nucdb RC chunks */
     if (strands != p7_STRAND_TOPONLY && sidx->rc_chunk_count > 0) {
-      ESL_SQ *sq_rc = esl_sq_CreateDigital(om->abc);
-      if (!sq_rc) { esl_sq_Destroy(sq); return eslEMEM; }
+      ESL_SQ *sq_rc = NULL;
+      int sq_rc_built = FALSE;
       clock_gettime(CLOCK_MONOTONIC, &ts0);
-      esl_sq_SetName(sq_rc, seqname);
-      esl_sq_GrowTo(sq_rc, sidx->length);
-
-      for (int c = 0; c < sidx->rc_chunk_count; c++) {
-        P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[sidx->rc_chunk_start + c];
-        uint8_t *chunk_dsq = ndb->chunk_data + ci->data_offset;
-
-        int64_t copy_start = 0;
-        int64_t copy_len   = ci->length;
-        if (c > 0) {
-          int64_t prev_end = ndb->chunk_idx[sidx->rc_chunk_start + c - 1].seq_offset +
-                             ndb->chunk_idx[sidx->rc_chunk_start + c - 1].length;
-          if (prev_end > ci->seq_offset) {
-            copy_start = prev_end - ci->seq_offset;
-            copy_len  -= copy_start;
-          }
-        }
-        if (copy_len > 0)
-          memcpy(sq_rc->dsq + 1 + ci->seq_offset + copy_start,
-                 chunk_dsq + 1 + copy_start, copy_len);
+      status = nhmmer_gpu_nucdb_get_cached_sq(ndb, om->abc, si, p7_COMPLEMENT, &sq_rc, &sq_rc_built);
+      if (status != eslOK) {
+        fprintf(stderr, "GPU nhmmer nucdb revcomp cache failed\n");
+        goto ERROR;
       }
-      sq_rc->n = sidx->length;
-      sq_rc->dsq[0] = eslDSQ_SENTINEL;
-      sq_rc->dsq[sq_rc->n + 1] = eslDSQ_SENTINEL;
-      sq_rc->start = sq_rc->n;
-      sq_rc->end   = 1;
-      sq_rc->L     = sq_rc->n;
+      if (sq_rc_built) {
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        info->t_nucdb_reconstruct += nhmmer_gpu_elapsed(&ts0, &ts1);
+      }
       nres += sq_rc->n;
-      clock_gettime(CLOCK_MONOTONIC, &ts1);
-      info->t_nucdb_reconstruct += nhmmer_gpu_elapsed(&ts0, &ts1);
 
       status = nhmmer_gpu_process_nucdb_strand(info, ndb,
                                                 sidx->rc_chunk_start, sidx->rc_chunk_count,
@@ -3105,18 +3145,13 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
                                                 errbuf, sizeof(errbuf));
       if (status != eslOK) {
         fprintf(stderr, "GPU nhmmer nucdb revcomp strand failed: %s\n", errbuf);
-        esl_sq_Destroy(sq_rc);
-        esl_sq_Destroy(sq);
         goto ERROR;
       }
-      esl_sq_Destroy(sq_rc);
     }
 
     p7_pipeline_Reuse(info->pli);
     if (idlen_cb) idlen_cb(idlen_data, si, sidx->length);
     info->pli->nseqs++;
-
-    esl_sq_Destroy(sq);
   }
 
   *ret_nseqs = (int)ndb->hdr.nseq;

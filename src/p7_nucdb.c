@@ -341,6 +341,11 @@ p7_nucdb_Open(const char *basename, P7_NUCDB **ret_ndb, char *errbuf)
                                            sizeof(P7_NUCDB_SEQ_IDX) * ndb->hdr.nseq);
   ndb->chunk_data = base + ndb->hdr.data_offset;
 
+  ndb->sq_cache_top = calloc(ndb->hdr.nseq, sizeof(ESL_SQ *));
+  ndb->sq_cache_rc  = calloc(ndb->hdr.nseq, sizeof(ESL_SQ *));
+  if (!ndb->sq_cache_top || !ndb->sq_cache_rc)
+    ESL_XFAIL(eslEMEM, errbuf, "allocation failed");
+
   ndb->filename = fname;
   fname = NULL;
 
@@ -357,6 +362,16 @@ void
 p7_nucdb_Close(P7_NUCDB *ndb)
 {
   if (!ndb) return;
+  if (ndb->sq_cache_top) {
+    for (uint64_t i = 0; i < ndb->hdr.nseq; i++)
+      if (ndb->sq_cache_top[i]) esl_sq_Destroy(ndb->sq_cache_top[i]);
+  }
+  if (ndb->sq_cache_rc) {
+    for (uint64_t i = 0; i < ndb->hdr.nseq; i++)
+      if (ndb->sq_cache_rc[i]) esl_sq_Destroy(ndb->sq_cache_rc[i]);
+  }
+  free(ndb->sq_cache_top);
+  free(ndb->sq_cache_rc);
   if (ndb->mmap_base) munmap(ndb->mmap_base, ndb->mmap_size);
   if (ndb->fd >= 0)   close(ndb->fd);
   free(ndb->filename);

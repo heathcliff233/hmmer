@@ -4,7 +4,7 @@ Last updated: 2026-05-10
 
 ## TL;DR
 
-The previous “GPU is slower because CPU workers redo Forward/Backward and GPU domain rescoring is mutex-bound” analysis is stale. Current default `nhmmer --gpu` uses the GPU Forward prefilter and GPU Forward/Backward parser handoff by default, so CPU Forward/Backward continuation is gone in the accepted path. On `.nucdb`, the Forward-to-Backward handoff now keeps Forward xmx device-resident, computes the F3 survivor gate on GPU, compacts survivor xmx on GPU, and runs Backward without re-uploading Forward xmx.
+The previous “GPU is slower because CPU workers redo Forward/Backward and GPU domain rescoring is mutex-bound” analysis is stale. Current default `nhmmer --gpu` uses the GPU Forward prefilter and GPU Forward/Backward parser handoff by default, so CPU Forward/Backward continuation is gone in the accepted path. On FASTA and `.nucdb`, the Forward-to-Backward handoff now keeps Forward xmx device-resident, computes the F3 survivor gate on GPU, compacts survivor xmx on GPU, and runs Backward without re-uploading Forward xmx.
 
 The real issue behind the stale 1.91s versus 2.109s comparison was apples-to-oranges benchmarking plus GPU window merge bugs. GPU SSV windows and GPU Viterbi seeds are emitted with `atomicAdd`, so they are unordered; `p7_pli_ExtendAndMergeWindows()` only merges adjacent windows. The GPU path also needed to extend/merge scanning-Viterbi seeds in parent MSV-window-local coordinates, matching CPU, before converting back to target coordinates. These issues inflated downstream CPU domain workflow. The current fix sorts SSV windows before the first long-target merge, sorts Viterbi seeds by `(window_id, position, model_k)`, extends/merges Viterbi seeds in local coordinates, then converts back to target coordinates.
 
@@ -44,7 +44,31 @@ Latest all-sample result after `.nucdb` GPU F3 gating and Forward-xmx compaction
 | GPU-16 no-overlap `.nucdb` | 1.472s | 1476 |
 | GPU-16 overlap `.nucdb` | 1.270s | 1476 |
 
+Latest all-sample result after caching reconstructed `.nucdb` host strands across queries:
+
+| Path | Time | Hits |
+|------|:---:|:---:|
+| CPU-1 | 8.147s | 1476 |
+| CPU-16 | 0.991s | 1476 |
+| GPU-16 FASTA | 2.314s | 1476 |
+| GPU-16 no-overlap `.nucdb` | 1.374s | 1476 |
+| GPU-16 overlap `.nucdb` | 1.213s | 1476 |
+
+Latest all-sample result after also making compact GPU F3/Backward handoff the FASTA default:
+
+| Path | Time | Hits |
+|------|:---:|:---:|
+| CPU-1 | 8.808s | 1476 |
+| CPU-16 | 1.079s | 1476 |
+| GPU-16 FASTA | 2.214s | 1476 |
+| GPU-16 no-overlap `.nucdb` | 1.666s | 1476 |
+| GPU-16 overlap `.nucdb` | 1.450s | 1476 |
+
 Parity after the update was clean: MADE1 FASTA 465=465, MADE1 `.nucdb` 465=465, query_short FASTA 363=363, query_medium FASTA 648=648.
+
+The cache reduced one concrete CPU island in multi-query `.nucdb` runs: a direct combined overlap `.nucdb` timing run reported `nucdb reconstruct` as `0.075s`, then `0.000s`, then `0.000s` for MADE1/query_short/query_medium. Process elapsed was `1.439s` with `1.079s` summed GPU loop wall. The end-to-end speed script remains noisy, so this should be read as a reduction in the reconstruction bucket, not a stable wall-time win over CPU-16.
+
+A follow-up attempt to move nucleotide batch F1 survivor selection to an existing CUDA F1 gate failed parity (`MADE1` FASTA CPU=465, GPU=255; `.nucdb` FASTA/nucdb 252/258), so it was reverted. The existing protein gate does not preserve the nucleotide batch filter's exact `B1`-scaled bias semantics. Keep this listed as open work until a nucleotide-specific GPU gate is implemented and parity-proven.
 
 The combined overlap `.nucdb` timing run accounted for the previously confusing wall-time gap:
 
@@ -60,7 +84,7 @@ The combined overlap `.nucdb` timing run accounted for the previously confusing 
 
 Shared setup/teardown for that process: CUDA engine create 0.446s, `.nucdb` open/mmap 0.000s, `.nucdb` upload 0.029s, CUDA destroy 0.003s, summed GPU loop wall 1.710s, process outside search 0.495s, process elapsed 2.205s.
 
-The previous in-search mismatch was static GPU CPU-continuation scheduling. GPU workers were assigned contiguous equal-window slices, but domain-definition cost depends on region/envelope complexity. Dynamic survivor-window scheduling now lets workers pull work from a shared index and brings GPU-16 query_medium domain wall time (`0.248s` in the latest focused run) in line with the CPU-16 wall-stage trace (`0.250s`). The remaining gap against CPU-16 is not a worker imbalance; it is CUDA setup, `.nucdb` reconstruction, GPU SSV/Viterbi/Forward parser work, and residual CPU domain workflow added together.
+The previous in-search mismatch was static GPU CPU-continuation scheduling. GPU workers were assigned contiguous equal-window slices, but domain-definition cost depends on region/envelope complexity. Dynamic survivor-window scheduling now lets workers pull work from a shared index and brings GPU-16 query_medium domain wall time (`0.248s` in the latest focused run) in line with the CPU-16 wall-stage trace (`0.250s`). The remaining gap against CPU-16 is not a worker imbalance; it is CUDA setup, first-use `.nucdb` reconstruction/cache fill, GPU SSV/Viterbi/Forward parser work, and residual CPU domain workflow added together.
 
 ## Historical CPU-4 Stage Breakdown
 
@@ -86,7 +110,7 @@ Current launch occupancy from the instrumented query_medium fast overlap `.nucdb
 | SSV longtarget | grid=800, block=32, smem=1002B | 50.0% (24 active warps/SM of 48), 97.3% device-active in SSV wall | 6.25x |
 | Scanning Viterbi | grid=1097, block=32, smem=24192B | 8.3% physical-warp occupancy (4 active warps/SM of 48), about 94% device-active in the current focused Viterbi CUDA call after first-call buffer growth | 8.51x |
 
-The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times. SSV occupancy is capped by one warp per block, but the kernel is already device-active and two-/four-warp-per-block experiments raised theoretical occupancy without improving wall time. Scanning Viterbi was the better target: the old kernel used only lanes 0-7 of each physical warp. The current kernel maps four independent 8-lane nucleotide DP groups into each physical warp. That lowers the physical-warp occupancy percentage but improves useful lane occupancy and reduced the repeated scan kernel from about `0.125-0.128s` to about `0.112-0.116s` in focused runs. Viterbi long-target also reuses engine-owned CUDA streams now, removing the per-call stream create/destroy path and making the current focused stream/sync timing round to `0.000s`. A score-only Forward prefilter experiment failed parity because it is not parser-equivalent for the F3 gate, so the production path still uses GPU Forward parser xmx before GPU Backward/parser handoff. The `.nucdb` path now removes the largest Forward-xmx host round trip by keeping all-window Forward xmx on device, computes F3 survivor selection on GPU from GPU Forward scores, compacts survivor xmx on GPU, and launches Backward from stored Forward xmx. End-to-end GPU-16 overlap `.nucdb` remains volatile (`1.270-1.677s` observed across recent runs), so further optimization should focus on moving SSV/Viterbi sort+merge islands to GPU, reducing `.nucdb` reconstruction, and reducing residual CPU domain workflow, not on creating more CUDA engines.
+The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times. SSV occupancy is capped by one warp per block, but the kernel is already device-active and two-/four-warp-per-block experiments raised theoretical occupancy without improving wall time. Scanning Viterbi was the better target: the old kernel used only lanes 0-7 of each physical warp. The current kernel maps four independent 8-lane nucleotide DP groups into each physical warp. That lowers the physical-warp occupancy percentage but improves useful lane occupancy and reduced the repeated scan kernel from about `0.125-0.128s` to about `0.112-0.116s` in focused runs. Viterbi long-target also reuses engine-owned CUDA streams now, removing the per-call stream create/destroy path and making the current focused stream/sync timing round to `0.000s`. A score-only Forward prefilter experiment failed parity because it is not parser-equivalent for the F3 gate, so the production path still uses GPU Forward parser xmx before GPU Backward/parser handoff. The FASTA and `.nucdb` paths now remove the largest Forward-xmx host round trip by keeping all-window Forward xmx on device, computing F3 survivor selection on GPU from GPU Forward scores, compacting survivor xmx on GPU, and launching Backward from stored Forward xmx. The `.nucdb` path also caches reconstructed host strands after first use. End-to-end GPU-16 overlap `.nucdb` remains volatile (`1.214-1.677s` observed across recent runs), so further optimization should focus on moving SSV/Viterbi sort+merge islands to GPU and reducing residual CPU domain workflow, not on creating more CUDA engines.
 
 ## Timing Breakdown From Current GPU Run
 

@@ -10,6 +10,7 @@
 
 #include "easel.h"
 #include "esl_alphabet.h"
+#include "esl_sq.h"
 #include "esl_sqio.h"
 
 #define P7_NUCDB_MAGIC   0x4E554344   /* "NUCD" */
@@ -64,6 +65,8 @@ typedef struct {
   P7_NUCDB_CHUNK_IDX  *chunk_idx;      /* chunk index array */
   P7_NUCDB_SEQ_IDX    *seq_idx;        /* sequence metadata array */
   char                *name_blob;      /* sequence names (null-terminated strings) */
+  ESL_SQ             **sq_cache_top;   /* cached reconstructed forward-strand seqs */
+  ESL_SQ             **sq_cache_rc;    /* cached reconstructed reverse-complement seqs */
 } P7_NUCDB;
 
 extern int  p7_nucdb_Write(const char *basename, const ESL_ALPHABET *abc,
