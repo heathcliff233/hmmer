@@ -111,6 +111,8 @@ struct p7_cuda_msv_engine_s {
   int                 vlt_win_alloc;
   uint8_t            *h_vlt_dsq;
   int                 h_vlt_dsq_alloc;
+  cudaStream_t        vlt_stream_copy;
+  cudaStream_t        vlt_stream_thresh;
 
   const struct p7_cuda_msv_profile_s *last_cuom;
   P7_CUDA_MSV_STATS   stats;

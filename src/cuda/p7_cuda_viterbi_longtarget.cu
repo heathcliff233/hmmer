@@ -363,27 +363,23 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
 
   /* Upload and compute thresholds concurrently using streams */
   {
-    cudaStream_t stream_copy, stream_thresh;
-    t_stream0 = host_seconds();
-    cudaStreamCreate(&stream_copy);
-    cudaStreamCreate(&stream_thresh);
-    t_stream1 = host_seconds();
-    local_stats.stream_seconds += t_stream1 - t_stream0;
+    cudaStream_t stream_copy   = engine->vlt_stream_copy;
+    cudaStream_t stream_thresh = engine->vlt_stream_thresh;
 
     /* Stream 1: upload DSQ data (large transfer) */
     cudaEventRecord(engine->evt_h2d0, stream_copy);
-    cudaMemcpyAsync(engine->d_vlt_dsq, engine->h_vlt_dsq, total_packed, cudaMemcpyHostToDevice, stream_copy);
-    cudaMemcpyAsync(engine->d_vlt_offsets, h_offsets, sizeof(int) * nwindows, cudaMemcpyHostToDevice, stream_copy);
+    if ((status = cuda_status(cudaMemcpyAsync(engine->d_vlt_dsq, engine->h_vlt_dsq, total_packed, cudaMemcpyHostToDevice, stream_copy), errbuf, errbuf_size, "cudaMemcpyAsync(vlt dsq)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMemcpyAsync(engine->d_vlt_offsets, h_offsets, sizeof(int) * nwindows, cudaMemcpyHostToDevice, stream_copy), errbuf, errbuf_size, "cudaMemcpyAsync(vlt offsets)")) != eslOK) goto ERROR;
     cudaEventRecord(engine->evt_h2d1, stream_copy);
 
-    /* Stream 2 (default): upload lengths + bias + compute thresholds */
-    if ((status = cuda_status(cudaMemcpy(engine->d_vlt_lengths, h_lengths, sizeof(int) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt lengths)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
-    if ((status = cuda_status(cudaMemset(engine->d_vlt_win_count, 0, sizeof(int)), errbuf, errbuf_size, "cudaMemset(vlt win_count)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
+    /* Stream 2: upload metadata + bias, then compute thresholds. */
+    if ((status = cuda_status(cudaMemcpyAsync(engine->d_vlt_lengths, h_lengths, sizeof(int) * nwindows, cudaMemcpyHostToDevice, stream_thresh), errbuf, errbuf_size, "cudaMemcpyAsync(vlt lengths)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMemsetAsync(engine->d_vlt_win_count, 0, sizeof(int), stream_thresh), errbuf, errbuf_size, "cudaMemsetAsync(vlt win_count)")) != eslOK) goto ERROR;
 
     float *d_bias = NULL;
     if (do_biasfilter && bias_scores) {
       d_bias = engine->d_vlt_bias;
-      if ((status = cuda_status(cudaMemcpy(d_bias, bias_scores, sizeof(float) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt bias)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
+      if ((status = cuda_status(cudaMemcpyAsync(d_bias, bias_scores, sizeof(float) * nwindows, cudaMemcpyHostToDevice, stream_thresh), errbuf, errbuf_size, "cudaMemcpyAsync(vlt bias)")) != eslOK) goto ERROR;
     }
     cudaEventRecord(engine->evt_d2h0, stream_thresh);
     cuda_compute_viterbi_thresholds_kernel<<<(nwindows + 127) / 128, 128, 0, stream_thresh>>>(
@@ -391,21 +387,16 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
         B2, F2, vmu, vlambda, scale_w, xw_e_move, nj, base_w,
         max_length, engine->d_vlt_thresholds);
     cudaEventRecord(engine->evt_d2h1, stream_thresh);
-    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "vlt threshold kernel launch")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "vlt threshold kernel launch")) != eslOK) goto ERROR;
 
     /* Wait for both streams to complete before launching main kernel */
     t_stream0 = host_seconds();
-    cudaStreamSynchronize(stream_copy);
-    cudaStreamSynchronize(stream_thresh);
+    if ((status = cuda_status(cudaStreamSynchronize(stream_copy), errbuf, errbuf_size, "cudaStreamSynchronize(vlt copy)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaStreamSynchronize(stream_thresh), errbuf, errbuf_size, "cudaStreamSynchronize(vlt thresh)")) != eslOK) goto ERROR;
     t_stream1 = host_seconds();
     local_stats.stream_seconds += t_stream1 - t_stream0;
     local_stats.h2d_seconds += elapsed_seconds(engine->evt_h2d0, engine->evt_h2d1);
     local_stats.threshold_kernel_seconds += elapsed_seconds(engine->evt_d2h0, engine->evt_d2h1);
-    t_stream0 = host_seconds();
-    cudaStreamDestroy(stream_copy);
-    cudaStreamDestroy(stream_thresh);
-    t_stream1 = host_seconds();
-    local_stats.stream_seconds += t_stream1 - t_stream0;
   }
 
   /* Launch kernel: dynamically choose warps-per-block for occupancy */

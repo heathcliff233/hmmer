@@ -28,11 +28,11 @@ Current all-sample result on 2026-05-10:
 
 | Path | Time | Hits |
 |------|:---:|:---:|
-| CPU-1 | 8.535s | 1476 |
-| CPU-16 | 1.008s | 1476 |
-| GPU-16 FASTA | 2.035s | 1476 |
-| GPU-16 no-overlap `.nucdb` | 1.710s | 1476 |
-| GPU-16 overlap `.nucdb` | 1.536s | 1476 |
+| CPU-1 | 7.843s | 1476 |
+| CPU-16 | 1.059s | 1476 |
+| GPU-16 FASTA | 1.933s | 1476 |
+| GPU-16 no-overlap `.nucdb` | 1.742s | 1476 |
+| GPU-16 overlap `.nucdb` | 1.677s | 1476 |
 
 Parity after the update was clean: MADE1 FASTA 465=465, MADE1 `.nucdb` 465=465, query_short FASTA 363=363, query_medium FASTA 648=648.
 
@@ -74,31 +74,32 @@ Current launch occupancy from the instrumented query_medium fast overlap `.nucdb
 | Stage | Last launch | Theoretical occupancy | Grid/SM coverage |
 |-------|-------------|:---:|:---:|
 | SSV longtarget | grid=800, block=32, smem=1002B | 50.0% (24 active warps/SM of 48), 97.3% device-active in SSV wall | 6.25x |
-| Scanning Viterbi | grid=1097, block=32, smem=24192B | 8.3% physical-warp occupancy (4 active warps/SM of 48), 46.5-94.0% device-active in Viterbi CUDA call depending on first-call allocation | 8.51x |
+| Scanning Viterbi | grid=1097, block=32, smem=24192B | 8.3% physical-warp occupancy (4 active warps/SM of 48), about 94% device-active in the current focused Viterbi CUDA call after first-call buffer growth | 8.51x |
 
-The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times. SSV occupancy is capped by one warp per block, but the kernel is already device-active and two-/four-warp-per-block experiments raised theoretical occupancy without improving wall time. Scanning Viterbi was the better target: the old kernel used only lanes 0-7 of each physical warp. The current kernel maps four independent 8-lane nucleotide DP groups into each physical warp. That lowers the physical-warp occupancy percentage but improves useful lane occupancy and reduced the repeated scan kernel from about `0.125-0.128s` to about `0.112-0.116s` in focused runs. A score-only Forward prefilter experiment failed parity because it is not parser-equivalent for the F3 gate, so the production path still uses GPU Forward parser xmx before GPU Backward/parser handoff. End-to-end GPU-16 overlap `.nucdb` remained volatile after the change (`1.374-1.536s` observed; `1.418s` after parser event reuse), so further optimization should focus on persistent Viterbi allocation/warmup, CPU domain workflow, `.nucdb` reconstruction, and moving the SSV/Viterbi sort+merge islands to GPU, not on creating more CUDA engines.
+The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times. SSV occupancy is capped by one warp per block, but the kernel is already device-active and two-/four-warp-per-block experiments raised theoretical occupancy without improving wall time. Scanning Viterbi was the better target: the old kernel used only lanes 0-7 of each physical warp. The current kernel maps four independent 8-lane nucleotide DP groups into each physical warp. That lowers the physical-warp occupancy percentage but improves useful lane occupancy and reduced the repeated scan kernel from about `0.125-0.128s` to about `0.112-0.116s` in focused runs. Viterbi long-target also reuses engine-owned CUDA streams now, removing the per-call stream create/destroy path and making the current focused stream/sync timing round to `0.000s`. A score-only Forward prefilter experiment failed parity because it is not parser-equivalent for the F3 gate, so the production path still uses GPU Forward parser xmx before GPU Backward/parser handoff. End-to-end GPU-16 overlap `.nucdb` remained volatile after the change (`1.374-1.677s` observed across recent runs), so further optimization should focus on CPU domain workflow, `.nucdb` reconstruction, moving the SSV/Viterbi sort+merge islands to GPU, and eliminating the Forward-prefilter host round trip, not on creating more CUDA engines.
 
 ## Timing Breakdown From Current GPU Run
 
 ```
 GPU pipeline: vit_lt_in=8710 vit_lt_out=707 post_vit=707 post_fwd=341 hits=478
-GPU timing breakdown (0.729s search stages; 0.762s GPU loop wall):
+GPU timing breakdown (0.602s search stages; 0.650s GPU loop wall):
   SSV longtarget:      0.109s
     utilization:       97.3% device-active in SSV wall
-  extend+merge:        0.003s
+  extend+merge:        0.002s
   batch filter:        0.054s
-  scanning Viterbi:    0.242s
-    scan kernel:       0.112s
-    alloc/grow:        0.125s
-    utilization:       46.5% device-active in Viterbi CUDA call
-  Forward prefilter:   0.026s
-  GPU FB parser:       0.011s
-  CPU workers:         0.283s
+  scanning Viterbi:    0.119s
+    scan kernel:       0.111s
+    alloc/grow:        0.003s
+    stream/sync:       0.000s
+    utilization:       94.1% device-active in Viterbi CUDA call
+  Forward prefilter:   0.023s
+  GPU FB parser:       0.010s
+  CPU workers:         0.285s
     null scoring:      0.000s
-    bias scoring:      0.005s
+    bias scoring:      0.002s
     CPU Backward:      0.000s
-    domain workflow:   0.255s
-    hit reporting:     0.002s
+    domain workflow:   0.259s
+    hit reporting:     0.011s
 ```
 
 `hits=478` in the diagnostic line is the internal `P7_TOPHITS` count before final output formatting. The comparable main-output hit-line count was 648 for both CPU-16 and GPU-16; strict `--tblout` rows were 215 for both with no diff.

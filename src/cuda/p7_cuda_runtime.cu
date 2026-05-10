@@ -40,6 +40,8 @@ p7_cuda_engine_Create(int device_id, P7_CUDA_ENGINE **ret_engine, char *errbuf, 
   if ((status = cuda_status(cudaEventCreate(&engine->evt_k1),   errbuf, errbuf_size, "cudaEventCreate(evt_k1)"))   != eslOK) goto ERROR;
   if ((status = cuda_status(cudaEventCreate(&engine->evt_d2h0), errbuf, errbuf_size, "cudaEventCreate(evt_d2h0)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaEventCreate(&engine->evt_d2h1), errbuf, errbuf_size, "cudaEventCreate(evt_d2h1)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaStreamCreateWithFlags(&engine->vlt_stream_copy,   cudaStreamNonBlocking), errbuf, errbuf_size, "cudaStreamCreate(vlt copy)"))   != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaStreamCreateWithFlags(&engine->vlt_stream_thresh, cudaStreamNonBlocking), errbuf, errbuf_size, "cudaStreamCreate(vlt thresh)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMalloc((void **) &engine->d_raw, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(raw)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMalloc((void **) &engine->d_overflow, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(overflow)")) != eslOK) goto ERROR;
 
@@ -62,6 +64,8 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->evt_k1)   cudaEventDestroy(engine->evt_k1);
   if (engine->evt_d2h0) cudaEventDestroy(engine->evt_d2h0);
   if (engine->evt_d2h1) cudaEventDestroy(engine->evt_d2h1);
+  if (engine->vlt_stream_copy)   cudaStreamDestroy(engine->vlt_stream_copy);
+  if (engine->vlt_stream_thresh) cudaStreamDestroy(engine->vlt_stream_thresh);
   if (engine->d_dsq)      cudaFree(engine->d_dsq);
   if (engine->h_dsq)      cudaFreeHost(engine->h_dsq);
   if (engine->d_offsets)  cudaFree(engine->d_offsets);
