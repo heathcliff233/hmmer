@@ -1331,6 +1331,9 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
 #define FB_SKIP_FWD_D2H 0x4
 #define FB_SKIP_FWD_H2D 0x8
 #define FB_SKIP_RESULT_D2H 0x10
+#define FB_SEQIDX_DEVICE 0x20
+#define FB_XOFF_DEVICE 0x40
+#define FB_XF_COMPACT_DEVICE 0x80
 
 /* Internal core implementation; public wrappers delegate to this.
  * - If run_modes & FB_RUN_FORWARD: run Forward kernel, write xf D2H.
@@ -1363,6 +1366,11 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   double fwd_kernel_seconds = 0.0;
   double bck_kernel_seconds = 0.0;
   double d2h_seconds = 0.0;
+  int seqidx_is_device = (run_modes & FB_SEQIDX_DEVICE) != 0;
+  int xoff_is_device   = (run_modes & FB_XOFF_DEVICE) != 0;
+  int *d_seqidx_use = NULL;
+  size_t *d_x_offsets_use = NULL;
+  float *d_xf_use = NULL;
 
   if (!engine || !cuom || !chu || !seqidx || nidx < 0 || !x_offsets) return eslEINVAL;
   if (!(run_modes & FB_SKIP_RESULT_D2H) && (!scores || !statuses)) return eslEINVAL;
@@ -1413,6 +1421,7 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   xbytes = sizeof(float) * total_xcells;
 
   int use_resident = (engine->resident_active && engine->resident_batch_nseq == nseq);
+  const uint8_t *active_dsq = engine->d_batch_dsq ? engine->d_batch_dsq : engine->d_dsq;
 
   if (!use_resident) {
     h_offsets = (int *) malloc(sizeof(int) * nseq);
@@ -1500,12 +1509,23 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(engine->d_offsets, h_offsets, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser offsets)")) != eslOK) goto CUDA_ERROR;
     if ((status = cuda_status(cudaMemcpy(engine->d_lengths, h_lengths, sizeof(int) * nseq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser lengths)")) != eslOK) goto CUDA_ERROR;
   }
-  if ((status = cuda_status(cudaMemcpy(engine->d_parser_seqidx, seqidx, sizeof(int) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser seqidx)")) != eslOK) goto CUDA_ERROR;
-  if ((status = cuda_status(cudaMemcpy(engine->d_parser_x_offsets, x_offsets, sizeof(size_t) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser x offsets)")) != eslOK) goto CUDA_ERROR;
+  if (seqidx_is_device) {
+    d_seqidx_use = (int *)seqidx;
+  } else {
+    if ((status = cuda_status(cudaMemcpy(engine->d_parser_seqidx, seqidx, sizeof(int) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser seqidx)")) != eslOK) goto CUDA_ERROR;
+    d_seqidx_use = engine->d_parser_seqidx;
+  }
+  if (xoff_is_device) {
+    d_x_offsets_use = (size_t *)x_offsets;
+  } else {
+    if ((status = cuda_status(cudaMemcpy(engine->d_parser_x_offsets, x_offsets, sizeof(size_t) * nidx, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser x offsets)")) != eslOK) goto CUDA_ERROR;
+    d_x_offsets_use = engine->d_parser_x_offsets;
+  }
   if ((status = cuda_status(cudaMemset(engine->d_parser_statuses, 0, sizeof(int) * 2 * nidx), errbuf, errbuf_size, "cudaMemset(parser statuses batch)")) != eslOK) goto CUDA_ERROR;
+  d_xf_use = (run_modes & FB_XF_COMPACT_DEVICE) ? engine->d_parser_xf_compact : engine->d_parser_xf;
   /* Backward-only path: upload pre-computed xf to device. */
   if (!(run_modes & FB_RUN_FORWARD) && (run_modes & FB_RUN_BACKWARD) && !(run_modes & FB_SKIP_FWD_H2D)) {
-    if ((status = cuda_status(cudaMemcpy(engine->d_parser_xf, xf, xbytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser forward xmx H2D)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(d_xf_use, xf, xbytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser forward xmx H2D)")) != eslOK) goto CUDA_ERROR;
   }
   cudaEventRecord(engine->evt_h2d1);
   cudaEventSynchronize(engine->evt_h2d1);
@@ -1513,7 +1533,7 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
 
   cudaEventRecord(engine->evt_k0);
   {
-    uint8_t *d_dsq_ptr = use_resident ? engine->d_resident_dsq : engine->d_dsq;
+    const uint8_t *d_dsq_ptr = use_resident ? engine->d_resident_dsq : active_dsq;
     int     *d_off_ptr = use_resident ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
     int     *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
   if (run_modes & FB_RUN_FORWARD) {
@@ -1525,14 +1545,14 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                 errbuf, errbuf_size, "cudaFuncSetAttribute(forward parser parallel shared memory)")) != eslOK) goto CUDA_ERROR;
     }
     cuda_forward_parser_xmx_batch_parallel_kernel<<<nidx, fwd_threads, fwd_shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
-                                                                                     engine->d_parser_seqidx, nidx, engine->d_parser_x_offsets,
-                                                                                     cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
-                                                                                     cuom->xf_e_loop, cuom->xf_e_move,
-                                                                                     cuom->xf_n_loop, cuom->xf_n_move,
-                                                                                     cuom->xf_c_loop, cuom->xf_c_move,
-                                                                                     cuom->xf_j_loop, cuom->xf_j_move,
-                                                                                     cuom->nj, engine->d_parser_xf,
-                                                                                     engine->d_parser_scores, engine->d_parser_statuses);
+                                                                                    d_seqidx_use, nidx, d_x_offsets_use,
+                                                                                    cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                                                    cuom->xf_e_loop, cuom->xf_e_move,
+                                                                                    cuom->xf_n_loop, cuom->xf_n_move,
+                                                                                    cuom->xf_c_loop, cuom->xf_c_move,
+                                                                                    cuom->xf_j_loop, cuom->xf_j_move,
+                                                                                    cuom->nj, engine->d_parser_xf,
+                                                                                    engine->d_parser_scores, engine->d_parser_statuses);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_forward_parser_xmx_batch_parallel_kernel launch")) != eslOK) goto CUDA_ERROR;
   } else {
     if (shmem > 48 * 1024) {
@@ -1542,7 +1562,7 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                 errbuf, errbuf_size, "cudaFuncSetAttribute(forward parser shared memory)")) != eslOK) goto CUDA_ERROR;
     }
     cuda_forward_parser_xmx_batch_kernel<<<nidx, 1, shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
-                                                             engine->d_parser_seqidx, nidx, engine->d_parser_x_offsets,
+                                                             d_seqidx_use, nidx, d_x_offsets_use,
                                                              cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
                                                              cuom->xf_e_loop, cuom->xf_e_move,
                                                              cuom->xf_n_loop, cuom->xf_n_move,
@@ -1552,13 +1572,11 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                              engine->d_parser_scores, engine->d_parser_statuses);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_forward_parser_xmx_batch_kernel launch")) != eslOK) goto CUDA_ERROR;
   }
-  }  /* end if (run_modes & FB_RUN_FORWARD) */
-  cudaEventRecord(engine->evt_k1);
-  cudaEventSynchronize(engine->evt_k1);
-  fwd_kernel_seconds = elapsed_seconds(engine->evt_k0, engine->evt_k1);
+	  }  /* end if (run_modes & FB_RUN_FORWARD) */
+	  cudaEventRecord(engine->evt_k1);
 
-  cudaEventRecord(engine->evt_k0);
-  if (run_modes & FB_RUN_BACKWARD) {
+	  cudaEventRecord(engine->evt_k2);
+	  if (run_modes & FB_RUN_BACKWARD) {
   if (use_parallel_bck) {
     if (bck_shmem > 48 * 1024) {
       if ((status = cuda_status(cudaFuncSetAttribute(cuda_backward_parser_xmx_batch_parallel_kernel,
@@ -1567,13 +1585,13 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                 errbuf, errbuf_size, "cudaFuncSetAttribute(backward parser shared memory)")) != eslOK) goto CUDA_ERROR;
     }
     cuda_backward_parser_xmx_batch_parallel_kernel<<<nidx, bck_threads, bck_shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
-                                                                                     engine->d_parser_seqidx, nidx, engine->d_parser_x_offsets,
+                                                                                     d_seqidx_use, nidx, d_x_offsets_use,
                                                                                      cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
                                                                                      cuom->xf_e_loop, cuom->xf_e_move,
                                                                                      cuom->xf_n_loop, cuom->xf_n_move,
                                                                                      cuom->xf_c_loop, cuom->xf_c_move,
                                                                                      cuom->xf_j_loop, cuom->xf_j_move,
-                                                                                     cuom->nj, engine->d_parser_xf, engine->d_parser_xb,
+                                                                                     cuom->nj, d_xf_use, engine->d_parser_xb,
                                                                                      engine->d_parser_scores, engine->d_parser_statuses);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_backward_parser_xmx_batch_parallel_kernel launch")) != eslOK) goto CUDA_ERROR;
   } else {
@@ -1584,21 +1602,19 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                 errbuf, errbuf_size, "cudaFuncSetAttribute(backward parser shared memory)")) != eslOK) goto CUDA_ERROR;
     }
     cuda_backward_parser_xmx_batch_kernel<<<nidx, 1, shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
-                                                              engine->d_parser_seqidx, nidx, engine->d_parser_x_offsets,
+                                                              d_seqidx_use, nidx, d_x_offsets_use,
                                                               cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
                                                               cuom->xf_e_loop, cuom->xf_e_move,
                                                               cuom->xf_n_loop, cuom->xf_n_move,
                                                               cuom->xf_c_loop, cuom->xf_c_move,
                                                               cuom->xf_j_loop, cuom->xf_j_move,
-                                                              cuom->nj, engine->d_parser_xf, engine->d_parser_xb,
+                                                              cuom->nj, d_xf_use, engine->d_parser_xb,
                                                               engine->d_parser_scores, engine->d_parser_statuses);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_backward_parser_xmx_batch_kernel launch")) != eslOK) goto CUDA_ERROR;
-  }
-  }  /* end if (run_modes & FB_RUN_BACKWARD) */
-  }  /* end d_dsq_ptr scope */
-  cudaEventRecord(engine->evt_k1);
-  cudaEventSynchronize(engine->evt_k1);
-  bck_kernel_seconds = elapsed_seconds(engine->evt_k0, engine->evt_k1);
+	  }
+	  }  /* end if (run_modes & FB_RUN_BACKWARD) */
+	  }  /* end d_dsq_ptr scope */
+	  cudaEventRecord(engine->evt_k3);
 
   cudaEventRecord(engine->evt_d2h0);
   if ((run_modes & FB_RUN_FORWARD) && !(run_modes & FB_SKIP_FWD_D2H)) {
@@ -1611,9 +1627,11 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if ((status = cuda_status(cudaMemcpy(scores, engine->d_parser_scores, sizeof(float) * 2 * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser scores batch)")) != eslOK) goto CUDA_ERROR;
     if ((status = cuda_status(cudaMemcpy(statuses, engine->d_parser_statuses, sizeof(int) * 2 * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser statuses batch)")) != eslOK) goto CUDA_ERROR;
   }
-  cudaEventRecord(engine->evt_d2h1);
-  cudaEventSynchronize(engine->evt_d2h1);
-  d2h_seconds = elapsed_seconds(engine->evt_d2h0, engine->evt_d2h1);
+	  cudaEventRecord(engine->evt_d2h1);
+	  cudaEventSynchronize(engine->evt_d2h1);
+	  fwd_kernel_seconds = elapsed_seconds(engine->evt_k0, engine->evt_k1);
+	  bck_kernel_seconds = elapsed_seconds(engine->evt_k2, engine->evt_k3);
+	  d2h_seconds = elapsed_seconds(engine->evt_d2h0, engine->evt_d2h1);
 
   engine->stats.fwd_h2d_seconds    += h2d_seconds;
   engine->stats.fwd_kernel_seconds += fwd_kernel_seconds;
@@ -1627,7 +1645,7 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   engine->stats.bck_d2h_seconds    += d2h_seconds * 0.5;
   engine->stats.bck_nseqs          += nidx;
   engine->stats.bck_nbatches       += 1;
-  for (int i = 0; i < nidx; i++) {
+  for (int i = 0; !seqidx_is_device && i < nidx; i++) {
     int si = seqidx[i];
     if (si >= 0 && si < nseq) {
       int slen = h_lengths ? h_lengths[si] : (int) chu->L[si];
@@ -1640,6 +1658,7 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     engine->batch_owner = chu;
     engine->batch_nseq  = nseq;
     engine->batch_total = total;
+    engine->d_batch_dsq = engine->d_dsq;
   }
 
 CUDA_ERROR:
@@ -1770,6 +1789,32 @@ cuda_parser_f3_gate_kernel(const uint8_t *dsq, const int *offsets, const int *le
   }
 }
 
+__global__ static void
+cuda_parser_survivor_offsets_kernel(const int *survivor_idx, const int *lengths,
+                                    int nsurv, size_t *survivor_offsets,
+                                    size_t *total_xcells)
+{
+  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+  size_t total = 0;
+  for (int i = 0; i < nsurv; i++) {
+    int src = survivor_idx[i];
+    survivor_offsets[i] = total;
+    total += (size_t)(lengths[src] + 1) * p7X_NXCELLS;
+  }
+  *total_xcells = total;
+}
+
+__global__ static void
+cuda_parser_store_compact_fwd_scores_kernel(const float *survivor_scores,
+                                            int nsurv, float *dst_scores)
+{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= nsurv) return;
+
+  dst_scores[2 * i] = survivor_scores[i];
+}
+
 extern "C" int
 p7_cuda_ForwardParserDsqdataSubsetF3Survivors(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                               const P7_BG *bg, ESL_DSQDATA_CHUNK *chu,
@@ -1858,7 +1903,6 @@ p7_cuda_ForwardParserDsqdataSubsetF3Survivors(P7_CUDA_ENGINE *engine, const P7_C
                                                             engine->d_f1_survivor_usc,
                                                             engine->d_f1_counter);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_parser_f3_gate_kernel launch")) != eslOK) return status;
-    if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_parser_f3_gate_kernel sync")) != eslOK) return status;
   }
 
   if ((status = cuda_status(cudaMemcpy(&h_counter, engine->d_f1_counter, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser f3 survivor count)")) != eslOK) return status;
@@ -1869,6 +1913,133 @@ p7_cuda_ForwardParserDsqdataSubsetF3Survivors(P7_CUDA_ENGINE *engine, const P7_C
 
   *ret_nsurv = h_counter;
   return eslOK;
+}
+
+extern "C" int
+p7_cuda_ForwardParserDsqdataSubsetF3SurvivorsDevice(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                    const P7_BG *bg, ESL_DSQDATA_CHUNK *chu,
+                                                    const int *seqidx, int nidx,
+                                                    const size_t *x_offsets, size_t total_xcells,
+                                                    int do_biasfilter, int B3,
+                                                    double ev_mu, double ev_lambda, double F3,
+                                                    int *survivor_idx,
+                                                    int *ret_nsurv, size_t *ret_surv_total_xcells,
+                                                    char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int h_counter = 0;
+  float h_pi[3];
+  float h_t[6];
+  size_t eo_bytes;
+
+  if (!engine || !cuom || !bg || !bg->fhmm || !chu || !seqidx || !x_offsets ||
+      !ret_nsurv || !ret_surv_total_xcells) return eslEINVAL;
+  *ret_nsurv = 0;
+  *ret_surv_total_xcells = 0;
+  if (nidx <= 0) return eslOK;
+
+  status = fb_parser_subset_ex(engine, cuom, chu, seqidx, nidx, x_offsets, total_xcells,
+                               NULL, NULL, NULL, NULL,
+                               FB_RUN_FORWARD | FB_SKIP_FWD_D2H | FB_SKIP_RESULT_D2H,
+                               errbuf, errbuf_size);
+  if (status != eslOK) return status;
+
+  if (engine->parser_surv_alloc < nidx) {
+    if (engine->d_parser_surv_idx) cudaFree(engine->d_parser_surv_idx);
+    if (engine->d_parser_surv_x_offsets) cudaFree(engine->d_parser_surv_x_offsets);
+    engine->d_parser_surv_idx = NULL;
+    engine->d_parser_surv_x_offsets = NULL;
+    engine->parser_surv_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_parser_surv_idx, sizeof(int) * nidx), errbuf, errbuf_size, "cudaMalloc(parser survivor idx)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_parser_surv_x_offsets, sizeof(size_t) * nidx), errbuf, errbuf_size, "cudaMalloc(parser survivor x offsets)")) != eslOK) return status;
+    engine->parser_surv_alloc = nidx;
+  }
+  if (engine->f1_result_alloc < nidx || engine->d_f1_survivor_usc == NULL || engine->d_f1_counter == NULL) {
+    if (engine->d_f1_survivor_usc) cudaFree(engine->d_f1_survivor_usc);
+    if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
+    engine->d_f1_survivor_usc = NULL;
+    engine->d_f1_counter = NULL;
+    engine->f1_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_f1_survivor_usc, sizeof(float) * nidx), errbuf, errbuf_size, "cudaMalloc(parser survivor fwd scores)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_f1_counter, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(parser f3 counter)")) != eslOK) return status;
+    engine->f1_result_alloc = nidx;
+  }
+
+  h_pi[0] = bg->fhmm->pi[0];
+  h_pi[1] = bg->fhmm->pi[1];
+  h_pi[2] = bg->fhmm->pi[2];
+  h_t[0] = bg->fhmm->t[0][0];
+  h_t[1] = bg->fhmm->t[0][1];
+  h_t[2] = bg->fhmm->t[0][2];
+  h_t[3] = bg->fhmm->t[1][0];
+  h_t[4] = bg->fhmm->t[1][1];
+  h_t[5] = bg->fhmm->t[1][2];
+  if (engine->d_bias_pi == NULL) {
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_bias_pi, sizeof(float) * 3), errbuf, errbuf_size, "cudaMalloc(parser f3 bias pi)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_bias_t, sizeof(float) * 6), errbuf, errbuf_size, "cudaMalloc(parser f3 bias t)")) != eslOK) return status;
+  }
+  eo_bytes = (size_t)bg->fhmm->abc->Kp * 2 * sizeof(float);
+  if (engine->d_bias_eo == NULL) {
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_bias_eo, eo_bytes), errbuf, errbuf_size, "cudaMalloc(parser f3 bias eo)")) != eslOK) return status;
+  }
+  if (!engine->bias_params_uploaded) {
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_pi, h_pi, sizeof(h_pi), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser f3 bias pi)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_t, h_t, sizeof(h_t), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser f3 bias t)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_eo, bg->fhmm->eo[0], eo_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser f3 bias eo)")) != eslOK) return status;
+    engine->bias_params_uploaded = 1;
+  }
+
+  if ((status = cuda_status(cudaMemset(engine->d_f1_counter, 0, sizeof(int)), errbuf, errbuf_size, "cudaMemset(parser f3 counter reset)")) != eslOK) return status;
+
+  {
+    uint8_t *d_dsq_ptr = engine->resident_active ? engine->d_resident_dsq : engine->d_dsq;
+    int     *d_off_ptr = engine->resident_active ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
+    int     *d_len_ptr = engine->resident_active ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+    cuda_parser_f3_gate_kernel<<<(nidx + 127) / 128, 128>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
+                                                            engine->d_parser_seqidx, nidx,
+                                                            engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo,
+                                                            engine->d_parser_scores, engine->d_parser_statuses,
+                                                            do_biasfilter, B3,
+                                                            (float)ev_mu, (float)ev_lambda, (float)F3,
+                                                            engine->d_parser_surv_idx,
+                                                            engine->d_f1_survivor_usc,
+                                                            engine->d_f1_counter);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_parser_f3_gate_kernel launch")) != eslOK) return status;
+  }
+
+  if ((status = cuda_status(cudaMemcpy(&h_counter, engine->d_f1_counter, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser f3 survivor count)")) != eslOK) return status;
+  *ret_nsurv = h_counter;
+  if (h_counter <= 0) return eslOK;
+  if (engine->d_parser_surv_total == NULL) {
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_parser_surv_total, sizeof(size_t)), errbuf, errbuf_size, "cudaMalloc(parser survivor total)")) != eslOK) return status;
+  }
+
+  {
+    int *d_len_ptr = engine->resident_active ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+    cuda_parser_survivor_offsets_kernel<<<1, 1>>>(engine->d_parser_surv_idx, d_len_ptr, h_counter,
+                                                  engine->d_parser_surv_x_offsets,
+                                                  engine->d_parser_surv_total);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_parser_survivor_offsets_kernel launch")) != eslOK) return status;
+  }
+  if ((status = cuda_status(cudaMemcpy(ret_surv_total_xcells, engine->d_parser_surv_total,
+                                       sizeof(size_t), cudaMemcpyDeviceToHost),
+                            errbuf, errbuf_size, "cudaMemcpy(parser survivor total xcells)")) != eslOK) return status;
+
+  return eslOK;
+}
+
+extern "C" int
+p7_cuda_ForwardParserGetF3SurvivorIdx(P7_CUDA_ENGINE *engine,
+                                      int *survivor_idx, int nsurv,
+                                      char *errbuf, int errbuf_size)
+{
+  if (!engine || !survivor_idx) return eslEINVAL;
+  if (nsurv <= 0) return eslOK;
+  if (!engine->d_parser_surv_idx) return eslEINVAL;
+
+  return cuda_status(cudaMemcpy(survivor_idx, engine->d_parser_surv_idx,
+                                sizeof(int) * nsurv, cudaMemcpyDeviceToHost),
+                     errbuf, errbuf_size, "cudaMemcpy(parser f3 survivor idx)");
 }
 
 __global__ static void
@@ -1931,18 +2102,63 @@ p7_cuda_BackwardParserDsqdataSubsetStoredForward(P7_CUDA_ENGINE *engine, const P
                                                 nsurv,
                                                 engine->d_parser_xf_compact);
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_compact_parser_xf_kernel launch")) != eslOK) return status;
-  if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_compact_parser_xf_kernel sync")) != eslOK) return status;
 
-  if ((status = cuda_status(cudaMemcpy(engine->d_parser_xf, engine->d_parser_xf_compact,
-                                       sizeof(float) * surv_total_xcells, cudaMemcpyDeviceToDevice),
-                            errbuf, errbuf_size, "cudaMemcpy(parser compact xf D2D)")) != eslOK) return status;
-  if ((status = cuda_status(cudaMemcpy(xf, engine->d_parser_xf_compact, sizeof(float) * surv_total_xcells, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser compact xf D2H)")) != eslOK) return status;
+  status = fb_parser_subset_ex(engine, cuom, chu, surv_srcidx, nsurv,
+                               surv_x_offsets, surv_total_xcells,
+                               xf, xb, scores, statuses,
+                               FB_RUN_BACKWARD | FB_SKIP_FWD_H2D | FB_XF_COMPACT_DEVICE,
+                               errbuf, errbuf_size);
+  if (status != eslOK) return status;
 
-  return fb_parser_subset_ex(engine, cuom, chu, surv_srcidx, nsurv,
-                             surv_x_offsets, surv_total_xcells,
-                             xf, xb, scores, statuses,
-                             FB_RUN_BACKWARD | FB_SKIP_FWD_H2D,
-                             errbuf, errbuf_size);
+  return cuda_status(cudaMemcpy(xf, engine->d_parser_xf_compact, sizeof(float) * surv_total_xcells, cudaMemcpyDeviceToHost),
+                     errbuf, errbuf_size, "cudaMemcpy(parser compact xf D2H)");
+}
+
+extern "C" int
+p7_cuda_BackwardParserDsqdataSubsetStoredForwardDeviceSurvivors(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                                ESL_DSQDATA_CHUNK *chu, int nsurv,
+                                                                size_t surv_total_xcells,
+                                                                float *xf, float *xb,
+                                                                float *scores, int *statuses,
+                                                                char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+
+  if (!engine || !cuom || !chu || !xf || !xb || !scores || !statuses) return eslEINVAL;
+  if (nsurv <= 0) return eslOK;
+  if (surv_total_xcells == 0) return eslERANGE;
+
+  if (engine->parser_compact_cell_alloc < surv_total_xcells) {
+    if (engine->d_parser_xf_compact) cudaFree(engine->d_parser_xf_compact);
+    engine->d_parser_xf_compact = NULL;
+    engine->parser_compact_cell_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_parser_xf_compact, sizeof(float) * surv_total_xcells), errbuf, errbuf_size, "cudaMalloc(parser compact xf)")) != eslOK) return status;
+    engine->parser_compact_cell_alloc = surv_total_xcells;
+  }
+
+  cuda_parser_store_compact_fwd_scores_kernel<<<(nsurv + 127) / 128, 128>>>(engine->d_f1_survivor_usc,
+                                                                            nsurv,
+                                                                            engine->d_parser_scores);
+  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_parser_store_compact_fwd_scores_kernel launch")) != eslOK) return status;
+
+  cuda_compact_parser_xf_kernel<<<nsurv, 256>>>(engine->d_parser_xf,
+                                                engine->d_parser_surv_idx,
+                                                engine->d_parser_x_offsets,
+                                                engine->d_parser_surv_x_offsets,
+                                                engine->d_lengths,
+                                                nsurv,
+                                                engine->d_parser_xf_compact);
+  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_compact_parser_xf_kernel launch")) != eslOK) return status;
+
+  status = fb_parser_subset_ex(engine, cuom, chu, engine->d_parser_surv_idx, nsurv,
+                               engine->d_parser_surv_x_offsets, surv_total_xcells,
+                               xf, xb, scores, statuses,
+                               FB_RUN_BACKWARD | FB_SKIP_FWD_H2D | FB_SEQIDX_DEVICE | FB_XOFF_DEVICE | FB_XF_COMPACT_DEVICE,
+                               errbuf, errbuf_size);
+  if (status != eslOK) return status;
+
+  return cuda_status(cudaMemcpy(xf, engine->d_parser_xf_compact, sizeof(float) * surv_total_xcells, cudaMemcpyDeviceToHost),
+                     errbuf, errbuf_size, "cudaMemcpy(parser compact xf D2H)");
 }
 
 extern "C" int

@@ -50,7 +50,21 @@ typedef struct {
   int              *h_ssv_status;
   float            *h_null_scores;
   float            *h_bias_scores;
+  int              *h_f1_survivor_idx;
+  float            *h_f1_survivor_bias;
+  int              *h_parser_seqidx;
+  size_t           *h_parser_x_offsets;
+  int              *h_parser_surv_src_idx;
+  int              *h_nucdb_chunk_offsets;
+  int              *h_nucdb_chunk_lengths;
+  int              *h_nucdb_window_offsets;
+  int              *h_nucdb_window_lengths;
+  int              *h_nucdb_window_src1_lengths;
+  int              *h_nucdb_window_src2_offsets;
   int               h_filter_alloc;
+  int               h_parser_alloc;
+  int               h_nucdb_chunk_alloc;
+  int               h_nucdb_window_alloc;
   /* Instrumentation counters (accumulated across strands/blocks) */
   int64_t           n_vit_lt_windows_in;   /* windows entering scanning Viterbi */
   int64_t           n_vit_lt_windows_out;  /* sub-windows from scanning Viterbi */
@@ -73,6 +87,12 @@ typedef struct {
   double            ssv_kernel_seconds;
   double            t_merge;         /* window extend + merge */
   double            t_batch_filter;  /* GPU batch SSV/bias/F1 filter */
+  double            t_batch_h2d;     /* CUDA H2D inside GPU batch F1 filter */
+  double            t_batch_kernel;  /* CUDA kernels inside GPU batch F1 filter */
+  double            t_batch_f1_gate; /* CUDA fused SSV/null/bias/F1 gate kernel */
+  double            t_batch_compact; /* CUDA ordered survivor compaction kernel */
+  double            t_batch_d2h;     /* CUDA D2H inside GPU batch F1 filter */
+  int64_t           batch_packed_bytes; /* total batch F1 sequence bytes uploaded */
   double            t_vit_lt;        /* GPU scanning Viterbi longtarget */
   double            t_vit_bias;      /* Bias-score recomputation before GPU scanning Viterbi */
   double            t_vit_cuda;      /* p7_cuda_ViterbiLongtarget call wall time */
@@ -80,6 +100,7 @@ typedef struct {
   double            t_vit_extend;    /* CPU Viterbi seed extend/merge/split/coordinate fixup */
   double            t_vit_pack;      /* Host packing inside p7_cuda_ViterbiLongtarget */
   double            t_vit_h2d;       /* CUDA H2D inside p7_cuda_ViterbiLongtarget */
+  double            t_vit_f1_resident; /* Viterbi calls reading F1-packed device windows */
   double            t_vit_thresh;    /* CUDA threshold kernel inside p7_cuda_ViterbiLongtarget */
   double            t_vit_kernel;    /* CUDA scanning Viterbi kernel */
   double            t_vit_d2h;       /* CUDA D2H inside p7_cuda_ViterbiLongtarget */
@@ -99,6 +120,11 @@ typedef struct {
   double            vit_device_active_seconds;
   double            t_fwd_prefilter; /* GPU Forward pre-filter */
   double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
+  double            t_gpu_fb_pack;   /* host metadata/sequence packing before GPU FB parser */
+  double            t_gpu_fb_h2d;    /* CUDA H2D inside GPU FB parser */
+  double            t_gpu_fb_kernel; /* CUDA kernels inside GPU FB parser */
+  double            t_gpu_fb_d2h;    /* CUDA D2H inside GPU FB parser */
+  int64_t           gpu_fb_packed_bytes; /* total parser sequence bytes uploaded */
   double            t_cpu_workers;   /* CPU domaindef + hit reporting (wallclock around threaded section) */
   double            t_nucdb_open;     /* one-time .nucdb open/mmap, charged outside per-query search */
   double            t_nucdb_upload;   /* one-time .nucdb H2D upload, charged outside per-query search */

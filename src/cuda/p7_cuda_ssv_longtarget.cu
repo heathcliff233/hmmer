@@ -8,7 +8,7 @@
  */
 
 #define SSV_LT_MAX_STRIDE 64
-#define SSV_LT_MAX_WINDOWS_PER_CHUNK 128
+#define SSV_LT_MAX_WINDOWS_PER_CHUNK 1024
 
 __device__ static inline uint8_t
 lt_u8_sub_sat(uint8_t a, uint8_t b)
@@ -193,8 +193,8 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
         ret_sc -= 3.0f;
 
         /* Emit window */
-        int widx = atomicAdd(d_win_count, 1);
-        if (widx < max_windows) {
+        int widx = chunk * SSV_LT_MAX_WINDOWS_PER_CHUNK + atomicAdd(d_win_count + chunk, 1);
+        if (widx < (chunk + 1) * SSV_LT_MAX_WINDOWS_PER_CHUNK && widx < max_windows) {
           d_windows[widx].chunk_id     = chunk;
           d_windows[widx].target_start = target_start;
           d_windows[widx].target_end   = target_end;
@@ -253,6 +253,302 @@ ssv_longtarget_set_launch_stats(P7_CUDA_SSV_LT_STATS *stats, int nchunks, int ch
                                       ? (double)nchunks / (double)stats->sm_count
                                       : 0.0;
   }
+}
+
+__global__ static void
+cuda_ssv_longtarget_compact_kernel(const P7_CUDA_LT_WINDOW *src,
+                                   const int *counts, const int *offsets,
+                                   int nchunks, int step,
+                                   P7_CUDA_LT_WINDOW *dst)
+{
+  int c = blockIdx.x;
+  if (c >= nchunks) return;
+
+  int cnt = counts[c];
+  int out0 = offsets[c];
+  int src0 = c * SSV_LT_MAX_WINDOWS_PER_CHUNK;
+  int global_offset = c * step;
+
+  for (int j = threadIdx.x; j < cnt; j += blockDim.x) {
+    P7_CUDA_LT_WINDOW w = src[src0 + j];
+    w.target_start += global_offset;
+    w.target_end   += global_offset;
+    dst[out0 + j] = w;
+  }
+}
+
+__global__ static void
+cuda_ssv_longtarget_prefix_kernel(const int *counts, int nchunks, int *offsets)
+{
+  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+  int total = 0;
+  for (int c = 0; c < nchunks; c++) {
+    int cnt = counts[c];
+    if (cnt > SSV_LT_MAX_WINDOWS_PER_CHUNK) {
+      offsets[nchunks] = -1;
+      return;
+    }
+    offsets[c] = total;
+    total += cnt;
+  }
+  offsets[nchunks] = total;
+}
+
+__device__ static inline int64_t
+cuda_i64_min(int64_t a, int64_t b)
+{
+  return (a < b) ? a : b;
+}
+
+__device__ static inline int64_t
+cuda_i64_max(int64_t a, int64_t b)
+{
+  return (a > b) ? a : b;
+}
+
+__global__ static void
+cuda_ssv_windows_extend_merge_kernel(const P7_CUDA_LT_WINDOW *src, int nsrc,
+                                     const float *prefix_lengths,
+                                     const float *suffix_lengths,
+                                     int max_length, int target_len,
+                                     P7_HMM_WINDOW *dst, int *dst_count)
+{
+  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+  int out = 0;
+  for (int i = 0; i < nsrc; i++) {
+    P7_CUDA_LT_WINDOW gw = src[i];
+    P7_HMM_WINDOW curr;
+    int length = (int)gw.model_end - (int)gw.model_start + 1;
+    int k0 = (int)gw.model_start;
+    int k1 = (int)gw.model_end;
+    int64_t window_start = cuda_i64_max((int64_t)1,
+                                        (int64_t)((double)gw.target_start -
+                                                  ((double)max_length * (0.1 + (double)prefix_lengths[k0]))));
+    int64_t window_end = cuda_i64_min((int64_t)target_len,
+                                      (int64_t)((double)gw.target_start + (double)length +
+                                                ((double)max_length * (0.1 + (double)suffix_lengths[k1]))));
+
+    curr.score = gw.score;
+    curr.null_sc = 0.0f;
+    curr.id = 0;
+    curr.n = window_start;
+    curr.fm_n = 0;
+    curr.length = (int32_t)(window_end - window_start + 1);
+    curr.k = (int16_t)k1;
+    curr.target_len = target_len;
+    curr.complementarity = p7_NOCOMPLEMENT;
+    curr.used_to_extend = 0;
+
+    if (out > 0) {
+      P7_HMM_WINDOW *prev = &dst[out - 1];
+      int64_t ov_start = cuda_i64_max(prev->n, curr.n);
+      int64_t ov_end = cuda_i64_min(prev->n + prev->length - 1, curr.n + curr.length - 1);
+      int64_t ov_len = ov_end - ov_start + 1;
+      if (prev->complementarity == curr.complementarity &&
+          prev->id == curr.id &&
+          (float)ov_len / (float)((prev->length < curr.length) ? prev->length : curr.length) > 0.0f) {
+        int64_t merged_start = cuda_i64_min(prev->n, curr.n);
+        int64_t merged_end = cuda_i64_max(prev->n + prev->length - 1, curr.n + curr.length - 1);
+        prev->fm_n -= (prev->n - merged_start);
+        prev->n = merged_start;
+        prev->length = (int32_t)(merged_end - merged_start + 1);
+        continue;
+      }
+    }
+    dst[out++] = curr;
+  }
+  *dst_count = out;
+}
+
+static int
+ssv_longtarget_download_ordered(P7_CUDA_ENGINE *engine, int nchunks, int step,
+                                P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
+                                char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int h_win_count = 0;
+
+  *ret_windows = NULL;
+  *ret_nwindows = 0;
+
+  if (engine->lt_count_alloc < nchunks) {
+    if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
+    engine->d_lt_win_offsets = NULL;
+    engine->lt_count_alloc = 0;
+    status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_offsets, sizeof(int) * (nchunks + 1)),
+                         errbuf, errbuf_size, "cudaMalloc(lt win offsets)");
+    if (status != eslOK) goto ERROR;
+    engine->lt_count_alloc = nchunks;
+  }
+
+  cuda_ssv_longtarget_prefix_kernel<<<1, 1>>>(engine->d_lt_win_count, nchunks,
+                                              engine->d_lt_win_offsets);
+  status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_prefix_kernel launch");
+  if (status != eslOK) goto ERROR;
+
+  status = cuda_status(cudaMemcpy(&h_win_count, engine->d_lt_win_offsets + nchunks,
+                                  sizeof(int), cudaMemcpyDeviceToHost),
+                       errbuf, errbuf_size, "cudaMemcpy(lt compact win count)");
+  if (status != eslOK) goto ERROR;
+  if (h_win_count < 0) {
+    if (errbuf && errbuf_size > 0)
+      snprintf(errbuf, errbuf_size, "CUDA SSV longtarget emitted more than %d windows in at least one chunk",
+               SSV_LT_MAX_WINDOWS_PER_CHUNK);
+    status = eslERANGE;
+    goto ERROR;
+  }
+  if (h_win_count == 0) goto DONE;
+
+  if (engine->lt_compact_alloc < h_win_count) {
+    if (engine->d_lt_windows_compact) cudaFree(engine->d_lt_windows_compact);
+    free(engine->h_lt_windows_compact);
+    engine->d_lt_windows_compact = NULL;
+    engine->h_lt_windows_compact = NULL;
+    engine->lt_compact_alloc = 0;
+    status = cuda_status(cudaMalloc((void **)&engine->d_lt_windows_compact,
+                                    sizeof(P7_CUDA_LT_WINDOW) * h_win_count),
+                         errbuf, errbuf_size, "cudaMalloc(lt compact windows)");
+    if (status != eslOK) goto ERROR;
+    engine->h_lt_windows_compact = (P7_CUDA_LT_WINDOW *)malloc(sizeof(P7_CUDA_LT_WINDOW) * h_win_count);
+    if (!engine->h_lt_windows_compact) { status = eslEMEM; goto ERROR; }
+    engine->lt_compact_alloc = h_win_count;
+  }
+
+  cuda_ssv_longtarget_compact_kernel<<<nchunks, 128>>>(engine->d_lt_windows,
+                                                       engine->d_lt_win_count,
+                                                       engine->d_lt_win_offsets,
+                                                       nchunks, step,
+                                                       engine->d_lt_windows_compact);
+  status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_compact_kernel launch");
+  if (status != eslOK) goto ERROR;
+
+  if (!engine->h_lt_windows_compact) { status = eslEMEM; goto ERROR; }
+  status = cuda_status(cudaMemcpy(engine->h_lt_windows_compact, engine->d_lt_windows_compact,
+                                  sizeof(P7_CUDA_LT_WINDOW) * h_win_count,
+                                  cudaMemcpyDeviceToHost),
+                       errbuf, errbuf_size, "cudaMemcpy(lt compact windows)");
+  if (status != eslOK) goto ERROR;
+
+DONE:
+  *ret_windows = (h_win_count > 0) ? engine->h_lt_windows_compact : NULL;
+  *ret_nwindows = h_win_count;
+
+ERROR:
+  return status;
+}
+
+static int
+ssv_longtarget_download_windows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                const P7_SCOREDATA *scoredata, int nchunks, int step,
+                                int model_max_length, int target_len,
+                                P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                                char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int h_win_count = 0;
+  int h_merged_count = 0;
+
+  *ret_windows = NULL;
+  *ret_nwindows = 0;
+
+  status = cuda_msvprofile_UploadWindowLengths((P7_CUDA_MSVPROFILE *)cuom, scoredata,
+                                               errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+
+  if (engine->lt_count_alloc < nchunks) {
+    if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
+    engine->d_lt_win_offsets = NULL;
+    engine->lt_count_alloc = 0;
+    status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_offsets, sizeof(int) * (nchunks + 1)),
+                         errbuf, errbuf_size, "cudaMalloc(lt win offsets)");
+    if (status != eslOK) goto ERROR;
+    engine->lt_count_alloc = nchunks;
+  }
+
+  cuda_ssv_longtarget_prefix_kernel<<<1, 1>>>(engine->d_lt_win_count, nchunks,
+                                              engine->d_lt_win_offsets);
+  status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_prefix_kernel launch");
+  if (status != eslOK) goto ERROR;
+
+  status = cuda_status(cudaMemcpy(&h_win_count, engine->d_lt_win_offsets + nchunks,
+                                  sizeof(int), cudaMemcpyDeviceToHost),
+                       errbuf, errbuf_size, "cudaMemcpy(lt compact win count)");
+  if (status != eslOK) goto ERROR;
+  if (h_win_count < 0) {
+    if (errbuf && errbuf_size > 0)
+      snprintf(errbuf, errbuf_size, "CUDA SSV longtarget emitted more than %d windows in at least one chunk",
+               SSV_LT_MAX_WINDOWS_PER_CHUNK);
+    status = eslERANGE;
+    goto ERROR;
+  }
+  if (h_win_count == 0) goto DONE;
+
+  if (engine->lt_compact_alloc < h_win_count) {
+    if (engine->d_lt_windows_compact) cudaFree(engine->d_lt_windows_compact);
+    free(engine->h_lt_windows_compact);
+    engine->d_lt_windows_compact = NULL;
+    engine->h_lt_windows_compact = NULL;
+    engine->lt_compact_alloc = 0;
+    status = cuda_status(cudaMalloc((void **)&engine->d_lt_windows_compact,
+                                    sizeof(P7_CUDA_LT_WINDOW) * h_win_count),
+                         errbuf, errbuf_size, "cudaMalloc(lt compact windows)");
+    if (status != eslOK) goto ERROR;
+    engine->h_lt_windows_compact = (P7_CUDA_LT_WINDOW *)malloc(sizeof(P7_CUDA_LT_WINDOW) * h_win_count);
+    if (!engine->h_lt_windows_compact) { status = eslEMEM; goto ERROR; }
+    engine->lt_compact_alloc = h_win_count;
+  }
+  if (engine->lt_hmm_alloc < h_win_count) {
+    if (engine->d_lt_hmm_windows) cudaFree(engine->d_lt_hmm_windows);
+    free(engine->h_lt_hmm_windows);
+    engine->d_lt_hmm_windows = NULL;
+    engine->h_lt_hmm_windows = NULL;
+    engine->lt_hmm_alloc = 0;
+    status = cuda_status(cudaMalloc((void **)&engine->d_lt_hmm_windows,
+                                    sizeof(P7_HMM_WINDOW) * h_win_count),
+                         errbuf, errbuf_size, "cudaMalloc(lt hmm windows)");
+    if (status != eslOK) goto ERROR;
+    engine->h_lt_hmm_windows = (P7_HMM_WINDOW *)malloc(sizeof(P7_HMM_WINDOW) * h_win_count);
+    if (!engine->h_lt_hmm_windows) { status = eslEMEM; goto ERROR; }
+    engine->lt_hmm_alloc = h_win_count;
+  }
+
+  cuda_ssv_longtarget_compact_kernel<<<nchunks, 128>>>(engine->d_lt_windows,
+                                                       engine->d_lt_win_count,
+                                                       engine->d_lt_win_offsets,
+                                                       nchunks, step,
+                                                       engine->d_lt_windows_compact);
+  status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_compact_kernel launch");
+  if (status != eslOK) goto ERROR;
+
+  cuda_ssv_windows_extend_merge_kernel<<<1, 1>>>(engine->d_lt_windows_compact,
+                                                 h_win_count,
+                                                 cuom->d_prefix_lengths,
+                                                 cuom->d_suffix_lengths,
+                                                 model_max_length, target_len,
+                                                 engine->d_lt_hmm_windows,
+                                                 engine->d_lt_win_offsets);
+  status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_windows_extend_merge_kernel launch");
+  if (status != eslOK) goto ERROR;
+  status = cuda_status(cudaMemcpy(&h_merged_count, engine->d_lt_win_offsets,
+                                  sizeof(int), cudaMemcpyDeviceToHost),
+                       errbuf, errbuf_size, "cudaMemcpy(lt merged count)");
+  if (status != eslOK) goto ERROR;
+  if (h_merged_count < 0 || h_merged_count > h_win_count) { status = eslFAIL; goto ERROR; }
+  if (h_merged_count == 0) goto DONE;
+  status = cuda_status(cudaMemcpy(engine->h_lt_hmm_windows, engine->d_lt_hmm_windows,
+                                  sizeof(P7_HMM_WINDOW) * h_merged_count,
+                                  cudaMemcpyDeviceToHost),
+                       errbuf, errbuf_size, "cudaMemcpy(lt merged windows)");
+  if (status != eslOK) goto ERROR;
+
+DONE:
+  *ret_windows = (h_merged_count > 0) ? engine->h_lt_hmm_windows : NULL;
+  *ret_nwindows = h_merged_count;
+
+ERROR:
+  return status;
 }
 
 /* Host wrapper: chunk a long sequence, upload, launch kernel, download windows.
@@ -345,13 +641,20 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   }
   if (engine->lt_win_alloc < max_windows) {
     if (engine->d_lt_windows) cudaFree(engine->d_lt_windows);
-    if (engine->d_lt_win_count) cudaFree(engine->d_lt_win_count);
     engine->d_lt_windows = NULL;
-    engine->d_lt_win_count = NULL;
     engine->lt_win_alloc = 0;
     if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_windows, sizeof(P7_CUDA_LT_WINDOW) * max_windows), errbuf, errbuf_size, "cudaMalloc(lt windows)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_count, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(lt win_count)")) != eslOK) goto ERROR;
     engine->lt_win_alloc = max_windows;
+  }
+  if (engine->lt_count_alloc < nchunks) {
+    if (engine->d_lt_win_count) cudaFree(engine->d_lt_win_count);
+    if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
+    engine->d_lt_win_count = NULL;
+    engine->d_lt_win_offsets = NULL;
+    engine->lt_count_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_count, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMalloc(lt win_count)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_offsets, sizeof(int) * (nchunks + 1)), errbuf, errbuf_size, "cudaMalloc(lt win offsets)")) != eslOK) goto ERROR;
+    engine->lt_count_alloc = nchunks;
   }
 
   /* Pack chunks into pinned host buffer */
@@ -368,7 +671,7 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_offsets, h_offsets, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt offsets)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_lengths, h_lengths, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt lengths)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int)), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
 
   /* Launch kernel */
   {
@@ -383,33 +686,19 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,
       engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
-    cudaEventRecord(engine->evt_k1);
-    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_ssv_longtarget sync")) != eslOK) goto ERROR;
-    if (stats) {
-      float ms = 0.0f;
-      if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
-        stats->kernel_seconds = (double)ms * 1e-3;
-    }
-  }
+	    cudaEventRecord(engine->evt_k1);
+	    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
+	  }
 
-  /* Download results */
-  if ((status = cuda_status(cudaMemcpy(&h_win_count, engine->d_lt_win_count, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(lt win_count)")) != eslOK) goto ERROR;
-  if (h_win_count > engine->lt_win_alloc) h_win_count = engine->lt_win_alloc;
-
-  if (h_win_count > 0) {
-    h_windows = (P7_CUDA_LT_WINDOW *)malloc(sizeof(P7_CUDA_LT_WINDOW) * h_win_count);
-    if (!h_windows) { status = eslEMEM; goto ERROR; }
-    if ((status = cuda_status(cudaMemcpy(h_windows, engine->d_lt_windows, sizeof(P7_CUDA_LT_WINDOW) * h_win_count, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(lt windows)")) != eslOK) goto ERROR;
-
-    /* Translate chunk-local coordinates to global sequence coordinates */
-    for (int w = 0; w < h_win_count; w++) {
-      int c = h_windows[w].chunk_id;
-      int global_offset = c * step;
-      h_windows[w].target_start += global_offset;
-      h_windows[w].target_end   += global_offset;
-    }
-  }
+	  status = ssv_longtarget_download_ordered(engine, nchunks, step,
+	                                           &h_windows, &h_win_count,
+	                                           errbuf, errbuf_size);
+	  if (status != eslOK) goto ERROR;
+	  if (stats) {
+	    float ms = 0.0f;
+	    if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
+	      stats->kernel_seconds = (double)ms * 1e-3;
+	  }
 
   *ret_windows  = h_windows;
   *ret_nwindows = h_win_count;
@@ -419,6 +708,143 @@ ERROR:
   free(h_offsets);
   free(h_lengths);
   free(h_windows);
+  return status;
+}
+
+extern "C" int
+p7_cuda_SSVLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                             const P7_SCOREDATA *scoredata,
+                             const ESL_DSQ *dsq, int L,
+                             const uint8_t *ssv_scores_host, int Kp,
+                             uint8_t sc_thresh, float scale_b,
+                             int max_length, int chunk_size, int overlap,
+                             P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                             P7_CUDA_SSV_LT_STATS *stats,
+                             char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int M = cuom->M;
+  int Q = cuom->Q;
+  int step = chunk_size - overlap;
+  if (step < 1) step = 1;
+  int nchunks = (L <= chunk_size) ? 1 : 1 + (L - chunk_size + step - 1) / step;
+  int *h_offsets  = NULL;
+  int *h_lengths  = NULL;
+  int total_packed = 0;
+  int max_windows = nchunks * SSV_LT_MAX_WINDOWS_PER_CHUNK;
+  int ssv_scores_size = (M + 1) * Kp;
+
+  *ret_windows = NULL;
+  *ret_nwindows = 0;
+
+  h_offsets = (int *)malloc(sizeof(int) * nchunks);
+  h_lengths = (int *)malloc(sizeof(int) * nchunks);
+  if (!h_offsets || !h_lengths) { status = eslEMEM; goto ERROR; }
+
+  for (int c = 0; c < nchunks; c++) {
+    int seq_start = c * step;
+    int seq_end   = seq_start + chunk_size - 1;
+    if (seq_end >= L) seq_end = L - 1;
+    int clen = seq_end - seq_start + 1;
+    h_offsets[c] = total_packed;
+    h_lengths[c] = clen;
+    total_packed += clen + 1;
+  }
+  total_packed += 1;
+
+  if (engine->lt_dsq_alloc < total_packed) {
+    if (engine->d_lt_dsq) cudaFree(engine->d_lt_dsq);
+    engine->d_lt_dsq = NULL;
+    engine->lt_dsq_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_dsq, total_packed), errbuf, errbuf_size, "cudaMalloc(lt dsq)")) != eslOK) goto ERROR;
+    engine->lt_dsq_alloc = total_packed;
+  }
+  if (engine->h_lt_dsq_alloc < total_packed) {
+    if (engine->h_lt_dsq) cudaFreeHost(engine->h_lt_dsq);
+    engine->h_lt_dsq = NULL;
+    engine->h_lt_dsq_alloc = 0;
+    if ((status = cuda_status(cudaMallocHost((void **)&engine->h_lt_dsq, total_packed), errbuf, errbuf_size, "cudaMallocHost(lt dsq)")) != eslOK) goto ERROR;
+    engine->h_lt_dsq_alloc = total_packed;
+  }
+  if (engine->lt_meta_alloc < nchunks) {
+    if (engine->d_lt_offsets) cudaFree(engine->d_lt_offsets);
+    if (engine->d_lt_lengths) cudaFree(engine->d_lt_lengths);
+    engine->d_lt_offsets = NULL;
+    engine->d_lt_lengths = NULL;
+    engine->lt_meta_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_offsets, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMalloc(lt offsets)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_lengths, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMalloc(lt lengths)")) != eslOK) goto ERROR;
+    engine->lt_meta_alloc = nchunks;
+  }
+  if (engine->lt_ssv_alloc < ssv_scores_size) {
+    if (engine->d_lt_ssv_scores) cudaFree(engine->d_lt_ssv_scores);
+    engine->d_lt_ssv_scores = NULL;
+    engine->lt_ssv_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_ssv_scores, ssv_scores_size), errbuf, errbuf_size, "cudaMalloc(lt ssv_scores)")) != eslOK) goto ERROR;
+    engine->lt_ssv_alloc = ssv_scores_size;
+  }
+  if (engine->lt_win_alloc < max_windows) {
+    if (engine->d_lt_windows) cudaFree(engine->d_lt_windows);
+    engine->d_lt_windows = NULL;
+    engine->lt_win_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_windows, sizeof(P7_CUDA_LT_WINDOW) * max_windows), errbuf, errbuf_size, "cudaMalloc(lt windows)")) != eslOK) goto ERROR;
+    engine->lt_win_alloc = max_windows;
+  }
+  if (engine->lt_count_alloc < nchunks) {
+    if (engine->d_lt_win_count) cudaFree(engine->d_lt_win_count);
+    if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
+    engine->d_lt_win_count = NULL;
+    engine->d_lt_win_offsets = NULL;
+    engine->lt_count_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_count, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMalloc(lt win_count)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_offsets, sizeof(int) * (nchunks + 1)), errbuf, errbuf_size, "cudaMalloc(lt win offsets)")) != eslOK) goto ERROR;
+    engine->lt_count_alloc = nchunks;
+  }
+
+  for (int c = 0; c < nchunks; c++) {
+    int seq_start = c * step;
+    int clen = h_lengths[c];
+    uint8_t *dest = engine->h_lt_dsq + h_offsets[c];
+    dest[0] = eslDSQ_SENTINEL;
+    memcpy(dest + 1, dsq + 1 + seq_start, clen);
+  }
+
+  if ((status = cuda_status(cudaMemcpy(engine->d_lt_dsq, engine->h_lt_dsq, total_packed, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt dsq)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_lt_offsets, h_offsets, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt offsets)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_lt_lengths, h_lengths, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt lengths)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
+
+  {
+    size_t shmem = (size_t)M * 2;
+    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, shmem);
+    cudaEventRecord(engine->evt_k0);
+    cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
+      engine->d_lt_dsq, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
+      cuom->d_rbv, engine->d_lt_ssv_scores,
+      M, Q, Kp,
+      cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
+      cuom->base_b, cuom->bias_b,
+      sc_thresh, scale_b,
+      engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
+    cudaEventRecord(engine->evt_k1);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
+  }
+
+  status = ssv_longtarget_download_windows(engine, cuom, scoredata, nchunks, step,
+                                           max_length, L,
+                                           ret_windows, ret_nwindows,
+                                           errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+  if (stats) {
+    float ms = 0.0f;
+    if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
+      stats->kernel_seconds = (double)ms * 1e-3;
+  }
+
+ERROR:
+  free(h_offsets);
+  free(h_lengths);
   return status;
 }
 
@@ -469,20 +895,27 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   }
   if (engine->lt_win_alloc < max_windows) {
     if (engine->d_lt_windows) cudaFree(engine->d_lt_windows);
-    if (engine->d_lt_win_count) cudaFree(engine->d_lt_win_count);
     engine->d_lt_windows = NULL;
-    engine->d_lt_win_count = NULL;
     engine->lt_win_alloc = 0;
     if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_windows, sizeof(P7_CUDA_LT_WINDOW) * max_windows), errbuf, errbuf_size, "cudaMalloc(lt windows)")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_count, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(lt win_count)")) != eslOK) goto ERROR;
     engine->lt_win_alloc = max_windows;
+  }
+  if (engine->lt_count_alloc < nchunks) {
+    if (engine->d_lt_win_count) cudaFree(engine->d_lt_win_count);
+    if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
+    engine->d_lt_win_count = NULL;
+    engine->d_lt_win_offsets = NULL;
+    engine->lt_count_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_count, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMalloc(lt win_count)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_offsets, sizeof(int) * (nchunks + 1)), errbuf, errbuf_size, "cudaMalloc(lt win offsets)")) != eslOK) goto ERROR;
+    engine->lt_count_alloc = nchunks;
   }
 
   /* Upload metadata (small arrays from host) */
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_offsets, h_offsets, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt offsets)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_lengths, h_lengths, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt lengths)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int)), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
 
   /* Launch kernel — data comes directly from resident nucdb on device */
   {
@@ -497,33 +930,19 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,
       engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
-    cudaEventRecord(engine->evt_k1);
-    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
-    if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_ssv_longtarget sync")) != eslOK) goto ERROR;
-    if (stats) {
-      float ms = 0.0f;
-      if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
-        stats->kernel_seconds = (double)ms * 1e-3;
-    }
-  }
+	    cudaEventRecord(engine->evt_k1);
+	    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
+	  }
 
-  /* Download results */
-  if ((status = cuda_status(cudaMemcpy(&h_win_count, engine->d_lt_win_count, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(lt win_count)")) != eslOK) goto ERROR;
-  if (h_win_count > engine->lt_win_alloc) h_win_count = engine->lt_win_alloc;
-
-  if (h_win_count > 0) {
-    h_windows = (P7_CUDA_LT_WINDOW *)malloc(sizeof(P7_CUDA_LT_WINDOW) * h_win_count);
-    if (!h_windows) { status = eslEMEM; goto ERROR; }
-    if ((status = cuda_status(cudaMemcpy(h_windows, engine->d_lt_windows, sizeof(P7_CUDA_LT_WINDOW) * h_win_count, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(lt windows)")) != eslOK) goto ERROR;
-
-    /* Translate chunk-local coordinates to global sequence coordinates */
-    for (int w = 0; w < h_win_count; w++) {
-      int c = h_windows[w].chunk_id;
-      int global_offset = c * step;
-      h_windows[w].target_start += global_offset;
-      h_windows[w].target_end   += global_offset;
-    }
-  }
+	  status = ssv_longtarget_download_ordered(engine, nchunks, step,
+	                                           &h_windows, &h_win_count,
+	                                           errbuf, errbuf_size);
+	  if (status != eslOK) goto ERROR;
+	  if (stats) {
+	    float ms = 0.0f;
+	    if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
+	      stats->kernel_seconds = (double)ms * 1e-3;
+	  }
 
   *ret_windows  = h_windows;
   *ret_nwindows = h_win_count;
@@ -531,5 +950,97 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
 
 ERROR:
   free(h_windows);
+  return status;
+}
+
+extern "C" int
+p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                     const P7_SCOREDATA *scoredata,
+                                     const uint8_t *d_nucdb_data, int nchunks,
+                                     const int *h_offsets, const int *h_lengths,
+                                     const uint8_t *ssv_scores_host, int Kp,
+                                     uint8_t sc_thresh, float scale_b,
+                                     int max_length, int step, int target_len,
+                                     P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                                     P7_CUDA_SSV_LT_STATS *stats,
+                                     char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int M = cuom->M;
+  int Q = cuom->Q;
+  int max_windows = nchunks * SSV_LT_MAX_WINDOWS_PER_CHUNK;
+  int ssv_scores_size = (M + 1) * Kp;
+
+  *ret_windows = NULL;
+  *ret_nwindows = 0;
+
+  if (engine->lt_meta_alloc < nchunks) {
+    if (engine->d_lt_offsets) cudaFree(engine->d_lt_offsets);
+    if (engine->d_lt_lengths) cudaFree(engine->d_lt_lengths);
+    engine->d_lt_offsets = NULL;
+    engine->d_lt_lengths = NULL;
+    engine->lt_meta_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_offsets, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMalloc(lt offsets)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_lengths, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMalloc(lt lengths)")) != eslOK) goto ERROR;
+    engine->lt_meta_alloc = nchunks;
+  }
+  if (engine->lt_ssv_alloc < ssv_scores_size) {
+    if (engine->d_lt_ssv_scores) cudaFree(engine->d_lt_ssv_scores);
+    engine->d_lt_ssv_scores = NULL;
+    engine->lt_ssv_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_ssv_scores, ssv_scores_size), errbuf, errbuf_size, "cudaMalloc(lt ssv_scores)")) != eslOK) goto ERROR;
+    engine->lt_ssv_alloc = ssv_scores_size;
+  }
+  if (engine->lt_win_alloc < max_windows) {
+    if (engine->d_lt_windows) cudaFree(engine->d_lt_windows);
+    engine->d_lt_windows = NULL;
+    engine->lt_win_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_windows, sizeof(P7_CUDA_LT_WINDOW) * max_windows), errbuf, errbuf_size, "cudaMalloc(lt windows)")) != eslOK) goto ERROR;
+    engine->lt_win_alloc = max_windows;
+  }
+  if (engine->lt_count_alloc < nchunks) {
+    if (engine->d_lt_win_count) cudaFree(engine->d_lt_win_count);
+    if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
+    engine->d_lt_win_count = NULL;
+    engine->d_lt_win_offsets = NULL;
+    engine->lt_count_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_count, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMalloc(lt win_count)")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_win_offsets, sizeof(int) * (nchunks + 1)), errbuf, errbuf_size, "cudaMalloc(lt win offsets)")) != eslOK) goto ERROR;
+    engine->lt_count_alloc = nchunks;
+  }
+
+  if ((status = cuda_status(cudaMemcpy(engine->d_lt_offsets, h_offsets, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt offsets)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_lt_lengths, h_lengths, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt lengths)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
+
+  {
+    size_t shmem = (size_t)M * 2;
+    ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, shmem);
+    cudaEventRecord(engine->evt_k0);
+    cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
+      d_nucdb_data, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
+      cuom->d_rbv, engine->d_lt_ssv_scores,
+      M, Q, Kp,
+      cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
+      cuom->base_b, cuom->bias_b,
+      sc_thresh, scale_b,
+      engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
+    cudaEventRecord(engine->evt_k1);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
+  }
+
+  status = ssv_longtarget_download_windows(engine, cuom, scoredata, nchunks, step,
+                                           max_length, target_len,
+                                           ret_windows, ret_nwindows,
+                                           errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+  if (stats) {
+    float ms = 0.0f;
+    if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
+      stats->kernel_seconds = (double)ms * 1e-3;
+  }
+
+ERROR:
   return status;
 }

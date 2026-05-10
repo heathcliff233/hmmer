@@ -379,3 +379,78 @@ p7_cuda_DefaultWarpsPerBlock(int device_id, int kernel_id,
 {
   return user_w > 0 ? user_w : 1;
 }
+
+int
+p7_cuda_SSVLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                             const P7_SCOREDATA *scoredata,
+                             const ESL_DSQ *dsq, int L,
+                             const uint8_t *ssv_scores_host, int Kp,
+                             uint8_t sc_thresh, float scale_b,
+                             int max_length, int chunk_size, int overlap,
+                             P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                             P7_CUDA_SSV_LT_STATS *stats,
+                             char *errbuf, int errbuf_size)
+{
+  if (ret_windows) *ret_windows = NULL;
+  if (ret_nwindows) *ret_nwindows = 0;
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
+p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                     const P7_SCOREDATA *scoredata,
+                                     const uint8_t *d_nucdb_data, int nchunks,
+                                     const int *h_offsets, const int *h_lengths,
+                                     const uint8_t *ssv_scores_host, int Kp,
+                                     uint8_t sc_thresh, float scale_b,
+                                     int max_length, int step, int target_len,
+                                     P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                                     P7_CUDA_SSV_LT_STATS *stats,
+                                     char *errbuf, int errbuf_size)
+{
+  if (ret_windows) *ret_windows = NULL;
+  if (ret_nwindows) *ret_nwindows = 0;
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
+p7_cuda_ViterbiLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                 const P7_SCOREDATA *scoredata,
+                                 const ESL_DSQ *dsq, int L,
+                                 const P7_HMM_WINDOW *windows, int nwindows,
+                                 const float *bias_scores, int do_biasfilter,
+                                 int B2, float F2, float vmu, float vlambda,
+                                 float scale_w, float xw_e_move, float nj,
+                                 float base_w, int max_length,
+                                 P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                                 P7_CUDA_VIT_LT_STATS *stats,
+                                 char *errbuf, int errbuf_size)
+{
+  if (ret_windows) *ret_windows = NULL;
+  if (ret_nwindows) *ret_nwindows = 0;
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
+p7_cuda_ViterbiLongtargetFromF1Windows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                       const P7_SCOREDATA *scoredata,
+                                       const P7_HMM_WINDOW *windows, int nwindows,
+                                       int B2, float F2, float vmu, float vlambda,
+                                       float scale_w, float xw_e_move, float nj,
+                                       float base_w, int max_length,
+                                       P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                                       P7_CUDA_VIT_LT_STATS *stats,
+                                       char *errbuf, int errbuf_size)
+{
+  if (ret_windows) *ret_windows = NULL;
+  if (ret_nwindows) *ret_nwindows = 0;
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}

@@ -42,6 +42,69 @@ nhmmer_gpu_elapsed(const struct timespec *ts0, const struct timespec *ts1)
 }
 
 static int
+nhmmer_gpu_windowlist_alloc(P7_HMM_WINDOWLIST *wl, int n)
+{
+  int status;
+  wl->count = 0;
+  wl->size  = ESL_MAX(n, 1);
+  ESL_ALLOC(wl->windows, sizeof(P7_HMM_WINDOW) * wl->size);
+  return eslOK;
+
+ERROR:
+  wl->windows = NULL;
+  wl->size = wl->count = 0;
+  return eslEMEM;
+}
+
+static void
+nhmmer_gpu_fill_ssv_windows(P7_HMM_WINDOWLIST *wl, const P7_CUDA_LT_WINDOW *gpu_windows,
+                            int n, uint32_t target_len)
+{
+  for (int i = 0; i < n; i++) {
+    P7_HMM_WINDOW *w = wl->windows + i;
+    w->id              = 0;
+    w->n               = gpu_windows[i].target_start;
+    w->fm_n            = 0;
+    w->k               = (uint16_t) gpu_windows[i].model_end;
+    w->length          = gpu_windows[i].model_end - gpu_windows[i].model_start + 1;
+    w->score           = gpu_windows[i].score;
+    w->complementarity = p7_NOCOMPLEMENT;
+    w->target_len      = target_len;
+  }
+  wl->count = n;
+}
+
+static int
+nhmmer_gpu_copy_windows(P7_HMM_WINDOWLIST *wl, const P7_HMM_WINDOW *windows, int n)
+{
+  int status;
+  status = nhmmer_gpu_windowlist_alloc(wl, n);
+  if (status != eslOK) return status;
+  if (n > 0) memcpy(wl->windows, windows, sizeof(P7_HMM_WINDOW) * n);
+  wl->count = n;
+  return eslOK;
+}
+
+static void
+nhmmer_gpu_fill_vit_seed_windows(P7_HMM_WINDOWLIST *wl, const P7_CUDA_VIT_LT_WINDOW *gpu_windows,
+                                 int n, const P7_HMM_WINDOWLIST *input_wl)
+{
+  for (int i = 0; i < n; i++) {
+    int win_id = gpu_windows[i].window_id;
+    P7_HMM_WINDOW *w = wl->windows + i;
+    w->id              = (uint32_t) win_id;
+    w->n               = (uint32_t) gpu_windows[i].position;
+    w->fm_n            = 0;
+    w->k               = (uint16_t) gpu_windows[i].model_k;
+    w->length          = 1;
+    w->score           = 0.0f;
+    w->complementarity = p7_NOCOMPLEMENT;
+    w->target_len      = (uint32_t) input_wl->windows[win_id].length;
+  }
+  wl->count = n;
+}
+
+static int
 nhmmer_gpu_nucdb_reconstruct_sq(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
                                 int64_t si, int complementarity, ESL_SQ **ret_sq)
 {
@@ -150,36 +213,6 @@ nhmmer_gpu_vit_window_compare(const void *a, const void *b)
 }
 
 static int
-nhmmer_gpu_hmm_window_compare(const void *a, const void *b)
-{
-  const P7_HMM_WINDOW *wa = (const P7_HMM_WINDOW *)a;
-  const P7_HMM_WINDOW *wb = (const P7_HMM_WINDOW *)b;
-
-  if (wa->complementarity != wb->complementarity) return (wa->complementarity < wb->complementarity) ? -1 : 1;
-  if (wa->id              != wb->id)              return (wa->id              < wb->id)              ? -1 : 1;
-  if (wa->n               != wb->n)               return (wa->n               < wb->n)               ? -1 : 1;
-  if (wa->k               != wb->k)               return (wa->k               < wb->k)               ? -1 : 1;
-  if (wa->length          != wb->length)          return (wa->length          < wb->length)          ? -1 : 1;
-  return 0;
-}
-
-typedef struct {
-  int   idx;
-  float filtersc;
-  int   status;
-} NHMMER_GPU_F1_SURVIVOR;
-
-static int
-nhmmer_gpu_f1_survivor_compare(const void *a, const void *b)
-{
-  const NHMMER_GPU_F1_SURVIVOR *wa = (const NHMMER_GPU_F1_SURVIVOR *)a;
-  const NHMMER_GPU_F1_SURVIVOR *wb = (const NHMMER_GPU_F1_SURVIVOR *)b;
-  if (wa->idx < wb->idx) return -1;
-  if (wa->idx > wb->idx) return 1;
-  return 0;
-}
-
-static int
 nhmmer_gpu_window_batch_init(NHMMER_GPU_WINDOW_BATCH *wb, int alloc)
 {
   int status;
@@ -265,6 +298,59 @@ ERROR:
   return eslEMEM;
 }
 
+/* Describe merged windows as a synthetic chunk without binding host sequence
+ * pointers. Resident .nucdb parser batches gather sequence bytes on the GPU;
+ * the parser API still needs the chunk's lengths/metadata for allocation,
+ * reuse checks, and statistics. */
+static int
+nhmmer_gpu_window_batch_describe(NHMMER_GPU_WINDOW_BATCH *wb, P7_HMM_WINDOWLIST *wl)
+{
+  int i;
+  int status;
+
+  if (wl->count > wb->alloc) {
+    wb->alloc = wl->count;
+    ESL_REALLOC(wb->dsq_ptrs, sizeof(ESL_DSQ *)  * wb->alloc);
+    ESL_REALLOC(wb->lengths,  sizeof(int64_t)    * wb->alloc);
+    ESL_REALLOC(wb->names,    sizeof(char *)     * wb->alloc);
+    ESL_REALLOC(wb->accs,     sizeof(char *)     * wb->alloc);
+    ESL_REALLOC(wb->descs,    sizeof(char *)     * wb->alloc);
+    ESL_REALLOC(wb->taxids,   sizeof(int32_t)    * wb->alloc);
+    ESL_REALLOC(wb->win_idx,  sizeof(int)        * wb->alloc);
+  }
+
+  wb->nwindows = wl->count;
+  for (i = 0; i < wl->count; i++) {
+    wb->dsq_ptrs[i] = NULL;
+    wb->lengths[i]  = wl->windows[i].length;
+    wb->names[i]    = nhmmer_empty_str;
+    wb->accs[i]     = nhmmer_empty_str;
+    wb->descs[i]    = nhmmer_empty_str;
+    wb->taxids[i]   = -1;
+    wb->win_idx[i]  = i;
+  }
+
+  wb->chu.i0       = 0;
+  wb->chu.N        = wl->count;
+  wb->chu.dsq      = wb->dsq_ptrs;
+  wb->chu.name     = wb->names;
+  wb->chu.acc      = wb->accs;
+  wb->chu.desc     = wb->descs;
+  wb->chu.taxid    = wb->taxids;
+  wb->chu.L        = wb->lengths;
+  wb->chu.smem     = NULL;
+  wb->chu.psq      = NULL;
+  wb->chu.pn       = 0;
+  wb->chu.metadata = NULL;
+  wb->chu.mdalloc  = 0;
+  wb->chu.nxt      = NULL;
+
+  return eslOK;
+
+ERROR:
+  return eslEMEM;
+}
+
 static void
 nhmmer_gpu_record_ssv_launch(NHMMER_GPU_INFO *info, const P7_CUDA_SSV_LT_STATS *stats)
 {
@@ -314,11 +400,88 @@ nhmmer_gpu_ensure_scratch(NHMMER_GPU_INFO *info, int N)
   ESL_REALLOC(info->h_ssv_status,  sizeof(int)   * N);
   ESL_REALLOC(info->h_null_scores, sizeof(float) * N);
   ESL_REALLOC(info->h_bias_scores, sizeof(float) * N);
+  ESL_REALLOC(info->h_f1_survivor_idx,  sizeof(int)   * N);
+  ESL_REALLOC(info->h_f1_survivor_bias, sizeof(float) * N);
   info->h_filter_alloc = N;
   return eslOK;
 
 ERROR:
   return eslEMEM;
+}
+
+static int
+nhmmer_gpu_ensure_nucdb_chunk_scratch(NHMMER_GPU_INFO *info, int n)
+{
+  int *new_offsets = NULL;
+  int *new_lengths = NULL;
+
+  if (n <= info->h_nucdb_chunk_alloc) return eslOK;
+
+  new_offsets = (int *)realloc(info->h_nucdb_chunk_offsets, sizeof(int) * n);
+  new_lengths = (int *)realloc(info->h_nucdb_chunk_lengths, sizeof(int) * n);
+  if (!new_offsets || !new_lengths) {
+    if (new_offsets) info->h_nucdb_chunk_offsets = new_offsets;
+    if (new_lengths) info->h_nucdb_chunk_lengths = new_lengths;
+    return eslEMEM;
+  }
+  info->h_nucdb_chunk_offsets = new_offsets;
+  info->h_nucdb_chunk_lengths = new_lengths;
+  info->h_nucdb_chunk_alloc = n;
+  return eslOK;
+}
+
+static int
+nhmmer_gpu_ensure_nucdb_window_scratch(NHMMER_GPU_INFO *info, int n)
+{
+  int *new_offsets = NULL;
+  int *new_lengths = NULL;
+  int *new_src1_lengths = NULL;
+  int *new_src2_offsets = NULL;
+
+  if (n <= info->h_nucdb_window_alloc) return eslOK;
+
+  new_offsets = (int *)realloc(info->h_nucdb_window_offsets, sizeof(int) * n);
+  new_lengths = (int *)realloc(info->h_nucdb_window_lengths, sizeof(int) * n);
+  new_src1_lengths = (int *)realloc(info->h_nucdb_window_src1_lengths, sizeof(int) * n);
+  new_src2_offsets = (int *)realloc(info->h_nucdb_window_src2_offsets, sizeof(int) * n);
+  if (!new_offsets || !new_lengths || !new_src1_lengths || !new_src2_offsets) {
+    if (new_offsets) info->h_nucdb_window_offsets = new_offsets;
+    if (new_lengths) info->h_nucdb_window_lengths = new_lengths;
+    if (new_src1_lengths) info->h_nucdb_window_src1_lengths = new_src1_lengths;
+    if (new_src2_offsets) info->h_nucdb_window_src2_offsets = new_src2_offsets;
+    return eslEMEM;
+  }
+  info->h_nucdb_window_offsets = new_offsets;
+  info->h_nucdb_window_lengths = new_lengths;
+  info->h_nucdb_window_src1_lengths = new_src1_lengths;
+  info->h_nucdb_window_src2_offsets = new_src2_offsets;
+  info->h_nucdb_window_alloc = n;
+  return eslOK;
+}
+
+static int
+nhmmer_gpu_ensure_parser_scratch(NHMMER_GPU_INFO *info, int n)
+{
+  int *new_seqidx = NULL;
+  size_t *new_x_offsets = NULL;
+  int *new_surv_src_idx = NULL;
+
+  if (n <= info->h_parser_alloc) return eslOK;
+
+  new_seqidx       = (int *)realloc(info->h_parser_seqidx, sizeof(int) * n);
+  new_x_offsets    = (size_t *)realloc(info->h_parser_x_offsets, sizeof(size_t) * n);
+  new_surv_src_idx = (int *)realloc(info->h_parser_surv_src_idx, sizeof(int) * n);
+  if (!new_seqidx || !new_x_offsets || !new_surv_src_idx) {
+    if (new_seqidx)       info->h_parser_seqidx = new_seqidx;
+    if (new_x_offsets)    info->h_parser_x_offsets = new_x_offsets;
+    if (new_surv_src_idx) info->h_parser_surv_src_idx = new_surv_src_idx;
+    return eslEMEM;
+  }
+  info->h_parser_seqidx       = new_seqidx;
+  info->h_parser_x_offsets    = new_x_offsets;
+  info->h_parser_surv_src_idx = new_surv_src_idx;
+  info->h_parser_alloc        = n;
+  return eslOK;
 }
 
 /* GPU batch SSV + null + bias + F1 gating.
@@ -336,38 +499,34 @@ nhmmer_gpu_batch_filter(NHMMER_GPU_INFO *info, NHMMER_GPU_WINDOW_BATCH *wb,
   int       i;
   P7_OPROFILE *om = info->om;
   P7_PIPELINE *pli = info->pli;
-  int      *survivor_idx = NULL;
-  int      *survivor_status = NULL;
-  float    *survivor_bias = NULL;
-  NHMMER_GPU_F1_SURVIVOR *survivors = NULL;
 
   status = nhmmer_gpu_ensure_scratch(info, N);
   if (status != eslOK) return status;
 
-  float *bias_scores = info->h_bias_scores;
-
-  ESL_ALLOC(survivor_idx,    sizeof(int)   * N);
-  ESL_ALLOC(survivor_status, sizeof(int)   * N);
-  ESL_ALLOC(survivor_bias,   sizeof(float) * N);
+  int   *survivor_idx  = info->h_f1_survivor_idx;
+  float *survivor_bias = info->h_f1_survivor_bias;
+  float *bias_scores   = info->h_bias_scores;
 
   status = p7_cuda_NhmmerF1GateDsqdataChunk(info->cuda_engine, info->cuda_msv,
                                             info->bg, &wb->chu, pli->do_biasfilter,
                                             pli->B1,
                                             om->evparam[p7_MMU], om->evparam[p7_MLAMBDA], pli->F1,
                                             survivor_idx, &nsurv,
-                                            survivor_bias, survivor_status,
+                                            survivor_bias, NULL,
                                             4, errbuf, errbuf_size);
   if (status != eslOK) goto ERROR;
 
-  if (nsurv > 0) {
-    ESL_ALLOC(survivors, sizeof(NHMMER_GPU_F1_SURVIVOR) * nsurv);
-    for (i = 0; i < nsurv; i++) {
-      survivors[i].idx      = survivor_idx[i];
-      survivors[i].filtersc = survivor_bias[i];
-      survivors[i].status   = survivor_status[i];
-    }
-    qsort(survivors, nsurv, sizeof(NHMMER_GPU_F1_SURVIVOR),
-          nhmmer_gpu_f1_survivor_compare);
+  {
+	    P7_CUDA_MSV_STATS stats;
+	    p7_cuda_engine_GetStats(info->cuda_engine, &stats);
+	    info->t_batch_h2d    = stats.h2d_seconds;
+	    info->t_batch_kernel = stats.kernel_seconds;
+	    info->t_batch_f1_gate = stats.f1_gate_kernel_seconds;
+	    info->t_batch_compact = stats.f1_compact_kernel_seconds;
+	    info->t_batch_d2h    = stats.d2h_seconds;
+    info->batch_packed_bytes += 1;
+    for (i = 0; i < wb->chu.N; i++)
+      info->batch_packed_bytes += wb->chu.L[i] + 1;
   }
 
   /* --gpu-compare Stage A: compare GPU batch MSV/null/bias scores to CPU */
@@ -411,28 +570,307 @@ nhmmer_gpu_batch_filter(NHMMER_GPU_INFO *info, NHMMER_GPU_WINDOW_BATCH *wb,
   }
 
   for (i = 0; i < nsurv; i++) {
-    int src = survivors[i].idx;
+    int src = survivor_idx[i];
     if (src < 0 || src >= N) { status = eslEINVAL; goto ERROR; }
     if (i != src)
       wl->windows[i] = wl->windows[src];
-    if (pli->do_biasfilter) bias_scores[i] = survivors[i].filtersc;
+    if (pli->do_biasfilter) bias_scores[i] = survivor_bias[i];
   }
 
   wl->count = nsurv;
   *ret_nsurv = nsurv;
-  free(survivor_idx);
-  free(survivor_status);
-  free(survivor_bias);
-  free(survivors);
   return eslOK;
 
 ERROR:
-  free(survivor_idx);
-  free(survivor_status);
-  free(survivor_bias);
-  free(survivors);
   *ret_nsurv = 0;
   return status;
+}
+
+static int
+nhmmer_gpu_batch_filter_resident(NHMMER_GPU_INFO *info, const uint8_t *d_dsq_base,
+                                 const int *h_offsets, const int *h_lengths,
+                                 P7_HMM_WINDOWLIST *wl, int *ret_nsurv,
+                                 char *errbuf, int errbuf_size)
+{
+  int       status;
+  int       N = wl->count;
+  int       nsurv = 0;
+  int       i;
+  P7_OPROFILE *om = info->om;
+  P7_PIPELINE *pli = info->pli;
+
+  status = nhmmer_gpu_ensure_scratch(info, N);
+  if (status != eslOK) return status;
+
+  int   *survivor_idx  = info->h_f1_survivor_idx;
+  float *survivor_bias = info->h_f1_survivor_bias;
+  float *bias_scores   = info->h_bias_scores;
+
+  status = p7_cuda_NhmmerF1GateResident(info->cuda_engine, info->cuda_msv,
+                                        info->bg, d_dsq_base,
+                                        h_offsets, h_lengths, N,
+                                        pli->do_biasfilter, pli->B1,
+                                        om->evparam[p7_MMU], om->evparam[p7_MLAMBDA], pli->F1,
+                                        survivor_idx, &nsurv,
+                                        survivor_bias, NULL,
+                                        4, errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+
+  {
+    P7_CUDA_MSV_STATS stats;
+    p7_cuda_engine_GetStats(info->cuda_engine, &stats);
+    info->t_batch_h2d     = stats.h2d_seconds;
+    info->t_batch_kernel  = stats.kernel_seconds;
+    info->t_batch_f1_gate = stats.f1_gate_kernel_seconds;
+    info->t_batch_compact = stats.f1_compact_kernel_seconds;
+    info->t_batch_d2h     = stats.d2h_seconds;
+  }
+
+  for (i = 0; i < nsurv; i++) {
+    int src = survivor_idx[i];
+    if (src < 0 || src >= N) { status = eslEINVAL; goto ERROR; }
+    if (i != src)
+      wl->windows[i] = wl->windows[src];
+    if (pli->do_biasfilter) bias_scores[i] = survivor_bias[i];
+  }
+
+  wl->count = nsurv;
+  *ret_nsurv = nsurv;
+  return eslOK;
+
+ERROR:
+  *ret_nsurv = 0;
+  return status;
+}
+
+static int
+nhmmer_gpu_batch_filter_resident_gather(NHMMER_GPU_INFO *info, const uint8_t *d_dsq_base,
+                                        const int *h_offsets, const int *h_src1_lengths,
+                                        const int *h_src2_offsets, const int *h_lengths,
+                                        P7_HMM_WINDOWLIST *wl, int *ret_nsurv,
+                                        char *errbuf, int errbuf_size)
+{
+  int       status;
+  int       N = wl->count;
+  int       nsurv = 0;
+  int       i;
+  P7_OPROFILE *om = info->om;
+  P7_PIPELINE *pli = info->pli;
+
+  status = nhmmer_gpu_ensure_scratch(info, N);
+  if (status != eslOK) return status;
+
+  int   *survivor_idx  = info->h_f1_survivor_idx;
+  float *survivor_bias = info->h_f1_survivor_bias;
+  float *bias_scores   = info->h_bias_scores;
+
+  status = p7_cuda_NhmmerF1GateResidentGather(info->cuda_engine, info->cuda_msv,
+                                              info->bg, d_dsq_base,
+                                              h_offsets, h_src1_lengths,
+                                              h_src2_offsets, h_lengths, N,
+                                              pli->do_biasfilter, pli->B1,
+                                              om->evparam[p7_MMU], om->evparam[p7_MLAMBDA], pli->F1,
+                                              survivor_idx, &nsurv,
+                                              survivor_bias, NULL,
+                                              4, errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+
+  {
+    P7_CUDA_MSV_STATS stats;
+    p7_cuda_engine_GetStats(info->cuda_engine, &stats);
+    info->t_batch_h2d     = stats.h2d_seconds;
+    info->t_batch_kernel  = stats.kernel_seconds;
+    info->t_batch_f1_gate = stats.f1_gate_kernel_seconds;
+    info->t_batch_compact = stats.f1_compact_kernel_seconds;
+    info->t_batch_d2h     = stats.d2h_seconds;
+  }
+
+  for (i = 0; i < nsurv; i++) {
+    int src = survivor_idx[i];
+    if (src < 0 || src >= N) { status = eslEINVAL; goto ERROR; }
+    if (i != src)
+      wl->windows[i] = wl->windows[src];
+    if (pli->do_biasfilter) bias_scores[i] = survivor_bias[i];
+  }
+
+  wl->count = nsurv;
+  *ret_nsurv = nsurv;
+  return eslOK;
+
+ERROR:
+  *ret_nsurv = 0;
+  return status;
+}
+
+static int
+nhmmer_gpu_try_map_nucdb_windows(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,
+                                 int chunk_start, int chunk_count,
+                                 int complementarity,
+                                 const P7_HMM_WINDOWLIST *wl,
+                                 int **ret_offsets, int **ret_lengths,
+                                 int **ret_src1_lengths, int **ret_src2_offsets,
+                                 int *ret_needs_gather)
+{
+  int status;
+  int64_t step;
+  int needs_gather = FALSE;
+
+  if (!info || !ndb || !wl || !ret_offsets || !ret_lengths || !ret_src1_lengths ||
+      !ret_src2_offsets || !ret_needs_gather) return eslEINVAL;
+  *ret_offsets = NULL;
+  *ret_lengths = NULL;
+  *ret_src1_lengths = NULL;
+  *ret_src2_offsets = NULL;
+  *ret_needs_gather = FALSE;
+  if (wl->count <= 0) return eslOK;
+  if (chunk_count <= 0 || ndb->hdr.chunk_size <= 0) return eslFAIL;
+
+  status = nhmmer_gpu_ensure_nucdb_window_scratch(info, wl->count);
+  if (status != eslOK) return status;
+
+  step = (int64_t)ndb->hdr.chunk_size - (int64_t)ndb->hdr.overlap;
+  if (step < 1) step = 1;
+
+  for (int i = 0; i < wl->count; i++) {
+    const P7_HMM_WINDOW *w = &wl->windows[i];
+    int64_t start0 = (int64_t)w->n - 1;
+    int64_t end0;
+    int64_t guess;
+    int found = FALSE;
+
+    if (start0 < 0 || w->length <= 0) return eslFAIL;
+    end0 = start0 + (int64_t)w->length;
+    guess = start0 / step;
+    if (guess < 0) guess = 0;
+    if (guess >= chunk_count) guess = chunk_count - 1;
+
+    for (int delta = 0; delta <= 2 && !found; delta++) {
+      for (int sign = -1; sign <= 1; sign += 2) {
+        int64_t c = guess + sign * delta;
+        if (delta == 0 && sign > -1) continue;
+        if (c < 0 || c >= chunk_count) continue;
+
+        const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+        int64_t ci_start = ci->seq_offset;
+        int64_t ci_end   = ci_start + ci->length;
+        int64_t rel;
+
+        if (start0 < ci_start || end0 > ci_end) continue;
+        rel = start0 - ci_start;
+        if (ci->data_offset + 1 + rel > INT32_MAX || w->length > INT32_MAX)
+          return eslFAIL;
+        info->h_nucdb_window_offsets[i] = (int)(ci->data_offset + 1 + rel);
+        info->h_nucdb_window_lengths[i] = (int)w->length;
+        info->h_nucdb_window_src1_lengths[i] = (int)w->length;
+        info->h_nucdb_window_src2_offsets[i] = 0;
+        found = TRUE;
+        break;
+      }
+    }
+    for (int64_t c = 0; c < chunk_count && !found; c++) {
+      const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+      int64_t ci_start = ci->seq_offset;
+      int64_t ci_end   = ci_start + ci->length;
+      int64_t rel;
+
+      if (start0 < ci_start || end0 > ci_end) continue;
+      rel = start0 - ci_start;
+      if (ci->data_offset + 1 + rel > INT32_MAX || w->length > INT32_MAX)
+        return eslFAIL;
+      info->h_nucdb_window_offsets[i] = (int)(ci->data_offset + 1 + rel);
+      info->h_nucdb_window_lengths[i] = (int)w->length;
+      info->h_nucdb_window_src1_lengths[i] = (int)w->length;
+      info->h_nucdb_window_src2_offsets[i] = 0;
+      found = TRUE;
+    }
+    if (!found) {
+      for (int64_t c = 0; c < chunk_count - 1 && !found; c++) {
+        const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+        const P7_NUCDB_CHUNK_IDX *cj = &ndb->chunk_idx[chunk_start + c + 1];
+        int64_t ci_start = ci->seq_offset;
+        int64_t ci_end   = ci_start + ci->length;
+        int64_t cj_start = cj->seq_offset;
+        int64_t cj_end   = cj_start + cj->length;
+        int64_t rel1, len1, rel2;
+
+        if (start0 < ci_start || start0 >= ci_end) continue;
+        if (end0 <= ci_end) continue;
+        if (end0 > cj_end || ci_end < cj_start) continue;
+        rel1 = start0 - ci_start;
+        len1 = ci_end - start0;
+        rel2 = ci_end - cj_start;
+        if (len1 <= 0 || len1 >= (int64_t)w->length || rel2 < 0) continue;
+        if (ci->data_offset + 1 + rel1 > INT32_MAX ||
+            cj->data_offset + 1 + rel2 > INT32_MAX ||
+            w->length > INT32_MAX || len1 > INT32_MAX)
+          return eslFAIL;
+        info->h_nucdb_window_offsets[i] = (int)(ci->data_offset + 1 + rel1);
+        info->h_nucdb_window_lengths[i] = (int)w->length;
+        info->h_nucdb_window_src1_lengths[i] = (int)len1;
+        info->h_nucdb_window_src2_offsets[i] = (int)(cj->data_offset + 1 + rel2);
+        found = TRUE;
+        needs_gather = TRUE;
+      }
+      if (!found) {
+        if (getenv("HMMER_NHMMER_GPU_TRACE_RESIDENT_F1") != NULL) {
+          fprintf(stderr,
+                  "NHMMER_GPU_RESIDENT_F1 map_fail comp=%d logical_n=%" PRId64 " len=%" PRIu32
+                  " mapped_start=%" PRId64 " mapped_end=%" PRId64 " step=%" PRId64
+                  " guess=%" PRId64 " chunks=%d\n",
+                  complementarity, (int64_t)w->n, w->length,
+                  start0, end0, step, guess, chunk_count);
+        }
+        return eslFAIL;
+      }
+    }
+  }
+
+  *ret_offsets = info->h_nucdb_window_offsets;
+  *ret_lengths = info->h_nucdb_window_lengths;
+  *ret_src1_lengths = info->h_nucdb_window_src1_lengths;
+  *ret_src2_offsets = info->h_nucdb_window_src2_offsets;
+  *ret_needs_gather = needs_gather;
+  return eslOK;
+}
+
+static int
+nhmmer_gpu_prepare_parser_resident_batch(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,
+                                         int chunk_start, int chunk_count,
+                                         int complementarity,
+                                         const uint8_t *d_nucdb,
+                                         P7_HMM_WINDOW *windows, int nwindows,
+                                         const void *batch_owner,
+                                         char *errbuf, int errbuf_size)
+{
+  P7_HMM_WINDOWLIST tmp_wl;
+  int *offsets = NULL;
+  int *lengths = NULL;
+  int *src1_lengths = NULL;
+  int *src2_offsets = NULL;
+  int needs_gather = FALSE;
+  int status;
+
+  if (!info || !ndb || !d_nucdb || !windows || nwindows <= 0) return eslEINVAL;
+
+  tmp_wl.windows = windows;
+  tmp_wl.count   = nwindows;
+  tmp_wl.size    = nwindows;
+
+  status = nhmmer_gpu_try_map_nucdb_windows(info, ndb, chunk_start, chunk_count,
+                                            complementarity, &tmp_wl,
+                                            &offsets, &lengths,
+                                            &src1_lengths, &src2_offsets,
+                                            &needs_gather);
+  if (status != eslOK) return status;
+
+  /* The parser batch always uses a gathered active batch. That keeps one
+   * sentinel-prefixed sequence layout for both chunk-contained and
+   * boundary-spanning windows and lets the existing parser API reuse it. */
+  return p7_cuda_PrepareResidentWindowBatch(info->cuda_engine, d_nucdb,
+                                            offsets, src1_lengths,
+                                            src2_offsets, lengths, nwindows,
+                                            batch_owner,
+                                            errbuf, errbuf_size);
 }
 
 typedef struct {
@@ -623,6 +1061,20 @@ nhmmer_gpu_worker_process(NHMMER_GPU_WORKER *w)
 
 /* Post-Viterbi worker: processes sub-windows that already passed GPU scanning Viterbi.
  * Only runs Forward/Backward and domain definition (skips MSV and scanning Viterbi). */
+typedef struct {
+  float *xmx;
+  int    allocXR;
+  int    M;
+  int    L;
+  int    has_own_scales;
+  float  totscale;
+} NHMMER_OMX_BINDING;
+
+static void nhmmer_gpu_BindOmxXmx(P7_OMX *ox, float *xmx, int M, int L,
+                                  int has_own_scales, float totscale,
+                                  NHMMER_OMX_BINDING *saved);
+static void nhmmer_gpu_RestoreOmxXmx(P7_OMX *ox, const NHMMER_OMX_BINDING *saved);
+
 static void
 nhmmer_gpu_worker_process_post_vit(NHMMER_GPU_WORKER *w)
 {
@@ -684,6 +1136,9 @@ nhmmer_gpu_worker_process_post_fwd(NHMMER_GPU_WORKER *w)
     window = w->windows + i;
     ESL_DSQ *subseq = w->sq->dsq + window->n - 1;
     int window_len = window->length;
+    NHMMER_OMX_BINDING saved_oxf;
+    float *win_xf;
+    float totscale = 0.0f;
 
     w->pli->pos_past_msv += window_len;
     w->pli->pos_past_bias += window_len;
@@ -692,22 +1147,14 @@ nhmmer_gpu_worker_process_post_fwd(NHMMER_GPU_WORKER *w)
       w->pli->pos_past_vit -= ESL_MIN(window_len,
                                       ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n));
 
-    p7_omx_GrowTo(w->pli->oxf, w->om->M, 0, window_len);
     p7_oprofile_ReconfigRestLength(w->om, window_len);
 
-    /* Inject GPU-precomputed forward special cells into oxf->xmx */
-    size_t xcells = (size_t)(window_len + 1) * p7X_NXCELLS;
-    float *win_xf = w->prefilter_xf + (w->prefilter_x_offsets ? w->prefilter_x_offsets[i] : w->prefilter_xf_offset);
-    memcpy(w->pli->oxf->xmx, win_xf, xcells * sizeof(float));
-    w->pli->oxf->M = w->om->M;
-    w->pli->oxf->L = window_len;
-    w->pli->oxf->has_own_scales = TRUE;
-    w->pli->oxf->totscale = 0.0f;
-    /* Reconstruct totscale from per-row SCALE entries (needed for fwdsc) */
+    win_xf = w->prefilter_xf + (w->prefilter_x_offsets ? w->prefilter_x_offsets[i] : w->prefilter_xf_offset);
     for (int r = 1; r <= window_len; r++) {
       float s = win_xf[r * p7X_NXCELLS + p7X_SCALE];
-      if (s > 1.0f) w->pli->oxf->totscale += logf(s);
+      if (s > 1.0f) totscale += logf(s);
     }
+    nhmmer_gpu_BindOmxXmx(w->pli->oxf, win_xf, w->om->M, window_len, TRUE, totscale, &saved_oxf);
 
     /* Call existing postViterbi but with oxf already filled.
      * p7_pli_postViterbi_LongTarget will call p7_ForwardParser which
@@ -721,6 +1168,7 @@ nhmmer_gpu_worker_process_post_fwd(NHMMER_GPU_WORKER *w)
                                            w->sq->acc, w->sq->desc,
                                            -1, w->complementarity, &overlap, w->pli_tmp,
                                            w->prefilter_fwdsc[i]);
+    nhmmer_gpu_RestoreOmxXmx(w->pli->oxf, &saved_oxf);
     nhmmer_gpu_trace_domain_window(w, "post_fwd", i, window, domain_before, w->status);
     if (w->status != eslOK) return;
 
@@ -752,7 +1200,8 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
     ESL_DSQ *subseq = w->sq->dsq + window->n - 1;
     int window_len = window->length;
     size_t xoff = w->gpu_x_offsets[i];
-    size_t xcells = (size_t)(window_len + 1) * p7X_NXCELLS;
+    NHMMER_OMX_BINDING saved_oxf;
+    NHMMER_OMX_BINDING saved_oxb;
 
     if (w->gpu_statuses && w->gpu_statuses[i * 2 + 1] != eslOK) {
       w->status = w->gpu_statuses[i * 2 + 1];
@@ -766,29 +1215,20 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
       w->pli->pos_past_vit -= ESL_MIN(window_len,
                                       ESL_MAX(0, (int)(w->windows[i-1].n + w->windows[i-1].length) - (int)window->n));
 
-    p7_omx_GrowTo(w->pli->oxf, w->om->M, 0, window_len);
-    p7_omx_GrowTo(w->pli->oxb, w->om->M, 0, window_len);
     p7_oprofile_ReconfigRestLength(w->om, window_len);
 
-    memcpy(w->pli->oxf->xmx, w->gpu_xf + xoff, xcells * sizeof(float));
-    w->pli->oxf->M = w->om->M;
-    w->pli->oxf->L = window_len;
-    w->pli->oxf->has_own_scales = TRUE;
-    w->pli->oxf->totscale = 0.0f;
-
-    memcpy(w->pli->oxb->xmx, w->gpu_xb + xoff, xcells * sizeof(float));
-    w->pli->oxb->M = w->om->M;
-    w->pli->oxb->L = window_len;
-    w->pli->oxb->has_own_scales = FALSE;
-    w->pli->oxb->totscale = 0.0f;
+    nhmmer_gpu_BindOmxXmx(w->pli->oxf, w->gpu_xf + xoff, w->om->M, window_len, TRUE, 0.0f, &saved_oxf);
+    nhmmer_gpu_BindOmxXmx(w->pli->oxb, w->gpu_xb + xoff, w->om->M, window_len, FALSE, 0.0f, &saved_oxb);
 
     double domain_before = w->pli->time_domain;
-    w->status = p7_pli_postFwdBwd_LongTarget(w->pli, w->om, w->bg, w->th, w->scoredata,
-                                             w->seq_id, (int)window->n, window_len, subseq,
-                                             (int64_t)w->sq->start, w->sq->name, w->sq->source,
-                                             w->sq->acc, w->sq->desc,
-                                             -1, w->complementarity, &overlap, w->pli_tmp,
-                                             w->gpu_scores[i * 2]);
+    w->status = p7_pli_postFwdBwdNoF3_LongTarget(w->pli, w->om, w->bg, w->th, w->scoredata,
+                                                 w->seq_id, (int)window->n, window_len, subseq,
+                                                 (int64_t)w->sq->start, w->sq->name, w->sq->source,
+                                                 w->sq->acc, w->sq->desc,
+                                                 -1, w->complementarity, &overlap, w->pli_tmp,
+                                                 w->gpu_scores[i * 2]);
+    nhmmer_gpu_RestoreOmxXmx(w->pli->oxb, &saved_oxb);
+    nhmmer_gpu_RestoreOmxXmx(w->pli->oxf, &saved_oxf);
     nhmmer_gpu_trace_domain_window(w, "post_fb", i, window, domain_before, w->status);
     if (w->status != eslOK) return;
 
@@ -801,15 +1241,6 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
     w->pli->ddef->ndom = 0;
   }
 }
-
-typedef struct {
-  float *xmx;
-  int    allocXR;
-  int    M;
-  int    L;
-  int    has_own_scales;
-  float  totscale;
-} NHMMER_OMX_BINDING;
 
 static void
 nhmmer_gpu_BindOmxXmx(P7_OMX *ox, float *xmx, int M, int L, int has_own_scales, float totscale, NHMMER_OMX_BINDING *saved)
@@ -1153,6 +1584,8 @@ ERROR:
 static int
 nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
                                     int64_t seq_id, int complementarity,
+                                    const P7_NUCDB *ndb, int chunk_start, int chunk_count,
+                                    const uint8_t *d_nucdb,
                                     P7_HMM_WINDOW *windows, int nwindows,
                                     P7_HMM_WINDOW **ret_survivors, int *ret_nsurv,
                                     float **ret_xf, float **ret_xb,
@@ -1170,13 +1603,14 @@ nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   size_t total_xcells = 0;
   P7_HMM_WINDOW *survivors = NULL;
   int *surv_src_idx = NULL;
-  float *surv_fwdsc = NULL;
   size_t *surv_x_offsets = NULL;
   int *surv_L_eff = NULL;
   size_t surv_total_xcells = 0;
+  size_t host_surv_total_xcells = 0;
   int nsurv = 0;
   float *gpu_xf = NULL, *gpu_xb = NULL, *gpu_scores = NULL;
   int *gpu_statuses = NULL;
+  struct timespec pack_ts0, pack_ts1;
 
   (void)seq_id;
   (void)complementarity;
@@ -1196,52 +1630,56 @@ nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   status = nhmmer_gpu_window_batch_init(&wb, nwindows);
   if (status != eslOK) goto ERROR;
 
+  clock_gettime(CLOCK_MONOTONIC, &pack_ts0);
   P7_HMM_WINDOWLIST tmp_wl;
   tmp_wl.windows = windows;
   tmp_wl.count = nwindows;
   tmp_wl.size = nwindows;
-  status = nhmmer_gpu_window_batch_pack(&wb, sq, &tmp_wl);
-  if (status != eslOK) goto ERROR;
+  if (ndb != NULL && d_nucdb != NULL) {
+    status = nhmmer_gpu_window_batch_describe(&wb, &tmp_wl);
+    if (status != eslOK) goto ERROR;
+    status = nhmmer_gpu_prepare_parser_resident_batch(info, ndb, chunk_start, chunk_count,
+                                                      complementarity, d_nucdb,
+                                                      windows, nwindows,
+                                                      &wb.chu, errbuf, errbuf_size);
+    if (status != eslOK) goto ERROR;
+  } else {
+    status = nhmmer_gpu_window_batch_pack(&wb, sq, &tmp_wl);
+    if (status != eslOK) goto ERROR;
+  }
 
-  ESL_ALLOC(seqidx, sizeof(int) * nwindows);
-  ESL_ALLOC(x_offsets, sizeof(size_t) * nwindows);
+  status = nhmmer_gpu_ensure_parser_scratch(info, nwindows);
+  if (status != eslOK) goto ERROR;
+  seqidx       = info->h_parser_seqidx;
+  x_offsets    = info->h_parser_x_offsets;
+  surv_src_idx = info->h_parser_surv_src_idx;
 
   for (int i = 0; i < nwindows; i++) {
     seqidx[i] = i;
     x_offsets[i] = total_xcells;
     total_xcells += (size_t)(windows[i].length + 1) * p7X_NXCELLS;
   }
+  clock_gettime(CLOCK_MONOTONIC, &pack_ts1);
+  info->t_gpu_fb_pack += nhmmer_gpu_elapsed(&pack_ts0, &pack_ts1);
 
   ESL_ALLOC(survivors, sizeof(P7_HMM_WINDOW) * nwindows);
-  ESL_ALLOC(surv_src_idx, sizeof(int) * nwindows);
-  ESL_ALLOC(surv_fwdsc, sizeof(float) * nwindows);
   ESL_ALLOC(surv_x_offsets, sizeof(size_t) * nwindows);
   ESL_ALLOC(surv_L_eff, sizeof(int) * nwindows);
 
-  status = p7_cuda_ForwardParserDsqdataSubsetF3Survivors(info->cuda_engine, info->cuda_msv,
-                                                         bg, &wb.chu, seqidx, nwindows,
-                                                         x_offsets, total_xcells,
-                                                         pli->do_biasfilter, pli->B3,
-                                                         om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA], pli->F3,
-                                                         surv_src_idx, surv_fwdsc, &nsurv,
-                                                         errbuf, errbuf_size);
+  status = p7_cuda_ForwardParserDsqdataSubsetF3SurvivorsDevice(info->cuda_engine, info->cuda_msv,
+                                                               bg, &wb.chu, seqidx, nwindows,
+                                                               x_offsets, total_xcells,
+                                                               pli->do_biasfilter, pli->B3,
+                                                               om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA], pli->F3,
+                                                               NULL, &nsurv, &surv_total_xcells,
+                                                               errbuf, errbuf_size);
   if (status != eslOK) goto ERROR;
-
-  for (int si = 0; si < nsurv; si++) {
-    int src = surv_src_idx[si];
-    int window_len = windows[src].length;
-    survivors[si] = windows[src];
-    surv_x_offsets[si] = surv_total_xcells;
-    surv_L_eff[si] = window_len;
-    surv_total_xcells += (size_t)(window_len + 1) * p7X_NXCELLS;
-  }
 
   if (nsurv == 0) {
     *ret_survivors = survivors;
     *ret_nsurv = 0;
     nhmmer_gpu_window_batch_free(&wb);
-    free(seqidx); free(x_offsets);
-    free(surv_src_idx); free(surv_fwdsc); free(surv_x_offsets); free(surv_L_eff);
+    free(surv_x_offsets); free(surv_L_eff);
     return eslOK;
   }
 
@@ -1250,16 +1688,27 @@ nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   ESL_ALLOC(gpu_scores, sizeof(float) * 2 * nsurv);
   ESL_ALLOC(gpu_statuses, sizeof(int) * 2 * nsurv);
 
-  status = p7_cuda_BackwardParserDsqdataSubsetStoredForward(info->cuda_engine, info->cuda_msv,
-                                                            &wb.chu,
-                                                            surv_src_idx, nsurv,
-                                                            x_offsets,
-                                                            surv_x_offsets, surv_total_xcells,
-                                                            gpu_xf, gpu_xb, gpu_scores, gpu_statuses,
-                                                            errbuf, errbuf_size);
+  status = p7_cuda_BackwardParserDsqdataSubsetStoredForwardDeviceSurvivors(info->cuda_engine, info->cuda_msv,
+                                                                           &wb.chu, nsurv,
+                                                                           surv_total_xcells,
+                                                                           gpu_xf, gpu_xb,
+                                                                           gpu_scores, gpu_statuses,
+                                                                           errbuf, errbuf_size);
   if (status != eslOK) goto ERROR;
-  for (int i = 0; i < nsurv; i++)
-    gpu_scores[2*i] = surv_fwdsc[i];
+
+  status = p7_cuda_ForwardParserGetF3SurvivorIdx(info->cuda_engine, surv_src_idx, nsurv,
+                                                 errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+
+  for (int si = 0; si < nsurv; si++) {
+    int src = surv_src_idx[si];
+    int window_len = windows[src].length;
+    survivors[si] = windows[src];
+    surv_x_offsets[si] = host_surv_total_xcells;
+    surv_L_eff[si] = window_len;
+    host_surv_total_xcells += (size_t)(window_len + 1) * p7X_NXCELLS;
+  }
+  if (host_surv_total_xcells != surv_total_xcells) { status = eslFAIL; goto ERROR; }
 
   *ret_survivors = survivors;
   *ret_nsurv = nsurv;
@@ -1270,17 +1719,25 @@ nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   *ret_x_offsets = surv_x_offsets;
   *ret_L_eff = surv_L_eff;
 
+  {
+    P7_CUDA_MSV_STATS stats;
+    p7_cuda_engine_GetStats(info->cuda_engine, &stats);
+    info->t_gpu_fb_h2d    = stats.fwd_h2d_seconds + stats.bck_h2d_seconds;
+    info->t_gpu_fb_kernel = stats.fwd_kernel_seconds + stats.bck_kernel_seconds;
+    info->t_gpu_fb_d2h    = stats.fwd_d2h_seconds + stats.bck_d2h_seconds;
+    if (ndb == NULL || d_nucdb == NULL) {
+      info->gpu_fb_packed_bytes += 1;
+      for (int pi = 0; pi < wb.chu.N; pi++)
+        info->gpu_fb_packed_bytes += wb.chu.L[pi] + 1;
+    }
+  }
+
   nhmmer_gpu_window_batch_free(&wb);
-  free(seqidx);
-  free(x_offsets);
-  free(surv_src_idx);
-  free(surv_fwdsc);
   return eslOK;
 
 ERROR:
   nhmmer_gpu_window_batch_free(&wb);
-  free(seqidx); free(x_offsets);
-  free(survivors); free(surv_src_idx); free(surv_fwdsc);
+  free(survivors);
   free(surv_x_offsets); free(surv_L_eff);
   free(gpu_xf); free(gpu_xb); free(gpu_scores); free(gpu_statuses);
   return status;
@@ -1653,6 +2110,7 @@ static int
 nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
                               P7_HMM_WINDOWLIST *input_wl,
                               const float *precomputed_bias_scores,
+                              int use_f1_resident,
                               P7_HMM_WINDOWLIST *ret_vit_wl,
                               char *errbuf, int errbuf_size)
 {
@@ -1662,14 +2120,18 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   P7_PIPELINE *pli = info->pli;
   float       *bias_scores = NULL;
   P7_CUDA_VIT_LT_WINDOW *gpu_windows = NULL;
+  P7_HMM_WINDOW *gpu_merged_windows = NULL;
   P7_CUDA_VIT_LT_STATS cuda_stats;
   int          gpu_nwindows = 0;
   int          i;
   int          max_window_len = 80000;
   int          overlap_len = ESL_MIN(40000, om->max_length);
+  int          used_f1_resident = FALSE;
   struct timespec ts0, ts1;
 
-  p7_hmmwindow_init(ret_vit_wl);
+  ret_vit_wl->windows = NULL;
+  ret_vit_wl->count   = 0;
+  ret_vit_wl->size    = 0;
   memset(&cuda_stats, 0, sizeof(cuda_stats));
 
   if (N == 0) return eslOK;
@@ -1701,20 +2163,102 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
             p7O_NQW(om->M), om->M, pli->F2, om->evparam[p7_VMU], om->evparam[p7_VLAMBDA], pli->B2);
   }
   clock_gettime(CLOCK_MONOTONIC, &ts0);
-  status = p7_cuda_ViterbiLongtarget(info->cuda_engine, info->cuda_msv,
-                                     sq->dsq, sq->n,
-                                     input_wl->windows, N,
-                                     bias_scores, pli->do_biasfilter,
-                                     pli->B2, pli->F2,
-                                     om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
-                                     om->scale_w,
-                                     (float)om->xw[p7O_E][p7O_MOVE],
-                                     om->nj,
-                                     (float)om->base_w, om->max_length,
-                                     &gpu_windows, &gpu_nwindows,
-                                     &cuda_stats,
-                                     errbuf, errbuf_size);
+  if (use_f1_resident && pli->do_biasfilter && bias_scores == precomputed_bias_scores) {
+    if (info->do_compare) {
+      status = p7_cuda_ViterbiLongtargetFromF1(info->cuda_engine, info->cuda_msv,
+                                               N,
+                                               pli->B2, pli->F2,
+                                               om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
+                                               om->scale_w,
+                                               (float)om->xw[p7O_E][p7O_MOVE],
+                                               om->nj,
+                                               (float)om->base_w, om->max_length,
+                                               &gpu_windows, &gpu_nwindows,
+                                               &cuda_stats,
+                                               errbuf, errbuf_size);
+    } else {
+      status = p7_cuda_ViterbiLongtargetFromF1Windows(info->cuda_engine, info->cuda_msv,
+                                                      info->scoredata,
+                                                      input_wl->windows, N,
+                                                      pli->B2, pli->F2,
+                                                      om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
+                                                      om->scale_w,
+                                                      (float)om->xw[p7O_E][p7O_MOVE],
+                                                      om->nj,
+                                                      (float)om->base_w, om->max_length,
+                                                      &gpu_merged_windows, &gpu_nwindows,
+                                                      &cuda_stats,
+                                                      errbuf, errbuf_size);
+    }
+    if (status != eslOK) {
+      if (info->do_compare) {
+        status = p7_cuda_ViterbiLongtarget(info->cuda_engine, info->cuda_msv,
+                                           sq->dsq, sq->n,
+                                           input_wl->windows, N,
+                                           bias_scores, pli->do_biasfilter,
+                                           pli->B2, pli->F2,
+                                           om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
+                                           om->scale_w,
+                                           (float)om->xw[p7O_E][p7O_MOVE],
+                                           om->nj,
+                                           (float)om->base_w, om->max_length,
+                                           &gpu_windows, &gpu_nwindows,
+                                           &cuda_stats,
+                                           errbuf, errbuf_size);
+      } else {
+        status = p7_cuda_ViterbiLongtargetWindows(info->cuda_engine, info->cuda_msv,
+                                                  info->scoredata,
+                                                  sq->dsq, sq->n,
+                                                  input_wl->windows, N,
+                                                  bias_scores, pli->do_biasfilter,
+                                                  pli->B2, pli->F2,
+                                                  om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
+                                                  om->scale_w,
+                                                  (float)om->xw[p7O_E][p7O_MOVE],
+                                                  om->nj,
+                                                  (float)om->base_w, om->max_length,
+                                                  &gpu_merged_windows, &gpu_nwindows,
+                                                  &cuda_stats,
+                                                  errbuf, errbuf_size);
+      }
+    } else {
+      used_f1_resident = TRUE;
+    }
+  } else {
+    if (info->do_compare) {
+      status = p7_cuda_ViterbiLongtarget(info->cuda_engine, info->cuda_msv,
+                                         sq->dsq, sq->n,
+                                         input_wl->windows, N,
+                                         bias_scores, pli->do_biasfilter,
+                                         pli->B2, pli->F2,
+                                         om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
+                                         om->scale_w,
+                                         (float)om->xw[p7O_E][p7O_MOVE],
+                                         om->nj,
+                                         (float)om->base_w, om->max_length,
+                                         &gpu_windows, &gpu_nwindows,
+                                         &cuda_stats,
+                                         errbuf, errbuf_size);
+    } else {
+      status = p7_cuda_ViterbiLongtargetWindows(info->cuda_engine, info->cuda_msv,
+                                                info->scoredata,
+                                                sq->dsq, sq->n,
+                                                input_wl->windows, N,
+                                                bias_scores, pli->do_biasfilter,
+                                                pli->B2, pli->F2,
+                                                om->evparam[p7_VMU], om->evparam[p7_VLAMBDA],
+                                                om->scale_w,
+                                                (float)om->xw[p7O_E][p7O_MOVE],
+                                                om->nj,
+                                                (float)om->base_w, om->max_length,
+                                                &gpu_merged_windows, &gpu_nwindows,
+                                                &cuda_stats,
+                                                errbuf, errbuf_size);
+    }
+  }
   clock_gettime(CLOCK_MONOTONIC, &ts1);
+  if (used_f1_resident && status == eslOK)
+    info->t_vit_f1_resident += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
   info->t_vit_cuda   += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
   info->t_vit_pack   += cuda_stats.pack_seconds;
   info->t_vit_h2d    += cuda_stats.h2d_seconds;
@@ -1741,6 +2285,17 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   if (bias_scores && bias_scores != precomputed_bias_scores) { free(bias_scores); bias_scores = NULL; }
   if (status != eslOK) { free(saved_bias_scores); free(gpu_thresholds); goto ERROR; }
 
+  if (!info->do_compare) {
+    if (gpu_nwindows == 0) return eslOK;
+    clock_gettime(CLOCK_MONOTONIC, &ts0);
+    free(ret_vit_wl->windows);
+    status = nhmmer_gpu_copy_windows(ret_vit_wl, gpu_merged_windows, gpu_nwindows);
+    if (status != eslOK) goto ERROR;
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    info->t_vit_extend += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
+    return eslOK;
+  }
+
   if (gpu_nwindows == 0) {
     /* Still run comparison even when GPU produces 0 windows */
     if (info->do_compare) goto COMPARE_STAGE_B;
@@ -1765,25 +2320,22 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
     }
   }
 
-  clock_gettime(CLOCK_MONOTONIC, &ts0);
-  qsort(gpu_windows, gpu_nwindows, sizeof(P7_CUDA_VIT_LT_WINDOW),
-        nhmmer_gpu_vit_window_compare);
-  clock_gettime(CLOCK_MONOTONIC, &ts1);
-  info->t_vit_sort += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
-
-  clock_gettime(CLOCK_MONOTONIC, &ts0);
-  for (i = 0; i < gpu_nwindows; i++) {
-    int win_id = gpu_windows[i].window_id;
-    int pos = gpu_windows[i].position;
-    int k = gpu_windows[i].model_k;
-
-    p7_hmmwindow_new(ret_vit_wl, (uint32_t)win_id,
-                     (uint32_t)pos,
-                     0, (uint16_t)k, 1, 0.0f,
-                     p7_NOCOMPLEMENT,
-                     (uint32_t)input_wl->windows[win_id].length);
+  /* Viterbi CUDA now returns seeds compacted in parent-window order, with
+   * per-window emission order preserved by the single DP group handling that
+   * parent. Keep the CPU sort only for diagnostic comparison snapshots. */
+  if (info->do_compare) {
+    clock_gettime(CLOCK_MONOTONIC, &ts0);
+    qsort(gpu_windows, gpu_nwindows, sizeof(P7_CUDA_VIT_LT_WINDOW),
+          nhmmer_gpu_vit_window_compare);
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    info->t_vit_sort += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
   }
-  free(gpu_windows);
+
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
+  free(ret_vit_wl->windows);
+  status = nhmmer_gpu_windowlist_alloc(ret_vit_wl, gpu_nwindows);
+  if (status != eslOK) goto ERROR;
+  nhmmer_gpu_fill_vit_seed_windows(ret_vit_wl, gpu_windows, gpu_nwindows, input_wl);
   gpu_windows = NULL;
 
   p7_pli_ExtendAndMergeWindows(om, info->scoredata, ret_vit_wl, 0.5);
@@ -1957,7 +2509,6 @@ nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
 
 ERROR:
   if (bias_scores && bias_scores != precomputed_bias_scores) free(bias_scores);
-  free(gpu_windows);
   return status;
 }
 
@@ -1974,6 +2525,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
   struct timespec ts0, ts1;
 
   P7_CUDA_LT_WINDOW *gpu_windows = NULL;
+  P7_HMM_WINDOW *gpu_merged_windows = NULL;
   P7_CUDA_SSV_LT_STATS ssv_stats;
   int gpu_nwindows = 0;
 
@@ -1982,44 +2534,46 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
   memset(&ssv_stats, 0, sizeof(ssv_stats));
 
   clock_gettime(CLOCK_MONOTONIC, &ts0);
-  status = p7_cuda_SSVLongtarget(info->cuda_engine, info->cuda_msv,
-                                 sq->dsq, L,
-                                 info->scoredata->ssv_scores, om->abc->Kp,
-                                 sc_thresh, om->scale_b,
-                                 chunk_size, overlap,
-                                 &gpu_windows, &gpu_nwindows,
-                                 &ssv_stats,
-                                 errbuf, errbuf_size);
+  if (info->scoredata->prefix_lengths == NULL)
+    p7_hmm_ScoreDataComputeRest(om, info->scoredata);
+  if (info->do_compare) {
+    status = p7_cuda_SSVLongtarget(info->cuda_engine, info->cuda_msv,
+                                   sq->dsq, L,
+                                   info->scoredata->ssv_scores, om->abc->Kp,
+                                   sc_thresh, om->scale_b,
+                                   chunk_size, overlap,
+                                   &gpu_windows, &gpu_nwindows,
+                                   &ssv_stats,
+                                   errbuf, errbuf_size);
+  } else {
+    status = p7_cuda_SSVLongtargetWindows(info->cuda_engine, info->cuda_msv,
+                                          info->scoredata,
+                                          sq->dsq, L,
+                                          info->scoredata->ssv_scores, om->abc->Kp,
+                                          sc_thresh, om->scale_b,
+                                          om->max_length, chunk_size, overlap,
+                                          &gpu_merged_windows, &gpu_nwindows,
+                                          &ssv_stats,
+                                          errbuf, errbuf_size);
+  }
   if (status != eslOK) return status;
   clock_gettime(CLOCK_MONOTONIC, &ts1);
   info->t_ssv += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
   nhmmer_gpu_record_ssv_launch(info, &ssv_stats);
 
-  if (gpu_nwindows == 0) { free(gpu_windows); return eslOK; }
+  if (gpu_nwindows == 0) return eslOK;
 
   clock_gettime(CLOCK_MONOTONIC, &ts0);
-  p7_hmmwindow_init(&msv_windowlist);
-  for (i = 0; i < gpu_nwindows; i++) {
-    p7_hmmwindow_new(&msv_windowlist,
-                     0,
-                     gpu_windows[i].target_start,
-                     0,
-                     (uint16_t)gpu_windows[i].model_end,
-                     gpu_windows[i].model_end - gpu_windows[i].model_start + 1,
-                     gpu_windows[i].score,
-                     p7_NOCOMPLEMENT,
-                     L);
+  if (info->do_compare) {
+    status = nhmmer_gpu_windowlist_alloc(&msv_windowlist, gpu_nwindows);
+    if (status != eslOK) return status;
+    nhmmer_gpu_fill_ssv_windows(&msv_windowlist, gpu_windows, gpu_nwindows, (uint32_t) L);
+    gpu_windows = NULL;
+    p7_pli_ExtendAndMergeWindows(om, info->scoredata, &msv_windowlist, 0);
+  } else {
+    status = nhmmer_gpu_copy_windows(&msv_windowlist, gpu_merged_windows, gpu_nwindows);
+    if (status != eslOK) return status;
   }
-  free(gpu_windows);
-  gpu_windows = NULL;
-
-  if (info->scoredata->prefix_lengths == NULL)
-    p7_hmm_ScoreDataComputeRest(om, info->scoredata);
-
-  qsort(msv_windowlist.windows, msv_windowlist.count, sizeof(P7_HMM_WINDOW),
-        nhmmer_gpu_hmm_window_compare);
-
-  p7_pli_ExtendAndMergeWindows(om, info->scoredata, &msv_windowlist, 0);
   clock_gettime(CLOCK_MONOTONIC, &ts1);
   info->t_merge += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
 
@@ -2030,7 +2584,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
 
   /* GPU batch SSV/bias/F1 gating: filter merged windows before thread dispatch */
   NHMMER_GPU_WINDOW_BATCH wb;
-  float *batch_bias_scores = NULL;
+  const float *batch_bias_scores = NULL;
   memset(&wb, 0, sizeof(wb));
 
   clock_gettime(CLOCK_MONOTONIC, &ts0);
@@ -2052,14 +2606,11 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     if (msv_windowlist.count == 0) {
       nhmmer_gpu_window_batch_free(&wb);
       free(msv_windowlist.windows);
-      free(batch_bias_scores);
       return eslOK;
     }
 
-    if (info->pli->do_biasfilter && nsurv > 0) {
-      ESL_ALLOC(batch_bias_scores, sizeof(float) * nsurv);
-      memcpy(batch_bias_scores, info->h_bias_scores, sizeof(float) * nsurv);
-    }
+    if (info->pli->do_biasfilter && nsurv > 0)
+      batch_bias_scores = info->h_bias_scores;
 
     nhmmer_gpu_window_batch_free(&wb);
   }
@@ -2072,7 +2623,8 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     vit_wl.windows = NULL;
 
     clock_gettime(CLOCK_MONOTONIC, &ts0);
-    status = nhmmer_gpu_viterbi_longtarget(info, sq, &msv_windowlist, batch_bias_scores, &vit_wl,
+    status = nhmmer_gpu_viterbi_longtarget(info, sq, &msv_windowlist, batch_bias_scores,
+                                           batch_bias_scores != NULL, &vit_wl,
                                            errbuf, errbuf_size);
     if (status != eslOK) {
       fprintf(stderr, "GPU scanning Viterbi failed: %s\n", errbuf);
@@ -2082,14 +2634,12 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
 
     free(msv_windowlist.windows);
     msv_windowlist.windows = NULL;
-    free(batch_bias_scores);
     batch_bias_scores = NULL;
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     info->t_vit_lt += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
 
     if (vit_wl.count == 0) {
       if (vit_wl.windows) free(vit_wl.windows);
-      free(batch_bias_scores);
       return eslOK;
     }
 
@@ -2112,6 +2662,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
     if (use_compact_fb) {
       clock_gettime(CLOCK_MONOTONIC, &ts0);
       status = nhmmer_gpu_forward_backward_compact(info, sq, seq_id, complementarity,
+                                                   NULL, 0, 0, NULL,
                                                    vit_wl.windows, vit_wl.count,
                                                    &fwd_survivors, &nfwd_surv,
                                                    &gpu_xf, &gpu_xb, &gpu_fb_scores,
@@ -2439,8 +2990,6 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
   }
 
 ERROR:
-  free(batch_bias_scores);
-  free(gpu_windows);
   if (msv_windowlist.windows) free(msv_windowlist.windows);
   return status;
 }
@@ -2533,8 +3082,8 @@ ERROR:
 }
 
 /* Process one strand's worth of pre-built chunks from nucdb.
- * Chunks are packed as synthetic batch and run through GPU SSV+bias+F1
- * then GPU scanning Viterbi, then threaded CPU downstream. */
+ * The default path keeps SSV windowing, F1, scanning Viterbi, and
+ * Forward/Backward parser work on GPU before CPU domain processing. */
 static int
 nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
                                 const P7_NUCDB *ndb,
@@ -2549,11 +3098,12 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
 
   struct timespec ts0, ts1;
 
-  /* Build an HMM window list from the pre-chunked data.
-   * Each chunk becomes a window. Overlapping regions will be
-   * merged by p7_pli_ExtendAndMergeWindows below. */
+  /* Build an HMM window list from GPU-merged SSV results. In compare mode only,
+   * raw GPU hits are converted to CPU windows and merged by the reference path. */
   P7_HMM_WINDOWLIST msv_windowlist;
-  p7_hmmwindow_init(&msv_windowlist);
+  msv_windowlist.windows = NULL;
+  msv_windowlist.count   = 0;
+  msv_windowlist.size    = 0;
 
   /* We run SSV on each chunk as a "window" and then do batch filtering.
    * First, compute SSV threshold (same as in nhmmer_gpu_serial_loop). */
@@ -2569,6 +3119,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   int overlap    = om->max_length;
 
   P7_CUDA_LT_WINDOW *gpu_windows = NULL;
+  P7_HMM_WINDOW *gpu_merged_windows = NULL;
   P7_CUDA_SSV_LT_STATS ssv_stats;
   int gpu_nwindows = 0;
   memset(&ssv_stats, 0, sizeof(ssv_stats));
@@ -2576,13 +3127,16 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   /* Use GPU-resident path when nucdb is uploaded and chunks have sufficient overlap */
   clock_gettime(CLOCK_MONOTONIC, &ts0);
   const uint8_t *d_nucdb = p7_cuda_engine_NucdbDevPtr(info->cuda_engine);
+  if (info->scoredata->prefix_lengths == NULL)
+    p7_hmm_ScoreDataComputeRest(om, info->scoredata);
   if (d_nucdb &&
       (int64_t)ndb->hdr.overlap >= (int64_t)om->max_length &&
       (int64_t)ndb->hdr.chunk_size == (int64_t)chunk_size)
   {
-    int *h_offsets = (int *)malloc(sizeof(int) * chunk_count);
-    int *h_lengths = (int *)malloc(sizeof(int) * chunk_count);
-    if (!h_offsets || !h_lengths) { free(h_offsets); free(h_lengths); return eslEMEM; }
+    status = nhmmer_gpu_ensure_nucdb_chunk_scratch(info, chunk_count);
+    if (status != eslOK) return status;
+    int *h_offsets = info->h_nucdb_chunk_offsets;
+    int *h_lengths = info->h_nucdb_chunk_lengths;
 
     int ndb_step = (int)ndb->hdr.chunk_size - (int)ndb->hdr.overlap;
     if (ndb_step < 1) ndb_step = 1;
@@ -2593,58 +3147,71 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       h_lengths[c] = ci->length;
     }
 
-    status = p7_cuda_SSVLongtargetResident(info->cuda_engine, info->cuda_msv,
-                                            d_nucdb, chunk_count,
-                                            h_offsets, h_lengths,
-                                            info->scoredata->ssv_scores, om->abc->Kp,
-                                            sc_thresh, om->scale_b,
-                                            ndb_step,
-                                            &gpu_windows, &gpu_nwindows,
-                                            &ssv_stats,
-                                            errbuf, errbuf_size);
-    free(h_offsets);
-    free(h_lengths);
+    if (info->do_compare) {
+      status = p7_cuda_SSVLongtargetResident(info->cuda_engine, info->cuda_msv,
+                                             d_nucdb, chunk_count,
+                                             h_offsets, h_lengths,
+                                             info->scoredata->ssv_scores, om->abc->Kp,
+                                             sc_thresh, om->scale_b,
+                                             ndb_step,
+                                             &gpu_windows, &gpu_nwindows,
+                                             &ssv_stats,
+                                             errbuf, errbuf_size);
+    } else {
+      status = p7_cuda_SSVLongtargetResidentWindows(info->cuda_engine, info->cuda_msv,
+                                                    info->scoredata,
+                                                    d_nucdb, chunk_count,
+                                                    h_offsets, h_lengths,
+                                                    info->scoredata->ssv_scores, om->abc->Kp,
+                                                    sc_thresh, om->scale_b,
+                                                    om->max_length, ndb_step, sq->n,
+                                                    &gpu_merged_windows, &gpu_nwindows,
+                                                    &ssv_stats,
+                                                    errbuf, errbuf_size);
+    }
   }
   else
   {
     /* Fallback: use host dsq (kernel does its own chunking with overlap) */
-    status = p7_cuda_SSVLongtarget(info->cuda_engine, info->cuda_msv,
-                                   sq->dsq, sq->n,
-                                   info->scoredata->ssv_scores, om->abc->Kp,
-                                   sc_thresh, om->scale_b,
-                                   chunk_size, overlap,
-                                   &gpu_windows, &gpu_nwindows,
-                                   &ssv_stats,
-                                   errbuf, errbuf_size);
+    if (info->do_compare) {
+      status = p7_cuda_SSVLongtarget(info->cuda_engine, info->cuda_msv,
+                                     sq->dsq, sq->n,
+                                     info->scoredata->ssv_scores, om->abc->Kp,
+                                     sc_thresh, om->scale_b,
+                                     chunk_size, overlap,
+                                     &gpu_windows, &gpu_nwindows,
+                                     &ssv_stats,
+                                     errbuf, errbuf_size);
+    } else {
+      status = p7_cuda_SSVLongtargetWindows(info->cuda_engine, info->cuda_msv,
+                                            info->scoredata,
+                                            sq->dsq, sq->n,
+                                            info->scoredata->ssv_scores, om->abc->Kp,
+                                            sc_thresh, om->scale_b,
+                                            om->max_length, chunk_size, overlap,
+                                            &gpu_merged_windows, &gpu_nwindows,
+                                            &ssv_stats,
+                                            errbuf, errbuf_size);
+    }
   }
   if (status != eslOK) return status;
   clock_gettime(CLOCK_MONOTONIC, &ts1);
   info->t_ssv += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
   nhmmer_gpu_record_ssv_launch(info, &ssv_stats);
 
-  if (gpu_nwindows == 0) { free(gpu_windows); return eslOK; }
+  if (gpu_nwindows == 0) return eslOK;
 
   clock_gettime(CLOCK_MONOTONIC, &ts0);
-  for (i = 0; i < gpu_nwindows; i++) {
-    p7_hmmwindow_new(&msv_windowlist,
-                     0,
-                     gpu_windows[i].target_start,
-                     0,
-                     (uint16_t)gpu_windows[i].model_end,
-                     gpu_windows[i].model_end - gpu_windows[i].model_start + 1,
-                     gpu_windows[i].score,
-                     p7_NOCOMPLEMENT,
-                     sq->n);
+  if (info->do_compare) {
+    status = nhmmer_gpu_windowlist_alloc(&msv_windowlist, gpu_nwindows);
+    if (status != eslOK) return status;
+    nhmmer_gpu_fill_ssv_windows(&msv_windowlist, gpu_windows, gpu_nwindows, (uint32_t) sq->n);
+    gpu_windows = NULL;
+    p7_pli_ExtendAndMergeWindows(om, info->scoredata, &msv_windowlist, 0);
+  } else {
+    status = nhmmer_gpu_copy_windows(&msv_windowlist, gpu_merged_windows, gpu_nwindows);
+    if (status != eslOK) return status;
   }
-  free(gpu_windows);
-
-  if (info->scoredata->prefix_lengths == NULL)
-    p7_hmm_ScoreDataComputeRest(om, info->scoredata);
-
-  qsort(msv_windowlist.windows, msv_windowlist.count, sizeof(P7_HMM_WINDOW),
-        nhmmer_gpu_hmm_window_compare);
-
-  p7_pli_ExtendAndMergeWindows(om, info->scoredata, &msv_windowlist, 0);
   clock_gettime(CLOCK_MONOTONIC, &ts1);
   info->t_merge += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
 
@@ -2655,34 +3222,76 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
 
   /* GPU batch SSV/bias/F1 gating */
   NHMMER_GPU_WINDOW_BATCH wb;
-  float *batch_bias_scores = NULL;
+  const float *batch_bias_scores = NULL;
+  int *resident_f1_offsets = NULL;
+  int *resident_f1_lengths = NULL;
+  int *resident_f1_src1_lengths = NULL;
+  int *resident_f1_src2_offsets = NULL;
+  int use_resident_f1 = FALSE;
+  int use_resident_f1_gather = FALSE;
   memset(&wb, 0, sizeof(wb));
 
   clock_gettime(CLOCK_MONOTONIC, &ts0);
   if (!info->do_cpu_postmsv && info->do_gpu_batch && msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
-    status = nhmmer_gpu_window_batch_init(&wb, msv_windowlist.count);
-    if (status != eslOK) goto ERROR;
-
-    status = nhmmer_gpu_window_batch_pack(&wb, sq, &msv_windowlist);
-    if (status != eslOK) { nhmmer_gpu_window_batch_free(&wb); goto ERROR; }
-
     int nsurv = 0;
-    status = nhmmer_gpu_batch_filter(info, &wb, &msv_windowlist, &nsurv, errbuf, errbuf_size);
-    if (status != eslOK) { nhmmer_gpu_window_batch_free(&wb); goto ERROR; }
+    if (d_nucdb != NULL) {
+      status = nhmmer_gpu_try_map_nucdb_windows(info, ndb, chunk_start, chunk_count,
+                                                complementarity,
+                                                &msv_windowlist,
+                                                &resident_f1_offsets,
+                                                &resident_f1_lengths,
+                                                &resident_f1_src1_lengths,
+                                                &resident_f1_src2_offsets,
+                                                &use_resident_f1_gather);
+      if (status == eslOK)
+        use_resident_f1 = TRUE;
+      else {
+        if (getenv("HMMER_NHMMER_GPU_TRACE_RESIDENT_F1") != NULL)
+          fprintf(stderr, "NHMMER_GPU_RESIDENT_F1 fallback seq=%" PRId64 " comp=%d windows=%d status=%d\n",
+                  (int64_t)seq_id, complementarity, msv_windowlist.count, status);
+        status = eslOK;
+      }
+    }
+
+    if (use_resident_f1) {
+      if (use_resident_f1_gather)
+        status = nhmmer_gpu_batch_filter_resident_gather(info, d_nucdb,
+                                                         resident_f1_offsets,
+                                                         resident_f1_src1_lengths,
+                                                         resident_f1_src2_offsets,
+                                                         resident_f1_lengths,
+                                                         &msv_windowlist, &nsurv,
+                                                         errbuf, errbuf_size);
+      else {
+        for (int wi = 0; wi < msv_windowlist.count; wi++)
+          resident_f1_offsets[wi]--;
+        status = nhmmer_gpu_batch_filter_resident(info, d_nucdb,
+                                                  resident_f1_offsets, resident_f1_lengths,
+                                                  &msv_windowlist, &nsurv,
+                                                  errbuf, errbuf_size);
+      }
+      if (status != eslOK) goto ERROR;
+    } else {
+      status = nhmmer_gpu_window_batch_init(&wb, msv_windowlist.count);
+      if (status != eslOK) goto ERROR;
+
+      status = nhmmer_gpu_window_batch_pack(&wb, sq, &msv_windowlist);
+      if (status != eslOK) { nhmmer_gpu_window_batch_free(&wb); goto ERROR; }
+
+      status = nhmmer_gpu_batch_filter(info, &wb, &msv_windowlist, &nsurv, errbuf, errbuf_size);
+      if (status != eslOK) { nhmmer_gpu_window_batch_free(&wb); goto ERROR; }
+    }
 
     if (msv_windowlist.count == 0) {
       nhmmer_gpu_window_batch_free(&wb);
       free(msv_windowlist.windows);
-      free(batch_bias_scores);
       clock_gettime(CLOCK_MONOTONIC, &ts1);
       info->t_batch_filter += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
       return eslOK;
     }
 
-    if (info->pli->do_biasfilter && nsurv > 0) {
-      ESL_ALLOC(batch_bias_scores, sizeof(float) * nsurv);
-      memcpy(batch_bias_scores, info->h_bias_scores, sizeof(float) * nsurv);
-    }
+    if (info->pli->do_biasfilter && nsurv > 0)
+      batch_bias_scores = info->h_bias_scores;
 
     nhmmer_gpu_window_batch_free(&wb);
   }
@@ -2695,7 +3304,8 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
     vit_wl.windows = NULL;
 
     clock_gettime(CLOCK_MONOTONIC, &ts0);
-    status = nhmmer_gpu_viterbi_longtarget(info, sq, &msv_windowlist, batch_bias_scores, &vit_wl,
+    status = nhmmer_gpu_viterbi_longtarget(info, sq, &msv_windowlist, batch_bias_scores,
+                                           batch_bias_scores != NULL, &vit_wl,
                                            errbuf, errbuf_size);
     if (status != eslOK) {
       if (vit_wl.windows) free(vit_wl.windows);
@@ -2704,7 +3314,6 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
 
     free(msv_windowlist.windows);
     msv_windowlist.windows = NULL;
-    free(batch_bias_scores);
     batch_bias_scores = NULL;
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     info->t_vit_lt += (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) * 1e-9;
@@ -2732,6 +3341,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
     if (use_compact_fb) {
       clock_gettime(CLOCK_MONOTONIC, &ts0);
       status = nhmmer_gpu_forward_backward_compact(info, sq, seq_id, complementarity,
+                                                   ndb, chunk_start, chunk_count, d_nucdb,
                                                    vit_wl.windows, vit_wl.count,
                                                    &fwd_survivors, &nfwd_surv,
                                                    &gpu_xf, &gpu_xb, &gpu_fb_scores,
@@ -3045,7 +3655,6 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
   }
 
 ERROR:
-  free(batch_bias_scores);
   if (msv_windowlist.windows) free(msv_windowlist.windows);
   return status;
 }

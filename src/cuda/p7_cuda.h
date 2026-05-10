@@ -46,6 +46,8 @@ typedef struct p7_cuda_msv_stats_s {
   double   host_score_convert_seconds;
   double   host_sync_seconds;
   double   host_cudamemcpy_seconds;
+  double   f1_gate_kernel_seconds;
+  double   f1_compact_kernel_seconds;
   uint64_t nseqs;
   uint64_t nres;
   uint64_t nbatches;
@@ -141,6 +143,18 @@ extern int  p7_cuda_ForwardParserDsqdataSubsetF3Survivors(P7_CUDA_ENGINE *engine
                                                            double ev_mu, double ev_lambda, double F3,
                                                            int *survivor_idx, float *survivor_scores, int *ret_nsurv,
                                                            char *errbuf, int errbuf_size);
+extern int  p7_cuda_ForwardParserDsqdataSubsetF3SurvivorsDevice(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                                 const P7_BG *bg, ESL_DSQDATA_CHUNK *chu,
+                                                                 const int *seqidx, int nidx,
+                                                                 const size_t *x_offsets, size_t total_xcells,
+                                                                 int do_biasfilter, int B3,
+                                                                 double ev_mu, double ev_lambda, double F3,
+                                                                 int *survivor_idx,
+                                                                 int *ret_nsurv, size_t *ret_surv_total_xcells,
+                                                                 char *errbuf, int errbuf_size);
+extern int  p7_cuda_ForwardParserGetF3SurvivorIdx(P7_CUDA_ENGINE *engine,
+                                                   int *survivor_idx, int nsurv,
+                                                   char *errbuf, int errbuf_size);
 extern int  p7_cuda_BackwardParserDsqdataSubsetStoredForward(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                               ESL_DSQDATA_CHUNK *chu,
                                                               const int *surv_srcidx, int nsurv,
@@ -148,6 +162,12 @@ extern int  p7_cuda_BackwardParserDsqdataSubsetStoredForward(P7_CUDA_ENGINE *eng
                                                               const size_t *surv_x_offsets, size_t surv_total_xcells,
                                                               float *xf, float *xb, float *scores, int *statuses,
                                                               char *errbuf, int errbuf_size);
+extern int  p7_cuda_BackwardParserDsqdataSubsetStoredForwardDeviceSurvivors(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                                             ESL_DSQDATA_CHUNK *chu, int nsurv,
+                                                                             size_t surv_total_xcells,
+                                                                             float *xf, float *xb,
+                                                                             float *scores, int *statuses,
+                                                                             char *errbuf, int errbuf_size);
 /* Backward-only variant: takes xf as INPUT (H2D'd by this call), runs Backward
  * parser kernel, writes xb xmx and Backward scores. scores[2k+0] is left
  * untouched; scores[2k+1] holds Backward score. */
@@ -195,6 +215,30 @@ extern int  p7_cuda_NhmmerF1GateDsqdataChunk(P7_CUDA_ENGINE *engine, const P7_CU
                                               float *survivor_filtersc, int *survivor_statuses,
                                               int warps_per_block,
                                               char *errbuf, int errbuf_size);
+extern int  p7_cuda_NhmmerF1GateResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                          const P7_BG *bg, const uint8_t *d_dsq_base,
+                                          const int *h_offsets, const int *h_lengths, int nseq,
+                                          int do_biasfilter, int B1,
+                                          double ev_mu, double ev_lambda, double F1,
+                                          int *survivor_idx, int *ret_nsurv,
+                                          float *survivor_filtersc, int *survivor_statuses,
+                                          int warps_per_block,
+                                          char *errbuf, int errbuf_size);
+extern int  p7_cuda_NhmmerF1GateResidentGather(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                const P7_BG *bg, const uint8_t *d_dsq_base,
+                                                const int *h_src1_offsets, const int *h_src1_lengths,
+                                                const int *h_src2_offsets, const int *h_lengths, int nseq,
+                                                int do_biasfilter, int B1,
+                                                double ev_mu, double ev_lambda, double F1,
+                                                int *survivor_idx, int *ret_nsurv,
+                                                float *survivor_filtersc, int *survivor_statuses,
+                                                int warps_per_block,
+                                                char *errbuf, int errbuf_size);
+extern int  p7_cuda_PrepareResidentWindowBatch(P7_CUDA_ENGINE *engine, const uint8_t *d_dsq_base,
+                                                const int *h_src1_offsets, const int *h_src1_lengths,
+                                                const int *h_src2_offsets, const int *h_lengths,
+                                                int nseq, const void *batch_owner,
+                                                char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, int64_t dsq_size,
                                            const int64_t *offsets, const int32_t *lengths, int64_t nseq,
@@ -273,6 +317,8 @@ typedef struct {
   double   kernel_seconds;
 } P7_CUDA_SSV_LT_STATS;
 
+/* Returned SSV/Viterbi long-target window arrays are engine-owned scratch
+ * valid until the next corresponding call or engine destruction. */
 extern int  p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                   const ESL_DSQ *dsq, int L,
                                   const uint8_t *ssv_scores_host, int Kp,
@@ -281,6 +327,16 @@ extern int  p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
                                   P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
                                   P7_CUDA_SSV_LT_STATS *stats,
                                   char *errbuf, int errbuf_size);
+
+extern int  p7_cuda_SSVLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                         const P7_SCOREDATA *scoredata,
+                                         const ESL_DSQ *dsq, int L,
+                                         const uint8_t *ssv_scores_host, int Kp,
+                                         uint8_t sc_thresh, float scale_b,
+                                         int max_length, int chunk_size, int overlap,
+                                         P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                                         P7_CUDA_SSV_LT_STATS *stats,
+                                         char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                           const uint8_t *d_nucdb_data, int nchunks,
@@ -291,6 +347,17 @@ extern int  p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_
                                           P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
                                           P7_CUDA_SSV_LT_STATS *stats,
                                           char *errbuf, int errbuf_size);
+
+extern int  p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                 const P7_SCOREDATA *scoredata,
+                                                 const uint8_t *d_nucdb_data, int nchunks,
+                                                 const int *h_offsets, const int *h_lengths,
+                                                 const uint8_t *ssv_scores_host, int Kp,
+                                                 uint8_t sc_thresh, float scale_b,
+                                                 int max_length, int step, int target_len,
+                                                 P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                                                 P7_CUDA_SSV_LT_STATS *stats,
+                                                 char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_engine_UploadNucdb(P7_CUDA_ENGINE *engine, const uint8_t *data, int64_t size,
                                        char *errbuf, int errbuf_size);
@@ -327,6 +394,34 @@ extern int  p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVP
                                       P7_CUDA_VIT_LT_WINDOW **ret_windows, int *ret_nwindows,
                                       P7_CUDA_VIT_LT_STATS *stats,
                                       char *errbuf, int errbuf_size);
+extern int  p7_cuda_ViterbiLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                             const P7_SCOREDATA *scoredata,
+                                             const ESL_DSQ *dsq, int L,
+                                             const P7_HMM_WINDOW *windows, int nwindows,
+                                             const float *bias_scores, int do_biasfilter,
+                                             int B2, float F2, float vmu, float vlambda,
+                                             float scale_w, float xw_e_move, float nj,
+                                             float base_w, int max_length,
+                                             P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                                             P7_CUDA_VIT_LT_STATS *stats,
+                                             char *errbuf, int errbuf_size);
+extern int  p7_cuda_ViterbiLongtargetFromF1(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                            int nwindows,
+                                            int B2, float F2, float vmu, float vlambda,
+                                            float scale_w, float xw_e_move, float nj,
+                                            float base_w, int max_length,
+                                            P7_CUDA_VIT_LT_WINDOW **ret_windows, int *ret_nwindows,
+                                            P7_CUDA_VIT_LT_STATS *stats,
+                                            char *errbuf, int errbuf_size);
+extern int  p7_cuda_ViterbiLongtargetFromF1Windows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                                   const P7_SCOREDATA *scoredata,
+                                                   const P7_HMM_WINDOW *windows, int nwindows,
+                                                   int B2, float F2, float vmu, float vlambda,
+                                                   float scale_w, float xw_e_move, float nj,
+                                                   float base_w, int max_length,
+                                                   P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
+                                                   P7_CUDA_VIT_LT_STATS *stats,
+                                                   char *errbuf, int errbuf_size);
 extern int  p7_cuda_ViterbiLongtarget_GetThresholds(P7_CUDA_ENGINE *engine,
                                                      int16_t *h_thresholds, int nwindows);
 

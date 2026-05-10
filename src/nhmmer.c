@@ -1199,7 +1199,21 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.h_ssv_status   = NULL;
         gpu_info.h_null_scores  = NULL;
         gpu_info.h_bias_scores  = NULL;
+        gpu_info.h_f1_survivor_idx  = NULL;
+        gpu_info.h_f1_survivor_bias = NULL;
+        gpu_info.h_parser_seqidx    = NULL;
+        gpu_info.h_parser_x_offsets = NULL;
+        gpu_info.h_parser_surv_src_idx = NULL;
+        gpu_info.h_nucdb_chunk_offsets = NULL;
+        gpu_info.h_nucdb_chunk_lengths = NULL;
+        gpu_info.h_nucdb_window_offsets = NULL;
+        gpu_info.h_nucdb_window_lengths = NULL;
+        gpu_info.h_nucdb_window_src1_lengths = NULL;
+        gpu_info.h_nucdb_window_src2_offsets = NULL;
         gpu_info.h_filter_alloc = 0;
+        gpu_info.h_parser_alloc = 0;
+        gpu_info.h_nucdb_chunk_alloc = 0;
+        gpu_info.h_nucdb_window_alloc = 0;
         gpu_info.n_vit_lt_windows_in  = 0;
         gpu_info.n_vit_lt_windows_out = 0;
         gpu_info.n_post_vit_windows   = 0;
@@ -1220,6 +1234,12 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.ssv_kernel_seconds = 0;
         gpu_info.t_merge         = 0;
         gpu_info.t_batch_filter  = 0;
+	        gpu_info.t_batch_h2d     = 0;
+	        gpu_info.t_batch_kernel  = 0;
+	        gpu_info.t_batch_f1_gate = 0;
+	        gpu_info.t_batch_compact  = 0;
+	        gpu_info.t_batch_d2h     = 0;
+        gpu_info.batch_packed_bytes = 0;
         gpu_info.t_vit_lt        = 0;
         gpu_info.t_vit_bias      = 0;
         gpu_info.t_vit_cuda      = 0;
@@ -1227,6 +1247,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_vit_extend    = 0;
         gpu_info.t_vit_pack      = 0;
         gpu_info.t_vit_h2d       = 0;
+        gpu_info.t_vit_f1_resident = 0;
         gpu_info.t_vit_thresh    = 0;
         gpu_info.t_vit_kernel    = 0;
         gpu_info.t_vit_d2h       = 0;
@@ -1246,6 +1267,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.vit_device_active_seconds = 0;
         gpu_info.t_fwd_prefilter = 0;
         gpu_info.t_gpu_fb_parser = 0;
+        gpu_info.t_gpu_fb_pack   = 0;
+        gpu_info.t_gpu_fb_h2d    = 0;
+        gpu_info.t_gpu_fb_kernel = 0;
+        gpu_info.t_gpu_fb_d2h    = 0;
+        gpu_info.gpu_fb_packed_bytes = 0;
         gpu_info.t_cpu_workers   = 0;
         gpu_info.t_nucdb_open    = gpu_t_nucdb_open;
         gpu_info.t_nucdb_upload  = gpu_t_nucdb_upload;
@@ -1295,6 +1321,17 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         free(gpu_info.h_ssv_status);
         free(gpu_info.h_null_scores);
         free(gpu_info.h_bias_scores);
+        free(gpu_info.h_f1_survivor_idx);
+        free(gpu_info.h_f1_survivor_bias);
+        free(gpu_info.h_parser_seqidx);
+        free(gpu_info.h_parser_x_offsets);
+        free(gpu_info.h_parser_surv_src_idx);
+        free(gpu_info.h_nucdb_chunk_offsets);
+        free(gpu_info.h_nucdb_chunk_lengths);
+        free(gpu_info.h_nucdb_window_offsets);
+        free(gpu_info.h_nucdb_window_lengths);
+        free(gpu_info.h_nucdb_window_src1_lengths);
+        free(gpu_info.h_nucdb_window_src2_offsets);
         gpu_info_valid = TRUE;
       }
       else
@@ -1487,15 +1524,21 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	                      gpu_info.t_ssv > 0.0 ? 100.0 * gpu_info.ssv_kernel_seconds / gpu_info.t_ssv : 0.0,
 	                      gpu_info.ssv_kernel_seconds);
 	            }
-	            fprintf(stderr, "  extend+merge:      %7.3fs  (%4.1f%%)\n", gpu_info.t_merge, 100.0*gpu_info.t_merge/t_search);
+		            fprintf(stderr, "  extend+merge:      %7.3fs  (%4.1f%%)\n", gpu_info.t_merge, 100.0*gpu_info.t_merge/t_search);
 	            fprintf(stderr, "  batch filter:      %7.3fs  (%4.1f%%)\n", gpu_info.t_batch_filter, 100.0*gpu_info.t_batch_filter/t_search);
-	            fprintf(stderr, "  scanning Viterbi:  %7.3fs  (%4.1f%%)\n", gpu_info.t_vit_lt, 100.0*gpu_info.t_vit_lt/t_search);
+	            fprintf(stderr, "    batch H2D:       %7.3fs  (%" PRId64 " bytes)\n", gpu_info.t_batch_h2d, gpu_info.batch_packed_bytes);
+	            fprintf(stderr, "    batch kernels:   %7.3fs\n", gpu_info.t_batch_kernel);
+	            fprintf(stderr, "      f1 gate:       %7.3fs\n", gpu_info.t_batch_f1_gate);
+	            fprintf(stderr, "      f1 compact:    %7.3fs\n", gpu_info.t_batch_compact);
+	            fprintf(stderr, "    batch D2H:       %7.3fs\n", gpu_info.t_batch_d2h);
+		            fprintf(stderr, "  scanning Viterbi:  %7.3fs  (%4.1f%%)\n", gpu_info.t_vit_lt, 100.0*gpu_info.t_vit_lt/t_search);
 	            if (gpu_info.t_vit_lt > 0.0) {
 	              fprintf(stderr, "    vit bias pass:   %7.3fs\n", gpu_info.t_vit_bias);
 	              fprintf(stderr, "    vit CUDA call:   %7.3fs\n", gpu_info.t_vit_cuda);
 	              fprintf(stderr, "      alloc/grow:    %7.3fs\n", gpu_info.t_vit_alloc);
 	              fprintf(stderr, "      host pack:     %7.3fs  (%" PRId64 " bytes)\n", gpu_info.t_vit_pack, gpu_info.vit_packed_bytes);
 	              fprintf(stderr, "      H2D:           %7.3fs\n", gpu_info.t_vit_h2d);
+	              fprintf(stderr, "      F1 resident:   %7.3fs\n", gpu_info.t_vit_f1_resident);
 	              fprintf(stderr, "      threshold ker: %7.3fs\n", gpu_info.t_vit_thresh);
 	              fprintf(stderr, "      scan kernel:   %7.3fs\n", gpu_info.t_vit_kernel);
 	              fprintf(stderr, "      D2H:           %7.3fs\n", gpu_info.t_vit_d2h);
@@ -1518,6 +1561,10 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	            }
 	            fprintf(stderr, "  Forward prefilter: %7.3fs  (%4.1f%%)\n", gpu_info.t_fwd_prefilter, 100.0*gpu_info.t_fwd_prefilter/t_search);
 	            fprintf(stderr, "  GPU FB parser:     %7.3fs  (%4.1f%%)\n", gpu_info.t_gpu_fb_parser, 100.0*gpu_info.t_gpu_fb_parser/t_search);
+	            fprintf(stderr, "    parser host prep:%7.3fs\n", gpu_info.t_gpu_fb_pack);
+	            fprintf(stderr, "    parser H2D:      %7.3fs  (%" PRId64 " bytes)\n", gpu_info.t_gpu_fb_h2d, gpu_info.gpu_fb_packed_bytes);
+	            fprintf(stderr, "    parser kernels:  %7.3fs\n", gpu_info.t_gpu_fb_kernel);
+	            fprintf(stderr, "    parser D2H:      %7.3fs\n", gpu_info.t_gpu_fb_d2h);
 	            fprintf(stderr, "  CPU workers:       %7.3fs  (%4.1f%%)\n", gpu_info.t_cpu_workers, 100.0*gpu_info.t_cpu_workers/t_search);
 	            fprintf(stderr, "    null scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_null, 100.0*gpu_info.t_worker_null/t_search);
 	            fprintf(stderr, "    bias scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bias, 100.0*gpu_info.t_worker_bias/t_search);

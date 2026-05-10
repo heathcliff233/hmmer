@@ -38,6 +38,8 @@ p7_cuda_engine_Create(int device_id, P7_CUDA_ENGINE **ret_engine, char *errbuf, 
   if ((status = cuda_status(cudaEventCreate(&engine->evt_h2d1), errbuf, errbuf_size, "cudaEventCreate(evt_h2d1)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaEventCreate(&engine->evt_k0),   errbuf, errbuf_size, "cudaEventCreate(evt_k0)"))   != eslOK) goto ERROR;
   if ((status = cuda_status(cudaEventCreate(&engine->evt_k1),   errbuf, errbuf_size, "cudaEventCreate(evt_k1)"))   != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaEventCreate(&engine->evt_k2),   errbuf, errbuf_size, "cudaEventCreate(evt_k2)"))   != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaEventCreate(&engine->evt_k3),   errbuf, errbuf_size, "cudaEventCreate(evt_k3)"))   != eslOK) goto ERROR;
   if ((status = cuda_status(cudaEventCreate(&engine->evt_d2h0), errbuf, errbuf_size, "cudaEventCreate(evt_d2h0)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaEventCreate(&engine->evt_d2h1), errbuf, errbuf_size, "cudaEventCreate(evt_d2h1)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaStreamCreateWithFlags(&engine->vlt_stream_copy,   cudaStreamNonBlocking), errbuf, errbuf_size, "cudaStreamCreate(vlt copy)"))   != eslOK) goto ERROR;
@@ -62,6 +64,8 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->evt_h2d1) cudaEventDestroy(engine->evt_h2d1);
   if (engine->evt_k0)   cudaEventDestroy(engine->evt_k0);
   if (engine->evt_k1)   cudaEventDestroy(engine->evt_k1);
+  if (engine->evt_k2)   cudaEventDestroy(engine->evt_k2);
+  if (engine->evt_k3)   cudaEventDestroy(engine->evt_k3);
   if (engine->evt_d2h0) cudaEventDestroy(engine->evt_d2h0);
   if (engine->evt_d2h1) cudaEventDestroy(engine->evt_d2h1);
   if (engine->vlt_stream_copy)   cudaStreamDestroy(engine->vlt_stream_copy);
@@ -71,6 +75,14 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_offsets)  cudaFree(engine->d_offsets);
   if (engine->d_lengths)  cudaFree(engine->d_lengths);
   if (engine->d_tjb_by_seq) cudaFree(engine->d_tjb_by_seq);
+  if (engine->d_gather_src1_offsets) cudaFree(engine->d_gather_src1_offsets);
+  if (engine->d_gather_src1_lengths) cudaFree(engine->d_gather_src1_lengths);
+  if (engine->d_gather_src2_offsets) cudaFree(engine->d_gather_src2_offsets);
+  if (engine->d_gather_lengths)      cudaFree(engine->d_gather_lengths);
+  if (engine->d_gather_dst_offsets)  cudaFree(engine->d_gather_dst_offsets);
+  free(engine->h_meta_offsets);
+  free(engine->h_meta_lengths);
+  free(engine->h_meta_tjb_by_seq);
   if (engine->d_raw)      cudaFree(engine->d_raw);
   if (engine->d_overflow) cudaFree(engine->d_overflow);
   if (engine->d_null_scores)    cudaFree(engine->d_null_scores);
@@ -98,12 +110,14 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_parser_x_offsets) cudaFree(engine->d_parser_x_offsets);
   if (engine->d_parser_surv_idx) cudaFree(engine->d_parser_surv_idx);
   if (engine->d_parser_surv_x_offsets) cudaFree(engine->d_parser_surv_x_offsets);
+  if (engine->d_parser_surv_total) cudaFree(engine->d_parser_surv_total);
   if (engine->d_parser_xf_compact) cudaFree(engine->d_parser_xf_compact);
   if (engine->d_f1_survivor_idx) cudaFree(engine->d_f1_survivor_idx);
   if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
   if (engine->d_f1_survivor_usc) cudaFree(engine->d_f1_survivor_usc);
   if (engine->d_f1_survivor_filtersc) cudaFree(engine->d_f1_survivor_filtersc);
   if (engine->d_f1_survivor_status) cudaFree(engine->d_f1_survivor_status);
+  if (engine->d_f1_pass_mask) cudaFree(engine->d_f1_pass_mask);
   if (engine->d_bias_surv_filtersc) cudaFree(engine->d_bias_surv_filtersc);
   if (engine->d_resident_dsq)     cudaFree(engine->d_resident_dsq);
   if (engine->d_resident_offsets) cudaFree(engine->d_resident_offsets);
@@ -115,6 +129,11 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_lt_ssv_scores) cudaFree(engine->d_lt_ssv_scores);
   if (engine->d_lt_windows)    cudaFree(engine->d_lt_windows);
   if (engine->d_lt_win_count)  cudaFree(engine->d_lt_win_count);
+  if (engine->d_lt_windows_compact) cudaFree(engine->d_lt_windows_compact);
+  free(engine->h_lt_windows_compact);
+  if (engine->d_lt_hmm_windows) cudaFree(engine->d_lt_hmm_windows);
+  free(engine->h_lt_hmm_windows);
+  if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
   if (engine->d_vlt_dsq)       cudaFree(engine->d_vlt_dsq);
   if (engine->h_vlt_dsq)       cudaFreeHost(engine->h_vlt_dsq);
   if (engine->d_vlt_offsets)   cudaFree(engine->d_vlt_offsets);
@@ -122,7 +141,15 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_vlt_thresholds) cudaFree(engine->d_vlt_thresholds);
   if (engine->d_vlt_bias)      cudaFree(engine->d_vlt_bias);
   if (engine->d_vlt_windows)   cudaFree(engine->d_vlt_windows);
+  if (engine->d_vlt_windows_compact) cudaFree(engine->d_vlt_windows_compact);
+  free(engine->h_vlt_windows);
+  if (engine->d_vlt_input_windows) cudaFree(engine->d_vlt_input_windows);
+  if (engine->d_vlt_hmm_tmp)    cudaFree(engine->d_vlt_hmm_tmp);
+  if (engine->d_vlt_hmm_windows) cudaFree(engine->d_vlt_hmm_windows);
+  free(engine->h_vlt_hmm_windows);
   if (engine->d_vlt_win_count) cudaFree(engine->d_vlt_win_count);
+  if (engine->d_vlt_win_offsets) cudaFree(engine->d_vlt_win_offsets);
+  if (engine->d_vlt_hmm_count) cudaFree(engine->d_vlt_hmm_count);
   if (engine->d_resident_nucdb) cudaFree(engine->d_resident_nucdb);
   /* Domain rescore grow-only buffers */
   for (int i = 0; i < 4; i++) {
@@ -157,6 +184,7 @@ p7_cuda_engine_Reset(P7_CUDA_ENGINE *engine)
   engine->batch_owner = NULL;
   engine->batch_nseq  = 0;
   engine->batch_total = 0;
+  engine->d_batch_dsq = NULL;
   engine->bias_params_uploaded = 0;
   memset(&engine->stats, 0, sizeof(engine->stats));
 }
@@ -260,12 +288,50 @@ p7_cuda_msvprofile_Destroy(P7_CUDA_MSVPROFILE *cuom)
   if (!cuom) return;
   if (cuom->d_rbv) cudaFree(cuom->d_rbv);
   if (cuom->d_rbv_lin) cudaFree(cuom->d_rbv_lin);
+  if (cuom->d_prefix_lengths) cudaFree(cuom->d_prefix_lengths);
+  if (cuom->d_suffix_lengths) cudaFree(cuom->d_suffix_lengths);
   if (cuom->d_rfv) cudaFree(cuom->d_rfv);
   if (cuom->d_tfv) cudaFree(cuom->d_tfv);
   if (cuom->d_rwv) cudaFree(cuom->d_rwv);
   if (cuom->d_twv) cudaFree(cuom->d_twv);
   free(cuom->h_tjb_by_len);
   free(cuom);
+}
+
+int
+cuda_msvprofile_UploadWindowLengths(P7_CUDA_MSVPROFILE *cuom, const P7_SCOREDATA *data,
+                                    char *errbuf, int errbuf_size)
+{
+  int status;
+  size_t nbytes;
+
+  if (!cuom || !data || !data->prefix_lengths || !data->suffix_lengths) return eslEINVAL;
+  if (data->M != cuom->M) return eslEINVAL;
+  if (cuom->window_lengths_uploaded && cuom->window_lengths_alloc >= cuom->M + 1)
+    return eslOK;
+
+  nbytes = sizeof(float) * (size_t)(cuom->M + 1);
+  if (cuom->window_lengths_alloc < cuom->M + 1) {
+    if (cuom->d_prefix_lengths) cudaFree(cuom->d_prefix_lengths);
+    if (cuom->d_suffix_lengths) cudaFree(cuom->d_suffix_lengths);
+    cuom->d_prefix_lengths = NULL;
+    cuom->d_suffix_lengths = NULL;
+    cuom->window_lengths_alloc = 0;
+    cuom->window_lengths_uploaded = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&cuom->d_prefix_lengths, nbytes),
+                              errbuf, errbuf_size, "cudaMalloc(prefix lengths)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **)&cuom->d_suffix_lengths, nbytes),
+                              errbuf, errbuf_size, "cudaMalloc(suffix lengths)")) != eslOK) return status;
+    cuom->window_lengths_alloc = cuom->M + 1;
+  }
+  if ((status = cuda_status(cudaMemcpy(cuom->d_prefix_lengths, data->prefix_lengths, nbytes,
+                                       cudaMemcpyHostToDevice),
+                            errbuf, errbuf_size, "cudaMemcpy(prefix lengths)")) != eslOK) return status;
+  if ((status = cuda_status(cudaMemcpy(cuom->d_suffix_lengths, data->suffix_lengths, nbytes,
+                                       cudaMemcpyHostToDevice),
+                            errbuf, errbuf_size, "cudaMemcpy(suffix lengths)")) != eslOK) return status;
+  cuom->window_lengths_uploaded = 1;
+  return eslOK;
 }
 
 extern "C" int
@@ -525,8 +591,10 @@ extern "C" void
 p7_cuda_engine_ReleaseNucdb(P7_CUDA_ENGINE *engine)
 {
   if (!engine) return;
+  uint8_t *old_nucdb = engine->d_resident_nucdb;
   if (engine->d_resident_nucdb) { cudaFree(engine->d_resident_nucdb); engine->d_resident_nucdb = NULL; }
   engine->resident_nucdb_size = 0;
+  if (engine->d_batch_dsq == old_nucdb) engine->d_batch_dsq = NULL;
 }
 
 extern "C" const uint8_t *

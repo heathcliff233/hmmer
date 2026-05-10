@@ -1511,28 +1511,32 @@ postFwd_LongTarget_Core(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS
 
   int F3_L = ESL_MIN( window_len,  pli->B3);
 
-  p7_bg_SetLength(bg, window_len);
-  {
-    double _t0 = p7_pipeline_WallTime();
-    p7_bg_NullOne  (bg, subseq, window_len, &nullsc);
-    pli->time_null += p7_pipeline_WallTime() - _t0;
-  }
-  if (pli->do_biasfilter) {
-    double _t0 = p7_pipeline_WallTime();
-    p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
-    pli->time_bias += p7_pipeline_WallTime() - _t0;
-    bias_filtersc -= nullsc;
-  } else {
-    bias_filtersc = 0;
+  if (enforce_f3) {
+    p7_bg_SetLength(bg, window_len);
+    {
+      double _t0 = p7_pipeline_WallTime();
+      p7_bg_NullOne  (bg, subseq, window_len, &nullsc);
+      pli->time_null += p7_pipeline_WallTime() - _t0;
+    }
+    if (pli->do_biasfilter) {
+      double _t0 = p7_pipeline_WallTime();
+      p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
+      pli->time_bias += p7_pipeline_WallTime() - _t0;
+      bias_filtersc -= nullsc;
+    } else {
+      bias_filtersc = 0;
+    }
   }
 
   p7_oprofile_ReconfigRestLength(om, window_len);
 
   /* Forward already computed by GPU — use provided fwdsc and oxf->xmx */
-  filtersc =  nullsc + (bias_filtersc * ( F3_L>window_len ? 1.0 : (float)F3_L/window_len) );
-  seq_score = (fwdsc - filtersc) / eslCONST_LOG2;
-  P = esl_exp_surv(seq_score,  om->evparam[p7_FTAU],  om->evparam[p7_FLAMBDA]);
-  if (enforce_f3 && P > pli->F3 ) return eslOK;
+  if (enforce_f3) {
+    filtersc =  nullsc + (bias_filtersc * ( F3_L>window_len ? 1.0 : (float)F3_L/window_len) );
+    seq_score = (fwdsc - filtersc) / eslCONST_LOG2;
+    P = esl_exp_surv(seq_score,  om->evparam[p7_FTAU],  om->evparam[p7_FLAMBDA]);
+    if (P > pli->F3 ) return eslOK;
+  }
 
   {
     int eff_overlap = ESL_MIN(window_len, ESL_MAX(0, *overlap));
@@ -1697,7 +1701,19 @@ p7_pli_postFwdBwd_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TO
 {
   return postFwd_LongTarget_Core(pli, om, bg, hitlist, data, seqidx, window_start, window_len,
                                  subseq, seq_start, seq_name, seq_source, seq_acc, seq_desc,
-                                 seq_len, complementarity, overlap, pli_tmp, FALSE, TRUE, fwdsc);
+	                                 seq_len, complementarity, overlap, pli_tmp, FALSE, TRUE, fwdsc);
+}
+
+int
+p7_pli_postFwdBwdNoF3_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS *hitlist, const P7_SCOREDATA *data,
+    int64_t seqidx, int window_start, int window_len, ESL_DSQ *subseq,
+    int64_t seq_start, char *seq_name, char *seq_source, char* seq_acc, char* seq_desc, int seq_len,
+    int complementarity, int *overlap, P7_PIPELINE_LONGTARGET_OBJS *pli_tmp,
+    float fwdsc)
+{
+  return postFwd_LongTarget_Core(pli, om, bg, hitlist, data, seqidx, window_start, window_len,
+                                 subseq, seq_start, seq_name, seq_source, seq_acc, seq_desc,
+                                 seq_len, complementarity, overlap, pli_tmp, FALSE, FALSE, fwdsc);
 }
 
 
