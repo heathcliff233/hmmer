@@ -121,11 +121,11 @@ Current combined all-sample result:
 
 | Path | Time | Hits |
 |------|:---:|:---:|
-| CPU-1 | 7.859s | 1476 |
-| CPU-4 | 2.480s | 1476 |
-| GPU-4 FASTA | 2.356s | 1476 |
-| GPU-4 nucdb, no overlap | 1.883s | 1476 |
-| GPU-4 overlap-nucdb | 1.709s | 1476 |
+| CPU-1 | 8.209s | 1476 |
+| CPU-4 | 2.373s | 1476 |
+| GPU-4 FASTA | 2.159s | 1476 |
+| GPU-4 nucdb, no overlap | 1.864s | 1476 |
+| GPU-4 overlap-nucdb | 1.684s | 1476 |
 
 Current parity script result:
 
@@ -187,24 +187,24 @@ Current fast `.nucdb` GPU breakdown for query_medium:
 
 | Bucket | Time |
 |--------|:---:|
-| SSV longtarget | 0.226s |
-| extend+merge | 0.004s |
-| batch filter | 0.064s |
-| scanning Viterbi | 0.133s |
-| Forward prefilter | 0.041s |
-| GPU FB parser | 0.013s |
-| CPU workers | 0.783s |
-| worker domain workflow | 0.761s |
+| SSV longtarget | 0.109s |
+| extend+merge | 0.002s |
+| batch filter | 0.054s |
+| scanning Viterbi | 0.132s |
+| Forward prefilter | 0.025s |
+| GPU FB parser | 0.010s |
+| CPU workers | 0.643s |
+| worker domain workflow | 0.633s |
 | worker CPU Backward | 0.000s |
 
 Current query_medium launch/occupancy instrumentation on fast overlap `.nucdb`:
 
 | Stage | Launch shape | Occupancy | Grid coverage |
 |-------|--------------|:---:|:---:|
-| SSV longtarget | 2 launches, last grid=800, block=32, smem=1002B | 50.0% theoretical, 24 active warps/SM of 48 | 6.25x on 128 SMs |
-| Scanning Viterbi | 2 launches, last grid=1097, block=128, smem=24192B | 33.3% theoretical, 16 active warps/SM of 48 | 8.51x on 128 SMs |
+| SSV longtarget | 2 launches, last grid=800, block=32, smem=1002B | 50.0% theoretical, 24 active warps/SM of 48; 97.5% device-active in SSV wall | 6.25x on 128 SMs |
+| Scanning Viterbi | 2 launches, last grid=1097, block=128, smem=24192B | 33.3% theoretical, 16 active warps/SM of 48; 94.6% device-active in Viterbi CUDA call | 8.51x on 128 SMs |
 
-The occupancy data explains why "only one CUDA engine setup" is not the main remaining limiter inside search. Both long-target GPU kernels have enough total blocks to cover all SMs, but SSV is a one-warp-per-block kernel and scanning Viterbi is shared-memory limited. The larger remaining query_medium bucket is still CPU domain workflow after GPU parser handoff, with small outside-search costs from `.nucdb` reconstruction and CUDA setup.
+The occupancy and utilization data explains why "only one CUDA engine setup" is not the main remaining limiter inside search. Both long-target GPU kernels have enough total blocks to cover all SMs and their GPU processing buckets are mostly device-active, but SSV is a one-warp-per-block kernel and scanning Viterbi is shared-memory limited. The Viterbi host wrapper now keeps its bias-score device buffer grow-only on the CUDA engine, avoiding per-call `cudaMalloc`/`cudaFree`. The larger remaining query_medium bucket is still CPU domain workflow after GPU parser handoff, with small outside-search costs from `.nucdb` reconstruction and CUDA setup.
 
 Focused repeats show run-to-run variance in CUDA engine setup and scanning Viterbi. After dynamic survivor-window scheduling, GPU CPU-domain workflow is no longer inflated relative to CPU-16 for query_medium: CPU-16 wall-stage trace measured domain at `0.250s`; GPU-16 focused repeats measured worker domain at `0.239-0.258s` and GPU loop wall at `0.617-0.814s` depending mostly on CUDA Viterbi allocation variance.
 

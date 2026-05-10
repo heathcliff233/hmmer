@@ -112,6 +112,7 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_vlt_offsets)   cudaFree(engine->d_vlt_offsets);
   if (engine->d_vlt_lengths)   cudaFree(engine->d_vlt_lengths);
   if (engine->d_vlt_thresholds) cudaFree(engine->d_vlt_thresholds);
+  if (engine->d_vlt_bias)      cudaFree(engine->d_vlt_bias);
   if (engine->d_vlt_windows)   cudaFree(engine->d_vlt_windows);
   if (engine->d_vlt_win_count) cudaFree(engine->d_vlt_win_count);
   if (engine->d_resident_nucdb) cudaFree(engine->d_resident_nucdb);

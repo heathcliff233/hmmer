@@ -1217,6 +1217,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.ssv_chunk_size = 0;
         gpu_info.ssv_theoretical_occupancy = 0;
         gpu_info.ssv_grid_sm_coverage = 0;
+        gpu_info.ssv_kernel_seconds = 0;
         gpu_info.t_merge         = 0;
         gpu_info.t_batch_filter  = 0;
         gpu_info.t_vit_lt        = 0;
@@ -1242,6 +1243,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.vit_sm_count = 0;
         gpu_info.vit_theoretical_occupancy = 0;
         gpu_info.vit_grid_sm_coverage = 0;
+        gpu_info.vit_device_active_seconds = 0;
         gpu_info.t_fwd_prefilter = 0;
         gpu_info.t_gpu_fb_parser = 0;
         gpu_info.t_cpu_workers   = 0;
@@ -1481,6 +1483,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	                      gpu_info.ssv_active_warps_per_sm, gpu_info.ssv_max_warps_per_sm,
 	                      gpu_info.ssv_grid_sm_coverage / (double)gpu_info.ssv_launches,
 	                      gpu_info.ssv_sm_count);
+	              fprintf(stderr, "    utilization:     %.1f%% device-active in SSV wall (%.3fs kernel events)\n",
+	                      gpu_info.t_ssv > 0.0 ? 100.0 * gpu_info.ssv_kernel_seconds / gpu_info.t_ssv : 0.0,
+	                      gpu_info.ssv_kernel_seconds);
 	            }
 	            fprintf(stderr, "  extend+merge:      %7.3fs  (%4.1f%%)\n", gpu_info.t_merge, 100.0*gpu_info.t_merge/t_search);
 	            fprintf(stderr, "  batch filter:      %7.3fs  (%4.1f%%)\n", gpu_info.t_batch_filter, 100.0*gpu_info.t_batch_filter/t_search);
@@ -1504,6 +1509,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	                        gpu_info.vit_active_warps_per_sm, gpu_info.vit_max_warps_per_sm,
 	                        gpu_info.vit_grid_sm_coverage / (double)gpu_info.vit_launches,
 	                        gpu_info.vit_sm_count);
+	                fprintf(stderr, "      utilization:   %.1f%% device-active in CUDA call (%.3fs kernels)\n",
+	                        gpu_info.t_vit_cuda > 0.0 ? 100.0 * gpu_info.vit_device_active_seconds / gpu_info.t_vit_cuda : 0.0,
+	                        gpu_info.vit_device_active_seconds);
 	              }
 	              fprintf(stderr, "    vit seed sort:   %7.3fs\n", gpu_info.t_vit_sort);
 	              fprintf(stderr, "    vit extend:      %7.3fs\n", gpu_info.t_vit_extend);

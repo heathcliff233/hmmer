@@ -70,6 +70,7 @@ typedef struct {
   int               ssv_chunk_size;
   double            ssv_theoretical_occupancy;
   double            ssv_grid_sm_coverage;
+  double            ssv_kernel_seconds;
   double            t_merge;         /* window extend + merge */
   double            t_batch_filter;  /* GPU batch SSV/bias/F1 filter */
   double            t_vit_lt;        /* GPU scanning Viterbi longtarget */
@@ -95,6 +96,7 @@ typedef struct {
   int               vit_sm_count;
   double            vit_theoretical_occupancy;
   double            vit_grid_sm_coverage;
+  double            vit_device_active_seconds;
   double            t_fwd_prefilter; /* GPU Forward pre-filter */
   double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
   double            t_cpu_workers;   /* CPU domaindef + hit reporting (wallclock around threaded section) */

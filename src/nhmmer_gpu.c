@@ -170,6 +170,7 @@ nhmmer_gpu_record_ssv_launch(NHMMER_GPU_INFO *info, const P7_CUDA_SSV_LT_STATS *
   info->ssv_chunk_size          = stats->chunk_size;
   info->ssv_theoretical_occupancy += stats->theoretical_occupancy;
   info->ssv_grid_sm_coverage      += stats->grid_sm_coverage;
+  info->ssv_kernel_seconds        += stats->kernel_seconds;
 }
 
 static void
@@ -187,6 +188,7 @@ nhmmer_gpu_record_vit_launch(NHMMER_GPU_INFO *info, const P7_CUDA_VIT_LT_STATS *
   info->vit_sm_count            = stats->sm_count;
   info->vit_theoretical_occupancy += stats->theoretical_occupancy;
   info->vit_grid_sm_coverage      += stats->grid_sm_coverage;
+  info->vit_device_active_seconds += stats->device_active_seconds;
 }
 
 /* Ensure persistent scratch arrays in info are large enough for N elements. */

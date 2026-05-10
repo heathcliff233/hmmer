@@ -104,6 +104,8 @@ struct p7_cuda_msv_engine_s {
   int                 vlt_meta_alloc;
   int16_t            *d_vlt_thresholds;
   int                 vlt_thresh_alloc;
+  float              *d_vlt_bias;
+  int                 vlt_bias_alloc;
   P7_CUDA_VIT_LT_WINDOW *d_vlt_windows;
   int                *d_vlt_win_count;
   int                 vlt_win_alloc;

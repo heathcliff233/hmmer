@@ -374,6 +374,7 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   {
     size_t shmem = (size_t)M * 2;
     ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, shmem);
+    cudaEventRecord(engine->evt_k0);
     cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
       engine->d_lt_dsq, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
       cuom->d_rbv, engine->d_lt_ssv_scores,
@@ -382,8 +383,14 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,
       engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
+    cudaEventRecord(engine->evt_k1);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_ssv_longtarget sync")) != eslOK) goto ERROR;
+    if (stats) {
+      float ms = 0.0f;
+      if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
+        stats->kernel_seconds = (double)ms * 1e-3;
+    }
   }
 
   /* Download results */
@@ -481,6 +488,7 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   {
     size_t shmem = (size_t)M * 2;
     ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, shmem);
+    cudaEventRecord(engine->evt_k0);
     cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
       d_nucdb_data, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
       cuom->d_rbv, engine->d_lt_ssv_scores,
@@ -489,8 +497,14 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,
       engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
+    cudaEventRecord(engine->evt_k1);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
     if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_ssv_longtarget sync")) != eslOK) goto ERROR;
+    if (stats) {
+      float ms = 0.0f;
+      if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
+        stats->kernel_seconds = (double)ms * 1e-3;
+    }
   }
 
   /* Download results */

@@ -217,6 +217,7 @@ typedef struct {
   int      sm_count;
   double   theoretical_occupancy;
   double   grid_sm_coverage;
+  double   device_active_seconds;
   double   pack_seconds;
   double   h2d_seconds;
   double   threshold_kernel_seconds;
@@ -242,6 +243,7 @@ typedef struct {
   int      chunk_size;
   double   theoretical_occupancy;
   double   grid_sm_coverage;
+  double   kernel_seconds;
 } P7_CUDA_SSV_LT_STATS;
 
 extern int  p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,

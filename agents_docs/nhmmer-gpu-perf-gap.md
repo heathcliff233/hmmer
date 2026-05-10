@@ -28,11 +28,11 @@ Current all-sample result on 2026-05-10:
 
 | Path | Time | Hits |
 |------|:---:|:---:|
-| CPU-1 | 7.859s | 1476 |
-| CPU-4 | 2.480s | 1476 |
-| GPU-4 FASTA | 2.356s | 1476 |
-| GPU-4 no-overlap `.nucdb` | 1.883s | 1476 |
-| GPU-4 overlap `.nucdb` | 1.709s | 1476 |
+| CPU-1 | 8.209s | 1476 |
+| CPU-4 | 2.373s | 1476 |
+| GPU-4 FASTA | 2.159s | 1476 |
+| GPU-4 no-overlap `.nucdb` | 1.864s | 1476 |
+| GPU-4 overlap `.nucdb` | 1.684s | 1476 |
 
 Parity after the update was clean: MADE1 FASTA 465=465, MADE1 `.nucdb` 465=465, query_short FASTA 363=363, query_medium FASTA 648=648.
 
@@ -73,28 +73,30 @@ Current launch occupancy from the instrumented query_medium fast overlap `.nucdb
 
 | Stage | Last launch | Theoretical occupancy | Grid/SM coverage |
 |-------|-------------|:---:|:---:|
-| SSV longtarget | grid=800, block=32, smem=1002B | 50.0% (24 active warps/SM of 48) | 6.25x |
-| Scanning Viterbi | grid=1097, block=128, smem=24192B | 33.3% (16 active warps/SM of 48) | 8.51x |
+| SSV longtarget | grid=800, block=32, smem=1002B | 50.0% (24 active warps/SM of 48), 97.5% device-active in SSV wall | 6.25x |
+| Scanning Viterbi | grid=1097, block=128, smem=24192B | 33.3% (16 active warps/SM of 48), 94.6% device-active in Viterbi CUDA call | 8.51x |
 
-The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times. SSV occupancy is capped by one warp per block, while scanning Viterbi occupancy is capped by dynamic shared memory. Optimization should therefore focus on either improving per-window GPU DP efficiency/allocation reuse or reducing the CPU domain workflow and `.nucdb` reconstruction cost, not on creating more CUDA engines.
+The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times and their measured GPU-processing buckets are mostly device-active. SSV occupancy is capped by one warp per block, while scanning Viterbi occupancy is capped by dynamic shared memory. The current small GPU-side optimization keeps the Viterbi bias-score device buffer persistent on the CUDA engine, removing per-call `cudaMalloc`/`cudaFree`. Further optimization should focus on improving per-window DP efficiency/allocation reuse or reducing CPU domain workflow and `.nucdb` reconstruction cost, not on creating more CUDA engines.
 
 ## Timing Breakdown From Current GPU Run
 
 ```
 GPU pipeline: vit_lt_in=8710 vit_lt_out=707 post_vit=707 post_fwd=341 hits=478
-GPU timing breakdown (1.264s search stages; 1.349s GPU loop wall):
-  SSV longtarget:      0.226s
-  extend+merge:        0.004s
-  batch filter:        0.064s
-  scanning Viterbi:    0.133s
-  Forward prefilter:   0.041s
-  GPU FB parser:       0.013s
-  CPU workers:         0.783s
+GPU timing breakdown (0.975s search stages; 1.024s GPU loop wall):
+  SSV longtarget:      0.109s
+    utilization:       97.5% device-active in SSV wall
+  extend+merge:        0.002s
+  batch filter:        0.054s
+  scanning Viterbi:    0.132s
+    utilization:       94.6% device-active in Viterbi CUDA call
+  Forward prefilter:   0.025s
+  GPU FB parser:       0.010s
+  CPU workers:         0.643s
     null scoring:      0.000s
     bias scoring:      0.002s
     CPU Backward:      0.000s
-    domain workflow:   0.761s
-    hit reporting:     0.002s
+    domain workflow:   0.633s
+    hit reporting:     0.000s
 ```
 
 `hits=478` in the diagnostic line is the internal `P7_TOPHITS` count before final output formatting. The comparable main-output hit-line count was 648 for both CPU-4 and GPU; strict `--tblout` rows were 215 for both with no diff.

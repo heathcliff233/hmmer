@@ -330,6 +330,13 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
     if ((status = cuda_status(cudaMalloc((void **)&engine->d_vlt_thresholds, sizeof(int16_t) * nwindows), errbuf, errbuf_size, "cudaMalloc(vlt thresholds)")) != eslOK) goto ERROR;
     engine->vlt_thresh_alloc = nwindows;
   }
+  if (do_biasfilter && bias_scores && engine->vlt_bias_alloc < nwindows) {
+    if (engine->d_vlt_bias) cudaFree(engine->d_vlt_bias);
+    engine->d_vlt_bias = NULL;
+    engine->vlt_bias_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_vlt_bias, sizeof(float) * nwindows), errbuf, errbuf_size, "cudaMalloc(vlt bias)")) != eslOK) goto ERROR;
+    engine->vlt_bias_alloc = nwindows;
+  }
   if (engine->vlt_win_alloc < max_out) {
     if (engine->d_vlt_windows) cudaFree(engine->d_vlt_windows);
     if (engine->d_vlt_win_count) cudaFree(engine->d_vlt_win_count);
@@ -381,8 +388,8 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
 
     float *d_bias = NULL;
     if (do_biasfilter && bias_scores) {
-      if ((status = cuda_status(cudaMalloc((void **)&d_bias, sizeof(float) * nwindows), errbuf, errbuf_size, "cudaMalloc(vlt bias)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
-      if ((status = cuda_status(cudaMemcpy(d_bias, bias_scores, sizeof(float) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt bias)")) != eslOK) { cudaFree(d_bias); cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
+      d_bias = engine->d_vlt_bias;
+      if ((status = cuda_status(cudaMemcpy(d_bias, bias_scores, sizeof(float) * nwindows, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(vlt bias)")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
     }
     cudaEventRecord(th0, stream_thresh);
     cuda_compute_viterbi_thresholds_kernel<<<(nwindows + 127) / 128, 128, 0, stream_thresh>>>(
@@ -390,7 +397,6 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
         B2, F2, vmu, vlambda, scale_w, xw_e_move, nj, base_w,
         max_length, engine->d_vlt_thresholds);
     cudaEventRecord(th1, stream_thresh);
-    if (d_bias) cudaFree(d_bias);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "vlt threshold kernel launch")) != eslOK) { cudaStreamDestroy(stream_copy); cudaStreamDestroy(stream_thresh); goto ERROR; }
 
     /* Wait for both streams to complete before launching main kernel */
@@ -477,6 +483,7 @@ p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom
   cudaEventSynchronize(d2h1);
   local_stats.d2h_seconds += elapsed_seconds(d2h0, d2h1);
   local_stats.nwindows_out = h_win_count;
+  local_stats.device_active_seconds = local_stats.threshold_kernel_seconds + local_stats.kernel_seconds;
 
   engine->stats.vit_h2d_seconds    += local_stats.h2d_seconds;
   engine->stats.vit_kernel_seconds += local_stats.threshold_kernel_seconds + local_stats.kernel_seconds;
