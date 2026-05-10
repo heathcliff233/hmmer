@@ -1330,6 +1330,7 @@ p7_cuda_ForwardBackwardParserDsqdataSubset(P7_CUDA_ENGINE *engine, const P7_CUDA
 #define FB_RUN_BACKWARD 0x2
 #define FB_SKIP_FWD_D2H 0x4
 #define FB_SKIP_FWD_H2D 0x8
+#define FB_SKIP_RESULT_D2H 0x10
 
 /* Internal core implementation; public wrappers delegate to this.
  * - If run_modes & FB_RUN_FORWARD: run Forward kernel, write xf D2H.
@@ -1363,7 +1364,8 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   double bck_kernel_seconds = 0.0;
   double d2h_seconds = 0.0;
 
-  if (!engine || !cuom || !chu || !seqidx || nidx < 0 || !x_offsets || !scores || !statuses) return eslEINVAL;
+  if (!engine || !cuom || !chu || !seqidx || nidx < 0 || !x_offsets) return eslEINVAL;
+  if (!(run_modes & FB_SKIP_RESULT_D2H) && (!scores || !statuses)) return eslEINVAL;
   if ((run_modes & (FB_RUN_FORWARD | FB_RUN_BACKWARD)) == 0) return eslEINVAL;
   if ((run_modes & FB_RUN_FORWARD) && !(run_modes & FB_SKIP_FWD_D2H) && !xf) return eslEINVAL;
   if ((run_modes & FB_RUN_BACKWARD) && !xb) return eslEINVAL;
@@ -1605,8 +1607,10 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   if (run_modes & FB_RUN_BACKWARD) {
     if ((status = cuda_status(cudaMemcpy(xb, engine->d_parser_xb, xbytes, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser backward xmx batch)")) != eslOK) goto CUDA_ERROR;
   }
-  if ((status = cuda_status(cudaMemcpy(scores, engine->d_parser_scores, sizeof(float) * 2 * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser scores batch)")) != eslOK) goto CUDA_ERROR;
-  if ((status = cuda_status(cudaMemcpy(statuses, engine->d_parser_statuses, sizeof(int) * 2 * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser statuses batch)")) != eslOK) goto CUDA_ERROR;
+  if (!(run_modes & FB_SKIP_RESULT_D2H)) {
+    if ((status = cuda_status(cudaMemcpy(scores, engine->d_parser_scores, sizeof(float) * 2 * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser scores batch)")) != eslOK) goto CUDA_ERROR;
+    if ((status = cuda_status(cudaMemcpy(statuses, engine->d_parser_statuses, sizeof(int) * 2 * nidx, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser statuses batch)")) != eslOK) goto CUDA_ERROR;
+  }
   cudaEventRecord(engine->evt_d2h1);
   cudaEventSynchronize(engine->evt_d2h1);
   d2h_seconds = elapsed_seconds(engine->evt_d2h0, engine->evt_d2h1);
@@ -1682,6 +1686,189 @@ p7_cuda_ForwardParserDsqdataSubsetScoresOnly(P7_CUDA_ENGINE *engine, const P7_CU
                              engine ? engine->d_parser_xf : NULL, NULL, scores, statuses,
                              FB_RUN_FORWARD | FB_SKIP_FWD_D2H,
                              errbuf, errbuf_size);
+}
+
+__global__ static void
+cuda_parser_f3_gate_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
+                           const int *seqidx, int nidx,
+                           const float *pi, const float *t, const float *eo,
+                           const float *scores, const int *statuses,
+                           int do_biasfilter, int B3,
+                           float ev_mu, float ev_lambda, float F3,
+                           int *survivor_idx, float *survivor_fwdsc, int *counter)
+{
+  int bi = blockIdx.x * blockDim.x + threadIdx.x;
+  if (bi >= nidx) return;
+
+  int st = statuses[2 * bi];
+  if (st != eslOK && st != eslERANGE) return;
+
+  int seq = seqidx[bi];
+  int L = lengths[seq];
+  float fwdsc = scores[2 * bi];
+  int pass = FALSE;
+
+  if (st == eslERANGE) {
+    pass = TRUE;
+  } else {
+    float p1 = (float)L / (float)(L + 1);
+    float nullsc = (float)L * logf(p1) + logf(1.0f - p1);
+    float filtersc = nullsc;
+
+    if (do_biasfilter) {
+      const uint8_t *sdsq = dsq + offsets[seq];
+      float bias_filtersc;
+
+      if (L == 0) {
+        bias_filtersc = (float)log((double)pi[2]);
+      } else {
+        float t00 = p1;
+        float t01 = 1.0f / (float)(L + 1);
+        float t10 = t[3];
+        float t11 = t[4];
+        float t02 = t[2];
+        float t12 = t[5];
+        float p0, p1s, n0, n1, maxv;
+        float sc = 0.0f;
+
+        p0  = eo[(int)sdsq[1] * 2 + 0] * pi[0];
+        p1s = eo[(int)sdsq[1] * 2 + 1] * pi[1];
+        maxv = fmaxf(fmaxf(p0, p1s), 0.0f);
+        p0  /= maxv;
+        p1s /= maxv;
+        sc  += (float)log((double)maxv);
+
+        for (int i = 2; i <= L; i++) {
+          uint8_t x = sdsq[i];
+          n0 = (p0 * t00 + p1s * t10) * eo[(int)x * 2 + 0];
+          n1 = (p0 * t01 + p1s * t11) * eo[(int)x * 2 + 1];
+          maxv = fmaxf(fmaxf(n0, n1), 0.0f);
+          p0 = n0 / maxv;
+          p1s = n1 / maxv;
+          sc += (float)log((double)maxv);
+        }
+        sc += (float)log((double)(p0 * t02 + p1s * t12));
+        bias_filtersc = sc + nullsc;
+      }
+
+      int F3_L = (L < B3) ? L : B3;
+      float ratio = (L <= 0 || F3_L > L) ? 1.0f : (float)F3_L / (float)L;
+      filtersc = nullsc + ((bias_filtersc - nullsc) * ratio);
+    }
+
+    {
+      float bits = (fwdsc - filtersc) / 0.69314718055994530942f;
+      float P = (bits < ev_mu) ? 1.0f : expf(-ev_lambda * (bits - ev_mu));
+      pass = (P <= F3);
+    }
+  }
+
+  if (pass) {
+    int out = atomicAdd(counter, 1);
+    survivor_idx[out] = bi;
+    survivor_fwdsc[out] = fwdsc;
+  }
+}
+
+extern "C" int
+p7_cuda_ForwardParserDsqdataSubsetF3Survivors(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                              const P7_BG *bg, ESL_DSQDATA_CHUNK *chu,
+                                              const int *seqidx, int nidx,
+                                              const size_t *x_offsets, size_t total_xcells,
+                                              int do_biasfilter, int B3,
+                                              double ev_mu, double ev_lambda, double F3,
+                                              int *survivor_idx, float *survivor_scores, int *ret_nsurv,
+                                              char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int h_counter = 0;
+  float h_pi[3];
+  float h_t[6];
+  size_t eo_bytes;
+
+  if (!engine || !cuom || !bg || !bg->fhmm || !chu || !seqidx || !x_offsets ||
+      !survivor_idx || !survivor_scores || !ret_nsurv) return eslEINVAL;
+  *ret_nsurv = 0;
+  if (nidx <= 0) return eslOK;
+
+  status = fb_parser_subset_ex(engine, cuom, chu, seqidx, nidx, x_offsets, total_xcells,
+                               NULL, NULL, NULL, NULL,
+                               FB_RUN_FORWARD | FB_SKIP_FWD_D2H | FB_SKIP_RESULT_D2H,
+                               errbuf, errbuf_size);
+  if (status != eslOK) return status;
+
+  if (engine->parser_surv_alloc < nidx) {
+    if (engine->d_parser_surv_idx) cudaFree(engine->d_parser_surv_idx);
+    if (engine->d_parser_surv_x_offsets) cudaFree(engine->d_parser_surv_x_offsets);
+    engine->d_parser_surv_idx = NULL;
+    engine->d_parser_surv_x_offsets = NULL;
+    engine->parser_surv_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_parser_surv_idx, sizeof(int) * nidx), errbuf, errbuf_size, "cudaMalloc(parser survivor idx)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_parser_surv_x_offsets, sizeof(size_t) * nidx), errbuf, errbuf_size, "cudaMalloc(parser survivor x offsets)")) != eslOK) return status;
+    engine->parser_surv_alloc = nidx;
+  }
+  if (engine->f1_result_alloc < nidx || engine->d_f1_survivor_usc == NULL || engine->d_f1_counter == NULL) {
+    if (engine->d_f1_survivor_usc) cudaFree(engine->d_f1_survivor_usc);
+    if (engine->d_f1_counter) cudaFree(engine->d_f1_counter);
+    engine->d_f1_survivor_usc = NULL;
+    engine->d_f1_counter = NULL;
+    engine->f1_result_alloc = 0;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_f1_survivor_usc, sizeof(float) * nidx), errbuf, errbuf_size, "cudaMalloc(parser survivor fwd scores)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_f1_counter, sizeof(int)), errbuf, errbuf_size, "cudaMalloc(parser f3 counter)")) != eslOK) return status;
+    engine->f1_result_alloc = nidx;
+  }
+
+  h_pi[0] = bg->fhmm->pi[0];
+  h_pi[1] = bg->fhmm->pi[1];
+  h_pi[2] = bg->fhmm->pi[2];
+  h_t[0] = bg->fhmm->t[0][0];
+  h_t[1] = bg->fhmm->t[0][1];
+  h_t[2] = bg->fhmm->t[0][2];
+  h_t[3] = bg->fhmm->t[1][0];
+  h_t[4] = bg->fhmm->t[1][1];
+  h_t[5] = bg->fhmm->t[1][2];
+  if (engine->d_bias_pi == NULL) {
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_bias_pi, sizeof(float) * 3), errbuf, errbuf_size, "cudaMalloc(parser f3 bias pi)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_bias_t, sizeof(float) * 6), errbuf, errbuf_size, "cudaMalloc(parser f3 bias t)")) != eslOK) return status;
+  }
+  eo_bytes = (size_t)bg->fhmm->abc->Kp * 2 * sizeof(float);
+  if (engine->d_bias_eo == NULL) {
+    if ((status = cuda_status(cudaMalloc((void **)&engine->d_bias_eo, eo_bytes), errbuf, errbuf_size, "cudaMalloc(parser f3 bias eo)")) != eslOK) return status;
+  }
+  if (!engine->bias_params_uploaded) {
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_pi, h_pi, sizeof(h_pi), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser f3 bias pi)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_t, h_t, sizeof(h_t), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser f3 bias t)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMemcpy(engine->d_bias_eo, bg->fhmm->eo[0], eo_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser f3 bias eo)")) != eslOK) return status;
+    engine->bias_params_uploaded = 1;
+  }
+
+  if ((status = cuda_status(cudaMemcpy(engine->d_f1_counter, &h_counter, sizeof(int), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser f3 counter reset)")) != eslOK) return status;
+
+  {
+    uint8_t *d_dsq_ptr = engine->resident_active ? engine->d_resident_dsq : engine->d_dsq;
+    int     *d_off_ptr = engine->resident_active ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
+    int     *d_len_ptr = engine->resident_active ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+    cuda_parser_f3_gate_kernel<<<(nidx + 127) / 128, 128>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
+                                                            engine->d_parser_seqidx, nidx,
+                                                            engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo,
+                                                            engine->d_parser_scores, engine->d_parser_statuses,
+                                                            do_biasfilter, B3,
+                                                            (float)ev_mu, (float)ev_lambda, (float)F3,
+                                                            engine->d_parser_surv_idx,
+                                                            engine->d_f1_survivor_usc,
+                                                            engine->d_f1_counter);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_parser_f3_gate_kernel launch")) != eslOK) return status;
+    if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "cuda_parser_f3_gate_kernel sync")) != eslOK) return status;
+  }
+
+  if ((status = cuda_status(cudaMemcpy(&h_counter, engine->d_f1_counter, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser f3 survivor count)")) != eslOK) return status;
+  if (h_counter > 0) {
+    if ((status = cuda_status(cudaMemcpy(survivor_idx, engine->d_parser_surv_idx, sizeof(int) * h_counter, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser f3 survivor idx)")) != eslOK) return status;
+    if ((status = cuda_status(cudaMemcpy(survivor_scores, engine->d_f1_survivor_usc, sizeof(float) * h_counter, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(parser f3 survivor scores)")) != eslOK) return status;
+  }
+
+  *ret_nsurv = h_counter;
+  return eslOK;
 }
 
 __global__ static void

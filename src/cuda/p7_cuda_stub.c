@@ -252,6 +252,22 @@ p7_cuda_ForwardParserDsqdataSubsetScoresOnly(P7_CUDA_ENGINE *engine, const P7_CU
 }
 
 int
+p7_cuda_ForwardParserDsqdataSubsetF3Survivors(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
+                                              const P7_BG *bg, ESL_DSQDATA_CHUNK *chu,
+                                              const int *seqidx, int nidx,
+                                              const size_t *x_offsets, size_t total_xcells,
+                                              int do_biasfilter, int B3,
+                                              double ev_mu, double ev_lambda, double F3,
+                                              int *survivor_idx, float *survivor_scores, int *ret_nsurv,
+                                              char *errbuf, int errbuf_size)
+{
+  if (ret_nsurv) *ret_nsurv = 0;
+  if (errbuf && errbuf_size > 0)
+    snprintf(errbuf, errbuf_size, "HMMER was built without CUDA support");
+  return eslENOTFOUND;
+}
+
+int
 p7_cuda_BackwardParserDsqdataSubsetStoredForward(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                  ESL_DSQDATA_CHUNK *chu,
                                                  const int *surv_srcidx, int nsurv,

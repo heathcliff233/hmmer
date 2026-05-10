@@ -1072,8 +1072,6 @@ nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   P7_BG *bg = info->bg;
   P7_PIPELINE *pli = info->pli;
   NHMMER_GPU_WINDOW_BATCH wb;
-  float *scores = NULL;
-  int *statuses = NULL;
   int *seqidx = NULL;
   size_t *x_offsets = NULL;
   size_t total_xcells = 0;
@@ -1112,8 +1110,6 @@ nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   status = nhmmer_gpu_window_batch_pack(&wb, sq, &tmp_wl);
   if (status != eslOK) goto ERROR;
 
-  ESL_ALLOC(scores, sizeof(float) * 2 * nwindows);
-  ESL_ALLOC(statuses, sizeof(int) * 2 * nwindows);
   ESL_ALLOC(seqidx, sizeof(int) * nwindows);
   ESL_ALLOC(x_offsets, sizeof(size_t) * nwindows);
 
@@ -1123,55 +1119,35 @@ nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
     total_xcells += (size_t)(windows[i].length + 1) * p7X_NXCELLS;
   }
 
-  status = p7_cuda_ForwardParserDsqdataSubsetScoresOnly(info->cuda_engine, info->cuda_msv,
-                                                        &wb.chu, seqidx, nwindows,
-                                                        x_offsets, total_xcells,
-                                                        scores, statuses,
-                                                        errbuf, errbuf_size);
-  if (status != eslOK) goto ERROR;
-
   ESL_ALLOC(survivors, sizeof(P7_HMM_WINDOW) * nwindows);
   ESL_ALLOC(surv_src_idx, sizeof(int) * nwindows);
   ESL_ALLOC(surv_fwdsc, sizeof(float) * nwindows);
   ESL_ALLOC(surv_x_offsets, sizeof(size_t) * nwindows);
   ESL_ALLOC(surv_L_eff, sizeof(int) * nwindows);
 
-  for (int i = 0; i < nwindows; i++) {
-    if (statuses[2*i] != eslOK) continue;
+  status = p7_cuda_ForwardParserDsqdataSubsetF3Survivors(info->cuda_engine, info->cuda_msv,
+                                                         bg, &wb.chu, seqidx, nwindows,
+                                                         x_offsets, total_xcells,
+                                                         pli->do_biasfilter, pli->B3,
+                                                         om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA], pli->F3,
+                                                         surv_src_idx, surv_fwdsc, &nsurv,
+                                                         errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
 
-    int window_len = windows[i].length;
-    ESL_DSQ *subseq = sq->dsq + windows[i].n - 1;
-    float fwdsc = scores[2*i];
-    float nullsc, bias_filtersc, filtersc, seq_score;
-    int F3_L = ESL_MIN(window_len, pli->B3);
-
-    p7_bg_SetLength(bg, window_len);
-    p7_bg_NullOne(bg, subseq, window_len, &nullsc);
-    if (pli->do_biasfilter) {
-      p7_bg_FilterScore(bg, subseq, window_len, &bias_filtersc);
-      bias_filtersc -= nullsc;
-    } else {
-      bias_filtersc = 0.0f;
-    }
-
-    filtersc = nullsc + (bias_filtersc * (F3_L > window_len ? 1.0f : (float)F3_L / window_len));
-    seq_score = (fwdsc - filtersc) / eslCONST_LOG2;
-    if (esl_exp_surv(seq_score, om->evparam[p7_FTAU], om->evparam[p7_FLAMBDA]) > pli->F3) continue;
-
-    survivors[nsurv] = windows[i];
-    surv_src_idx[nsurv] = i;
-    surv_fwdsc[nsurv] = fwdsc;
-    surv_x_offsets[nsurv] = surv_total_xcells;
-    surv_L_eff[nsurv] = window_len;
+  for (int si = 0; si < nsurv; si++) {
+    int src = surv_src_idx[si];
+    int window_len = windows[src].length;
+    survivors[si] = windows[src];
+    surv_x_offsets[si] = surv_total_xcells;
+    surv_L_eff[si] = window_len;
     surv_total_xcells += (size_t)(window_len + 1) * p7X_NXCELLS;
-    nsurv++;
   }
 
   if (nsurv == 0) {
     *ret_survivors = survivors;
     *ret_nsurv = 0;
     nhmmer_gpu_window_batch_free(&wb);
-    free(scores); free(statuses); free(seqidx); free(x_offsets);
+    free(seqidx); free(x_offsets);
     free(surv_src_idx); free(surv_fwdsc); free(surv_x_offsets); free(surv_L_eff);
     return eslOK;
   }
@@ -1202,8 +1178,6 @@ nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
   *ret_L_eff = surv_L_eff;
 
   nhmmer_gpu_window_batch_free(&wb);
-  free(scores);
-  free(statuses);
   free(seqidx);
   free(x_offsets);
   free(surv_src_idx);
@@ -1212,7 +1186,7 @@ nhmmer_gpu_forward_backward_compact(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
 
 ERROR:
   nhmmer_gpu_window_batch_free(&wb);
-  free(scores); free(statuses); free(seqidx); free(x_offsets);
+  free(seqidx); free(x_offsets);
   free(survivors); free(surv_src_idx); free(surv_fwdsc);
   free(surv_x_offsets); free(surv_L_eff);
   free(gpu_xf); free(gpu_xb); free(gpu_scores); free(gpu_statuses);
