@@ -531,20 +531,43 @@ p7_cuda_viterbi_longtarget_launch(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
     local_stats->kernel_seconds += elapsed_seconds(engine->evt_k0, engine->evt_k1);
   }
 
-  cuda_viterbi_longtarget_prefix_kernel<<<1, 1>>>(engine->d_vlt_win_count, nwindows,
-                                                  engine->d_vlt_win_offsets);
-  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_longtarget_prefix_kernel launch")) != eslOK) goto ERROR;
-
+  /* Host-side prefix sum: D2H win_count, compute prefix, H2D offsets */
+  if (engine->h_vlt_prefix_alloc < nwindows) {
+    free(engine->h_vlt_win_counts);
+    engine->h_vlt_win_counts = NULL;
+    engine->h_vlt_prefix_alloc = 0;
+    engine->h_vlt_win_counts = (int *)malloc(sizeof(int) * (nwindows + 1));
+    if (!engine->h_vlt_win_counts) { status = eslEMEM; goto ERROR; }
+    engine->h_vlt_prefix_alloc = nwindows;
+  }
   cudaEventRecord(engine->evt_d2h0);
-  if ((status = cuda_status(cudaMemcpy(&h_win_count, engine->d_vlt_win_offsets + nwindows, sizeof(int), cudaMemcpyDeviceToHost), errbuf, errbuf_size, "cudaMemcpy(vlt compact win count)")) != eslOK) goto ERROR;
-  if (h_win_count < 0) {
-    if (errbuf && errbuf_size > 0)
-      snprintf(errbuf, errbuf_size, "CUDA Viterbi longtarget emitted more than %d seeds in at least one input window",
-               VIT_LT_MAX_WINDOWS_PER_INPUT);
-    status = eslERANGE;
-    goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->h_vlt_win_counts, engine->d_vlt_win_count,
+                                       sizeof(int) * nwindows, cudaMemcpyDeviceToHost),
+                            errbuf, errbuf_size, "cudaMemcpy(vlt win_count D2H)")) != eslOK) goto ERROR;
+  {
+    int total = 0;
+    int *h_offsets = engine->h_vlt_win_counts;
+    for (int w = 0; w < nwindows; w++) {
+      int cnt = h_offsets[w];
+      if (cnt > VIT_LT_MAX_WINDOWS_PER_INPUT) {
+        if (errbuf && errbuf_size > 0)
+          snprintf(errbuf, errbuf_size, "CUDA Viterbi longtarget emitted more than %d seeds in at least one input window",
+                   VIT_LT_MAX_WINDOWS_PER_INPUT);
+        status = eslERANGE;
+        goto ERROR;
+      }
+      h_offsets[w] = total;
+      total += cnt;
+    }
+    h_offsets[nwindows] = total;
+    h_win_count = total;
   }
   if (h_win_count > engine->vlt_win_alloc) h_win_count = engine->vlt_win_alloc;
+  if (h_win_count > 0) {
+    if ((status = cuda_status(cudaMemcpy(engine->d_vlt_win_offsets, engine->h_vlt_win_counts,
+                                         sizeof(int) * (nwindows + 1), cudaMemcpyHostToDevice),
+                              errbuf, errbuf_size, "cudaMemcpy(vlt win offsets H2D)")) != eslOK) goto ERROR;
+  }
 
   if (h_win_count > 0) {
     if (engine->vlt_compact_alloc < h_win_count) {
@@ -612,70 +635,115 @@ p7_cuda_viterbi_longtarget_launch_windows(P7_CUDA_ENGINE *engine, const P7_CUDA_
     return eslOK;
   }
 
-  status = cuda_msvprofile_UploadWindowLengths((P7_CUDA_MSVPROFILE *)cuom, scoredata,
-                                               errbuf, errbuf_size);
-  if (status != eslOK) goto ERROR;
-
   out_cap = raw_count * 4;
   if (out_cap < raw_count) out_cap = raw_count;
-  if (engine->vlt_input_win_alloc < nwindows) {
-    if (engine->d_vlt_input_windows) cudaFree(engine->d_vlt_input_windows);
-    engine->d_vlt_input_windows = NULL;
-    engine->vlt_input_win_alloc = 0;
-    if ((status = cuda_status(cudaMalloc((void **)&engine->d_vlt_input_windows,
-                                         sizeof(P7_HMM_WINDOW) * nwindows),
-                              errbuf, errbuf_size, "cudaMalloc(vlt input windows)")) != eslOK) goto ERROR;
-    engine->vlt_input_win_alloc = nwindows;
-  }
-  if (engine->vlt_hmm_tmp_alloc < raw_count) {
-    if (engine->d_vlt_hmm_tmp) cudaFree(engine->d_vlt_hmm_tmp);
-    engine->d_vlt_hmm_tmp = NULL;
-    engine->vlt_hmm_tmp_alloc = 0;
-    if ((status = cuda_status(cudaMalloc((void **)&engine->d_vlt_hmm_tmp,
-                                         sizeof(P7_HMM_WINDOW) * raw_count),
-                              errbuf, errbuf_size, "cudaMalloc(vlt hmm tmp)")) != eslOK) goto ERROR;
-    engine->vlt_hmm_tmp_alloc = raw_count;
-  }
   if (engine->vlt_hmm_alloc < out_cap) {
-    if (engine->d_vlt_hmm_windows) cudaFree(engine->d_vlt_hmm_windows);
     free(engine->h_vlt_hmm_windows);
-    engine->d_vlt_hmm_windows = NULL;
     engine->h_vlt_hmm_windows = NULL;
     engine->vlt_hmm_alloc = 0;
-    if ((status = cuda_status(cudaMalloc((void **)&engine->d_vlt_hmm_windows,
-                                         sizeof(P7_HMM_WINDOW) * out_cap),
-                              errbuf, errbuf_size, "cudaMalloc(vlt hmm windows)")) != eslOK) goto ERROR;
     engine->h_vlt_hmm_windows = (P7_HMM_WINDOW *)malloc(sizeof(P7_HMM_WINDOW) * out_cap);
     if (!engine->h_vlt_hmm_windows) { status = eslEMEM; goto ERROR; }
     engine->vlt_hmm_alloc = out_cap;
   }
-  if (engine->d_vlt_hmm_count == NULL) {
-    if ((status = cuda_status(cudaMalloc((void **)&engine->d_vlt_hmm_count, sizeof(int)),
-                              errbuf, errbuf_size, "cudaMalloc(vlt hmm count)")) != eslOK) goto ERROR;
+
+  /* Host-side extend/merge/split — raw_windows and input_windows are already on host */
+  {
+    const P7_CUDA_VIT_LT_WINDOW *src = raw_windows;
+    const float *prefix_lengths = scoredata->prefix_lengths;
+    const float *suffix_lengths = scoredata->suffix_lengths;
+    P7_HMM_WINDOW *tmp = (P7_HMM_WINDOW *)malloc(sizeof(P7_HMM_WINDOW) * raw_count);
+    P7_HMM_WINDOW *dst = engine->h_vlt_hmm_windows;
+    int tmp_count = 0;
+    int out = 0;
+
+    if (!tmp) { status = eslEMEM; goto ERROR; }
+
+    /* Phase 1: Extend and merge with >50% overlap threshold */
+    for (int i = 0; i < raw_count; i++) {
+      P7_CUDA_VIT_LT_WINDOW gw = src[i];
+      int win_id = gw.window_id;
+      P7_HMM_WINDOW parent = input_windows[win_id];
+      int k = (int)gw.model_k;
+      int64_t window_start = (int64_t)((double)gw.position -
+                             ((double)max_length * (0.1 + (double)prefix_lengths[k])));
+      int64_t window_end   = (int64_t)((double)gw.position + 1.0 +
+                             ((double)max_length * (0.1 + (double)suffix_lengths[k])));
+      if (window_start < 1) window_start = 1;
+      if (window_end > (int64_t)parent.length) window_end = (int64_t)parent.length;
+
+      P7_HMM_WINDOW curr;
+      curr.score           = 0.0f;
+      curr.null_sc         = 0.0f;
+      curr.id              = win_id;
+      curr.n               = window_start;
+      curr.fm_n            = 0;
+      curr.length          = (int32_t)(window_end - window_start + 1);
+      curr.k               = (int16_t)k;
+      curr.target_len      = parent.length;
+      curr.complementarity = p7_NOCOMPLEMENT;
+      curr.used_to_extend  = 0;
+
+      if (tmp_count > 0) {
+        P7_HMM_WINDOW *prev = &tmp[tmp_count - 1];
+        int64_t ov_start = (prev->n > curr.n) ? prev->n : curr.n;
+        int64_t ov_end   = ((prev->n + prev->length - 1) < (curr.n + curr.length - 1))
+                            ? (prev->n + prev->length - 1) : (curr.n + curr.length - 1);
+        int64_t ov_len   = ov_end - ov_start + 1;
+        int32_t min_len  = (prev->length < curr.length) ? prev->length : curr.length;
+        if (prev->complementarity == curr.complementarity &&
+            prev->id == curr.id &&
+            (float)ov_len / (float)min_len > 0.5f) {
+          int64_t merged_start = (prev->n < curr.n) ? prev->n : curr.n;
+          int64_t merged_end   = ((prev->n + prev->length - 1) > (curr.n + curr.length - 1))
+                                  ? (prev->n + prev->length - 1) : (curr.n + curr.length - 1);
+          prev->fm_n -= (int32_t)(prev->n - merged_start);
+          prev->n     = merged_start;
+          prev->length = (int32_t)(merged_end - merged_start + 1);
+          continue;
+        }
+      }
+      tmp[tmp_count++] = curr;
+    }
+
+    /* Phase 2: Translate to global coords and split oversized windows */
+    for (int i = 0; i < tmp_count; i++) {
+      P7_HMM_WINDOW merged = tmp[i];
+      int parent_id       = merged.id;
+      int64_t local_n     = merged.n;
+      int64_t remaining_len = merged.length;
+
+      P7_HMM_WINDOW w = merged;
+      w.n          = local_n + input_windows[parent_id].n - 1;
+      w.target_len = input_windows[parent_id].target_len;
+      w.id         = 0;
+      if (w.length > max_window_len) w.length = max_window_len;
+      if (out >= out_cap) { free(tmp); merged_count = -1; goto VLT_OVERFLOW; }
+      dst[out++] = w;
+
+      while (remaining_len > max_window_len) {
+        int shift   = max_window_len - overlap_len;
+        local_n    += shift;
+        remaining_len -= shift;
+        P7_HMM_WINDOW split = merged;
+        split.n           = local_n + input_windows[parent_id].n - 1;
+        split.length      = (int32_t)((remaining_len < max_window_len) ? remaining_len : max_window_len);
+        split.target_len  = input_windows[parent_id].target_len;
+        split.id          = 0;
+        split.k           = 0;
+        split.score       = 0.0f;
+        split.null_sc     = 0.0f;
+        split.fm_n        = 0;
+        split.complementarity = p7_NOCOMPLEMENT;
+        split.used_to_extend  = 0;
+        if (out >= out_cap) { free(tmp); merged_count = -1; goto VLT_OVERFLOW; }
+        dst[out++] = split;
+      }
+    }
+    free(tmp);
+    merged_count = out;
   }
 
-  if ((status = cuda_status(cudaMemcpy(engine->d_vlt_input_windows, input_windows,
-                                       sizeof(P7_HMM_WINDOW) * nwindows,
-                                       cudaMemcpyHostToDevice),
-                            errbuf, errbuf_size, "cudaMemcpy(vlt input windows)")) != eslOK) goto ERROR;
-
-  cuda_viterbi_windows_extend_merge_kernel<<<1, 1>>>(engine->d_vlt_windows_compact,
-                                                     raw_count,
-                                                     engine->d_vlt_input_windows,
-                                                     cuom->d_prefix_lengths,
-                                                     cuom->d_suffix_lengths,
-                                                     max_length,
-                                                     max_window_len,
-                                                     overlap_len,
-                                                     out_cap,
-                                                     engine->d_vlt_hmm_tmp,
-                                                     engine->d_vlt_hmm_windows,
-                                                     engine->d_vlt_hmm_count);
-  if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size,
-                            "cuda_viterbi_windows_extend_merge_kernel launch")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemcpy(&merged_count, engine->d_vlt_hmm_count,
-                                       sizeof(int), cudaMemcpyDeviceToHost),
-                            errbuf, errbuf_size, "cudaMemcpy(vlt hmm count)")) != eslOK) goto ERROR;
+VLT_OVERFLOW:
   if (merged_count < 0) {
     if (errbuf && errbuf_size > 0)
       snprintf(errbuf, errbuf_size, "CUDA Viterbi longtarget merged window output exceeded capacity");
@@ -687,10 +755,6 @@ p7_cuda_viterbi_longtarget_launch_windows(P7_CUDA_ENGINE *engine, const P7_CUDA_
     *ret_nwindows = 0;
     return eslOK;
   }
-  if ((status = cuda_status(cudaMemcpy(engine->h_vlt_hmm_windows, engine->d_vlt_hmm_windows,
-                                       sizeof(P7_HMM_WINDOW) * merged_count,
-                                       cudaMemcpyDeviceToHost),
-                            errbuf, errbuf_size, "cudaMemcpy(vlt hmm windows)")) != eslOK) goto ERROR;
 
   *ret_windows = engine->h_vlt_hmm_windows;
   *ret_nwindows = merged_count;

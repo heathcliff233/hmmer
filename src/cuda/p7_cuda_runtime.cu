@@ -118,6 +118,8 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_f1_survivor_filtersc) cudaFree(engine->d_f1_survivor_filtersc);
   if (engine->d_f1_survivor_status) cudaFree(engine->d_f1_survivor_status);
   if (engine->d_f1_pass_mask) cudaFree(engine->d_f1_pass_mask);
+  free(engine->h_f1_pass_mask);
+  free(engine->h_f1_filtersc);
   if (engine->d_bias_surv_filtersc) cudaFree(engine->d_bias_surv_filtersc);
   if (engine->d_resident_dsq)     cudaFree(engine->d_resident_dsq);
   if (engine->d_resident_offsets) cudaFree(engine->d_resident_offsets);
@@ -134,6 +136,7 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_lt_hmm_windows) cudaFree(engine->d_lt_hmm_windows);
   free(engine->h_lt_hmm_windows);
   if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
+  free(engine->h_lt_win_counts);
   if (engine->d_vlt_dsq)       cudaFree(engine->d_vlt_dsq);
   if (engine->h_vlt_dsq)       cudaFreeHost(engine->h_vlt_dsq);
   if (engine->d_vlt_offsets)   cudaFree(engine->d_vlt_offsets);
@@ -149,6 +152,7 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   free(engine->h_vlt_hmm_windows);
   if (engine->d_vlt_win_count) cudaFree(engine->d_vlt_win_count);
   if (engine->d_vlt_win_offsets) cudaFree(engine->d_vlt_win_offsets);
+  free(engine->h_vlt_win_counts);
   if (engine->d_vlt_hmm_count) cudaFree(engine->d_vlt_hmm_count);
   if (engine->d_resident_nucdb) cudaFree(engine->d_resident_nucdb);
   /* Domain rescore grow-only buffers */

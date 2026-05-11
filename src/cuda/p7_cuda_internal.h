@@ -101,6 +101,9 @@ struct p7_cuda_msv_engine_s {
   int                 f1_result_alloc;
   int                *d_f1_pass_mask;
   int                 f1_order_alloc;
+  int                *h_f1_pass_mask;
+  float              *h_f1_filtersc;
+  int                 h_f1_order_alloc;
   float              *d_bias_surv_filtersc;
   int                 bias_surv_alloc;
   int                 bias_params_uploaded;
@@ -127,6 +130,8 @@ struct p7_cuda_msv_engine_s {
   int                 lt_win_alloc;
   uint8_t            *h_lt_dsq;
   int                 h_lt_dsq_alloc;
+  int                *h_lt_win_counts;
+  int                 h_lt_prefix_alloc;
 
   /* Viterbi longtarget persistent buffers */
   uint8_t            *d_vlt_dsq;
@@ -156,6 +161,8 @@ struct p7_cuda_msv_engine_s {
   int                 vlt_hmm_alloc;
   uint8_t            *h_vlt_dsq;
   int                 h_vlt_dsq_alloc;
+  int                *h_vlt_win_counts;
+  int                 h_vlt_prefix_alloc;
   cudaStream_t        vlt_stream_copy;
   cudaStream_t        vlt_stream_thresh;
 

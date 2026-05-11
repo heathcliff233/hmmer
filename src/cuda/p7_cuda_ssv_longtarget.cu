@@ -363,6 +363,15 @@ ssv_longtarget_download_ordered(P7_CUDA_ENGINE *engine, int nchunks, int step,
   *ret_windows = NULL;
   *ret_nwindows = 0;
 
+  /* Grow host-side prefix sum scratch */
+  if (engine->h_lt_prefix_alloc < nchunks) {
+    free(engine->h_lt_win_counts);
+    engine->h_lt_win_counts = NULL;
+    engine->h_lt_prefix_alloc = 0;
+    engine->h_lt_win_counts = (int *)malloc(sizeof(int) * (nchunks + 1));
+    if (!engine->h_lt_win_counts) { status = eslEMEM; goto ERROR; }
+    engine->h_lt_prefix_alloc = nchunks;
+  }
   if (engine->lt_count_alloc < nchunks) {
     if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
     engine->d_lt_win_offsets = NULL;
@@ -373,23 +382,36 @@ ssv_longtarget_download_ordered(P7_CUDA_ENGINE *engine, int nchunks, int step,
     engine->lt_count_alloc = nchunks;
   }
 
-  cuda_ssv_longtarget_prefix_kernel<<<1, 1>>>(engine->d_lt_win_count, nchunks,
-                                              engine->d_lt_win_offsets);
-  status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_prefix_kernel launch");
+  /* Host-side prefix sum: D2H win_count, compute prefix on host, H2D offsets */
+  status = cuda_status(cudaMemcpy(engine->h_lt_win_counts, engine->d_lt_win_count,
+                                  sizeof(int) * nchunks, cudaMemcpyDeviceToHost),
+                       errbuf, errbuf_size, "cudaMemcpy(lt win_count D2H)");
   if (status != eslOK) goto ERROR;
 
-  status = cuda_status(cudaMemcpy(&h_win_count, engine->d_lt_win_offsets + nchunks,
-                                  sizeof(int), cudaMemcpyDeviceToHost),
-                       errbuf, errbuf_size, "cudaMemcpy(lt compact win count)");
-  if (status != eslOK) goto ERROR;
-  if (h_win_count < 0) {
-    if (errbuf && errbuf_size > 0)
-      snprintf(errbuf, errbuf_size, "CUDA SSV longtarget emitted more than %d windows in at least one chunk",
-               SSV_LT_MAX_WINDOWS_PER_CHUNK);
-    status = eslERANGE;
-    goto ERROR;
+  {
+    int total = 0;
+    int *h_offsets = engine->h_lt_win_counts;
+    for (int c = 0; c < nchunks; c++) {
+      int cnt = h_offsets[c];
+      if (cnt > SSV_LT_MAX_WINDOWS_PER_CHUNK) {
+        if (errbuf && errbuf_size > 0)
+          snprintf(errbuf, errbuf_size, "CUDA SSV longtarget emitted more than %d windows in at least one chunk",
+                   SSV_LT_MAX_WINDOWS_PER_CHUNK);
+        status = eslERANGE;
+        goto ERROR;
+      }
+      h_offsets[c] = total;
+      total += cnt;
+    }
+    h_offsets[nchunks] = total;
+    h_win_count = total;
   }
   if (h_win_count == 0) goto DONE;
+
+  status = cuda_status(cudaMemcpy(engine->d_lt_win_offsets, engine->h_lt_win_counts,
+                                  sizeof(int) * (nchunks + 1), cudaMemcpyHostToDevice),
+                       errbuf, errbuf_size, "cudaMemcpy(lt win offsets H2D)");
+  if (status != eslOK) goto ERROR;
 
   if (engine->lt_compact_alloc < h_win_count) {
     if (engine->d_lt_windows_compact) cudaFree(engine->d_lt_windows_compact);
@@ -443,10 +465,15 @@ ssv_longtarget_download_windows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE
   *ret_windows = NULL;
   *ret_nwindows = 0;
 
-  status = cuda_msvprofile_UploadWindowLengths((P7_CUDA_MSVPROFILE *)cuom, scoredata,
-                                               errbuf, errbuf_size);
-  if (status != eslOK) goto ERROR;
-
+  /* Grow host-side prefix sum scratch */
+  if (engine->h_lt_prefix_alloc < nchunks) {
+    free(engine->h_lt_win_counts);
+    engine->h_lt_win_counts = NULL;
+    engine->h_lt_prefix_alloc = 0;
+    engine->h_lt_win_counts = (int *)malloc(sizeof(int) * (nchunks + 1));
+    if (!engine->h_lt_win_counts) { status = eslEMEM; goto ERROR; }
+    engine->h_lt_prefix_alloc = nchunks;
+  }
   if (engine->lt_count_alloc < nchunks) {
     if (engine->d_lt_win_offsets) cudaFree(engine->d_lt_win_offsets);
     engine->d_lt_win_offsets = NULL;
@@ -457,23 +484,35 @@ ssv_longtarget_download_windows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE
     engine->lt_count_alloc = nchunks;
   }
 
-  cuda_ssv_longtarget_prefix_kernel<<<1, 1>>>(engine->d_lt_win_count, nchunks,
-                                              engine->d_lt_win_offsets);
-  status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_prefix_kernel launch");
+  /* Host-side prefix sum */
+  status = cuda_status(cudaMemcpy(engine->h_lt_win_counts, engine->d_lt_win_count,
+                                  sizeof(int) * nchunks, cudaMemcpyDeviceToHost),
+                       errbuf, errbuf_size, "cudaMemcpy(lt win_count D2H)");
   if (status != eslOK) goto ERROR;
-
-  status = cuda_status(cudaMemcpy(&h_win_count, engine->d_lt_win_offsets + nchunks,
-                                  sizeof(int), cudaMemcpyDeviceToHost),
-                       errbuf, errbuf_size, "cudaMemcpy(lt compact win count)");
-  if (status != eslOK) goto ERROR;
-  if (h_win_count < 0) {
-    if (errbuf && errbuf_size > 0)
-      snprintf(errbuf, errbuf_size, "CUDA SSV longtarget emitted more than %d windows in at least one chunk",
-               SSV_LT_MAX_WINDOWS_PER_CHUNK);
-    status = eslERANGE;
-    goto ERROR;
+  {
+    int total = 0;
+    int *h_offsets = engine->h_lt_win_counts;
+    for (int c = 0; c < nchunks; c++) {
+      int cnt = h_offsets[c];
+      if (cnt > SSV_LT_MAX_WINDOWS_PER_CHUNK) {
+        if (errbuf && errbuf_size > 0)
+          snprintf(errbuf, errbuf_size, "CUDA SSV longtarget emitted more than %d windows in at least one chunk",
+                   SSV_LT_MAX_WINDOWS_PER_CHUNK);
+        status = eslERANGE;
+        goto ERROR;
+      }
+      h_offsets[c] = total;
+      total += cnt;
+    }
+    h_offsets[nchunks] = total;
+    h_win_count = total;
   }
   if (h_win_count == 0) goto DONE;
+
+  status = cuda_status(cudaMemcpy(engine->d_lt_win_offsets, engine->h_lt_win_counts,
+                                  sizeof(int) * (nchunks + 1), cudaMemcpyHostToDevice),
+                       errbuf, errbuf_size, "cudaMemcpy(lt win offsets H2D)");
+  if (status != eslOK) goto ERROR;
 
   if (engine->lt_compact_alloc < h_win_count) {
     if (engine->d_lt_windows_compact) cudaFree(engine->d_lt_windows_compact);
@@ -490,15 +529,9 @@ ssv_longtarget_download_windows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE
     engine->lt_compact_alloc = h_win_count;
   }
   if (engine->lt_hmm_alloc < h_win_count) {
-    if (engine->d_lt_hmm_windows) cudaFree(engine->d_lt_hmm_windows);
     free(engine->h_lt_hmm_windows);
-    engine->d_lt_hmm_windows = NULL;
     engine->h_lt_hmm_windows = NULL;
     engine->lt_hmm_alloc = 0;
-    status = cuda_status(cudaMalloc((void **)&engine->d_lt_hmm_windows,
-                                    sizeof(P7_HMM_WINDOW) * h_win_count),
-                         errbuf, errbuf_size, "cudaMalloc(lt hmm windows)");
-    if (status != eslOK) goto ERROR;
     engine->h_lt_hmm_windows = (P7_HMM_WINDOW *)malloc(sizeof(P7_HMM_WINDOW) * h_win_count);
     if (!engine->h_lt_hmm_windows) { status = eslEMEM; goto ERROR; }
     engine->lt_hmm_alloc = h_win_count;
@@ -512,26 +545,69 @@ ssv_longtarget_download_windows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE
   status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_compact_kernel launch");
   if (status != eslOK) goto ERROR;
 
-  cuda_ssv_windows_extend_merge_kernel<<<1, 1>>>(engine->d_lt_windows_compact,
-                                                 h_win_count,
-                                                 cuom->d_prefix_lengths,
-                                                 cuom->d_suffix_lengths,
-                                                 model_max_length, target_len,
-                                                 engine->d_lt_hmm_windows,
-                                                 engine->d_lt_win_offsets);
-  status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_windows_extend_merge_kernel launch");
-  if (status != eslOK) goto ERROR;
-  status = cuda_status(cudaMemcpy(&h_merged_count, engine->d_lt_win_offsets,
-                                  sizeof(int), cudaMemcpyDeviceToHost),
-                       errbuf, errbuf_size, "cudaMemcpy(lt merged count)");
-  if (status != eslOK) goto ERROR;
-  if (h_merged_count < 0 || h_merged_count > h_win_count) { status = eslFAIL; goto ERROR; }
-  if (h_merged_count == 0) goto DONE;
-  status = cuda_status(cudaMemcpy(engine->h_lt_hmm_windows, engine->d_lt_hmm_windows,
-                                  sizeof(P7_HMM_WINDOW) * h_merged_count,
+  /* D2H compact windows, then extend/merge on host */
+  status = cuda_status(cudaMemcpy(engine->h_lt_windows_compact, engine->d_lt_windows_compact,
+                                  sizeof(P7_CUDA_LT_WINDOW) * h_win_count,
                                   cudaMemcpyDeviceToHost),
-                       errbuf, errbuf_size, "cudaMemcpy(lt merged windows)");
+                       errbuf, errbuf_size, "cudaMemcpy(lt compact windows)");
   if (status != eslOK) goto ERROR;
+
+  {
+    const P7_CUDA_LT_WINDOW *src = engine->h_lt_windows_compact;
+    P7_HMM_WINDOW *dst           = engine->h_lt_hmm_windows;
+    const float *prefix_lengths   = scoredata->prefix_lengths;
+    const float *suffix_lengths   = scoredata->suffix_lengths;
+    int out = 0;
+
+    for (int i = 0; i < h_win_count; i++) {
+      P7_CUDA_LT_WINDOW gw = src[i];
+      int length = (int)gw.model_end - (int)gw.model_start + 1;
+      int k0 = (int)gw.model_start;
+      int k1 = (int)gw.model_end;
+      int64_t window_start = (int64_t)1;
+      int64_t window_end   = (int64_t)target_len;
+      int64_t ws = (int64_t)((double)gw.target_start -
+                   ((double)model_max_length * (0.1 + (double)prefix_lengths[k0])));
+      int64_t we = (int64_t)((double)gw.target_start + (double)length +
+                   ((double)model_max_length * (0.1 + (double)suffix_lengths[k1])));
+      if (ws > window_start) window_start = ws;
+      if (we < window_end)   window_end   = we;
+
+      P7_HMM_WINDOW curr;
+      curr.score           = gw.score;
+      curr.null_sc         = 0.0f;
+      curr.id              = 0;
+      curr.n               = window_start;
+      curr.fm_n            = 0;
+      curr.length          = (int32_t)(window_end - window_start + 1);
+      curr.k               = (int16_t)k1;
+      curr.target_len      = target_len;
+      curr.complementarity = p7_NOCOMPLEMENT;
+      curr.used_to_extend  = 0;
+
+      if (out > 0) {
+        P7_HMM_WINDOW *prev = &dst[out - 1];
+        int64_t ov_start = (prev->n > curr.n) ? prev->n : curr.n;
+        int64_t ov_end   = ((prev->n + prev->length - 1) < (curr.n + curr.length - 1))
+                            ? (prev->n + prev->length - 1) : (curr.n + curr.length - 1);
+        int64_t ov_len   = ov_end - ov_start + 1;
+        if (prev->complementarity == curr.complementarity &&
+            prev->id == curr.id &&
+            (float)ov_len / (float)((prev->length < curr.length) ? prev->length : curr.length) > 0.0f) {
+          int64_t merged_start = (prev->n < curr.n) ? prev->n : curr.n;
+          int64_t merged_end   = ((prev->n + prev->length - 1) > (curr.n + curr.length - 1))
+                                  ? (prev->n + prev->length - 1) : (curr.n + curr.length - 1);
+          prev->fm_n -= (int32_t)(prev->n - merged_start);
+          prev->n     = merged_start;
+          prev->length = (int32_t)(merged_end - merged_start + 1);
+          continue;
+        }
+      }
+      dst[out++] = curr;
+    }
+    h_merged_count = out;
+  }
+  if (h_merged_count == 0) goto DONE;
 
 DONE:
   *ret_windows = (h_merged_count > 0) ? engine->h_lt_hmm_windows : NULL;

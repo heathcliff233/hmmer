@@ -195,3 +195,12 @@ Purpose: keep a compact record of major GPU attempts, outcomes, and rejected dir
 - Outcome: MADE1 1.35s/151hits → 0.91s/462hits, query_short 1.92s/119hits → 1.40s/363hits, query_medium 5.34s/218hits → 2.85s/648hits. Hit parity now matches CPU within float32 precision (0-3 hit difference).
 - Lesson: always compare GPU device-computed values back to CPU reference at each intermediate step; a wrong sign or missing `1-p` is invisible until you download and compare the threshold vector itself.
 - Files: `src/cuda/p7_cuda_viterbi_longtarget.cu` (threshold kernel fix).
+
+### 19) nhmmer SSV longtarget multi-warp template (2026-05-11)
+- Problem: SSV longtarget kernel at 50% theoretical occupancy (1 warp/block, 24 blocks/SM max). Investigated multi-warp packing to double occupancy.
+- Attempt: templated kernel `<STRIDE, WARPS>` with per-warp shared arrays (`s_hit_detected[WARPS]`, `s_best_score[WARPS]`), `__syncwarp()` instead of `__syncthreads()`, and `__launch_bounds__(32*WARPS)`. Also tried STRIDE template for compile-time `prev_reg[STRIDE]` with `#pragma unroll`.
+- Outcome: **32% slower** (MADE1 0.189s → 0.250s). Reverted.
+- Root cause: the original single-warp kernel achieves 20 registers / 0 bytes stack spill for the `prev_reg[64]` uint8_t array — the compiler packs 4 bytes per register. Adding warp_id indexing into per-warp shared arrays and `__launch_bounds__` constraints forced 36 registers + 64 bytes stack spill. The STRIDE template caused 16× code bloat from `#pragma unroll` in a memory-bandwidth-bound inner loop.
+- Decision: 50% occupancy with 6.25× grid/SM coverage is sufficient for this memory-bound kernel. Do not pursue multi-warp or stride template approaches for the SSV longtarget kernel.
+- Lesson: register allocation for uint8_t arrays is fragile — any additional indexing pressure can tip the compiler from packed-register to stack-spill, and the occupancy benefit doesn't compensate. `cuobjdump --dump-resource-usage` is essential for diagnosing this class of regression.
+- Files: `src/cuda/p7_cuda_ssv_longtarget.cu` (reverted).
