@@ -1,6 +1,6 @@
 # nhmmer GPU vs CPU Performance Breakdown
 
-Last updated: 2026-05-10
+Last updated: 2026-05-11
 
 ## TL;DR
 
@@ -218,7 +218,7 @@ CPU-4 HMMER stage totals are summed across worker threads, so divide by four for
 
 | Stage | CPU-4 summed | CPU-4 approx wall | GPU fast `.nucdb` wall |
 |-------|:---:|:---:|:---:|
-| SSV | 2.343s | 0.586s | 0.103-0.109s |
+| SSV | 2.343s | 0.586s | 0.106s |
 | MSV/null/bias | 0.536s | 0.134s | 0.009-0.036s batch filter in the latest combined `.nucdb` timing + 0.002s worker bias/null |
 | Viterbi | 1.307s | 0.327s | 0.138-0.289s scanning Viterbi |
 | Forward | 0.469s | 0.117s | 0.028-0.039s Forward prefilter |
@@ -233,8 +233,15 @@ Current launch occupancy from the instrumented query_medium fast overlap `.nucdb
 
 | Stage | Last launch | Theoretical occupancy | Grid/SM coverage |
 |-------|-------------|:---:|:---:|
-| SSV longtarget | grid=800, block=32, smem=1002B | 50.0% (24 active warps/SM of 48), device-active in SSV wall | 6.25x |
+| SSV longtarget | grid=800, block=32, smem=0B | 50.0% (24 active warps/SM of 48), device-active in SSV wall | 6.25x |
 | Scanning Viterbi | grid=1097, block=32, smem=24192B | 8.3% physical-warp occupancy (4 active warps/SM of 48), about 94% device-active in the current focused Viterbi CUDA call after first-call buffer growth | 8.51x |
+
+SSV longtarget now uses zero shared memory after the `d_rbv_lin` switch. The
+kernel's theoretical occupancy remains 50% (limited by one warp per block), but
+the reduced shared memory could help on configurations where smem was the limiter.
+On the 5x chr22 benchmark with query_medium, the SSV kernel CUDA event time
+improved from 0.518s to 0.400s (22.8% faster, 3-run mean). The `ssv_scores`
+upload is now cached per query and skipped on the second strand.
 
 The GPU kernels are not starved by a single CUDA engine setup or too few blocks on chr22/query_medium; both launch enough blocks to cover all 128 SMs multiple times. SSV occupancy is capped by one warp per block, but the kernel is already device-active and two-/four-warp-per-block experiments raised theoretical occupancy without improving wall time. Scanning Viterbi was the better target: the old kernel used only lanes 0-7 of each physical warp. The current kernel maps four independent 8-lane nucleotide DP groups into each physical warp. That lowers the physical-warp occupancy percentage but improves useful lane occupancy and reduced the repeated scan kernel from about `0.125-0.128s` to about `0.112-0.116s` in focused runs. Viterbi long-target also reuses engine-owned CUDA streams now, removing the per-call stream create/destroy path and making the current focused stream/sync timing round to `0.000s`; the default biased path now reads the F1-packed device batch directly, so detailed timing shows Viterbi host pack at `0 bytes` and Viterbi sequence H2D at `0.000s`. A score-only Forward prefilter experiment failed parity because it is not parser-equivalent for the F3 gate, so the production path still uses GPU Forward parser xmx before GPU Backward/parser handoff. The FASTA and `.nucdb` paths now remove the largest Forward-xmx host round trip by keeping all-window Forward xmx on device, computing F3 survivor selection and compact offsets on GPU from GPU Forward scores, compacting survivor xmx on GPU, and launching Backward from device-resident survivor metadata. The overlap `.nucdb` path now avoids host sequence packing for F1 and parser after GPU extend/merge by remapping windows to resident chunks and gathering boundary-spanning windows on GPU. Parser batches describe windows with metadata only, and F3 survivor-index plus compact Forward-xmx downloads are delayed until after Backward has consumed the device buffers. The `.nucdb` path also caches reconstructed host strands after first use. Ordered SSV output removes one CPU sort, ordered F1 survivor compaction plus bias-scratch reuse removes the host survivor `qsort()` and extra CPU bias-score handoff copy, persistent F1 survivor/metadata scratch removes per-batch survivor and metadata heap allocation, resident `.nucdb` SSV reuses chunk metadata scratch, direct window-list fill removes per-output `p7_hmmwindow_new()` calls, Viterbi reuses host metadata and output scratch, Viterbi seed slots remove the normal CPU raw-seed sort, SSV/Viterbi extend-merge helpers remove the default CPU merge islands, direct OMX binding removes parser-matrix host-to-host copies, and avoidable parser/SSV/F1 handoff synchronization barriers are gone. End-to-end GPU-16 overlap `.nucdb` remains volatile, so further optimization should focus on GPU kernel throughput, parser matrix D2H, and residual CPU domain workflow, not on creating more CUDA engines.
 

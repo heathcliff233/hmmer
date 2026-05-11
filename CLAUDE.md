@@ -116,7 +116,7 @@ agents_docs/       Detailed architecture documentation (see index below)
 - **Easel submodule**: Do not edit `easel/` directly for GPU work. The `dsqdata` chunk-sizing change comes from `patches/easel-dsqdata-open-sized.patch` applied at build time.
 - **No CMake**: Keep CUDA in the existing autotools build. Do not add CMake for any reason.
 - **GPU scope**: `hmmsearch --gpu` is protein-only (requires `.gpudb`). `nhmmer --gpu` runs full GPU pipeline (SSV + batch filter + Viterbi + scanning Viterbi + Forward prefilter + FB parser) with threaded CPU downstream (works on plain FASTA or `.nucdb`). `hmmscan`, `phmmer`, `jackhmmer`, and daemon remain CPU-only.
-- **Hit parity**: GPU nhmmer path preserves near-exact hit parity with CPU. MADE1: 153 vs 154 (1-hit difference). query_short: 120 vs 120 (exact match). query_medium: 215 vs 215 (exact match). Remaining differences are from float32 vs double precision in Forward/Backward accumulation.
+- **Hit parity**: GPU nhmmer path preserves hit parity with CPU. Combined chr22 benchmark with 16 threads: all modes report 1476 hits across MADE1 + query_short + query_medium (4/4 parity checks passed). On 5x chr22: 6294 hits GPU = CPU. Remaining 1-hit differences on individual queries come from float32 vs double precision in Forward/Backward accumulation.
 - **Pressed HMM files**: Do not change `.h3m/.h3i/.h3f/.h3p` format as part of GPU work.
 - **Configure requires Easel**: `configure.ac` includes macros from `easel/m4`; Easel must be present before `autoconf`.
 - **Benchmark data**: Use `benchmark-data/` (gitignored) for datasets and run logs, not `tutorial/` inputs for speed claims.
@@ -137,16 +137,21 @@ Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.
 
 ### Current nhmmer GPU Performance (RTX 4090, chr22)
 
-Current same-mode smoke result for query_medium (M=501), 4 CPU threads:
+Latest combined benchmark (all three queries, 16 CPU threads, audit 2026-05-11):
 
-| Path | Target | Output rows | HMMER elapsed | `/usr/bin/time` wall |
-|------|--------|:---:|:---:|:---:|
-| CPU-4 | `chr22.fa` | 648 | 1.87s | 1.89s |
-| GPU-4 default | `chr22-overlap.nucdb.nucdb` | 648 | 1.40s | 1.75s |
+| Path | Target | Hits | Wall |
+|------|--------|:---:|:---:|
+| CPU-1 | `chr22.fa` | 1476 | 8.157s |
+| CPU-16 | `chr22.fa` | 1476 | 1.089s |
+| GPU-16 FASTA | `chr22.fa` | 1476 | 1.829s |
+| GPU-16 no-overlap `.nucdb` | `chr22.nucdb.nucdb` | 1476 | 1.540s |
+| GPU-16 overlap `.nucdb` | `chr22-overlap.nucdb.nucdb` | 1476 | 1.297s |
 
-`hmmnucdb` now defaults to overlap chunking (`--overlap 2001`), enabling the GPU-resident SSV path for typical queries; use `--overlap 0` only for ordinary no-overlap diagnostic databases. `nhmmer --gpu` defaults to GPU batch filtering, Viterbi prefilter, scanning Viterbi, exact-F3 Forward prefilter, and GPU Forward/Backward parser handoff. `--gpu-fwd-prefilter` is retained only as compatibility spelling; `--gpu-no-fwd-prefilter` restores the older CPU Forward/Backward continuation for diagnostics.
+On 5x chr22 (larger target): GPU-16 overlap `.nucdb` `4.348s` vs CPU-16 `4.893s`, both `6294` hits.
 
-The current bottleneck is CPU domain workflow after the GPU parser handoff, not CPU Forward/Backward. In the query_medium fast `.nucdb` smoke run, GPU timing total was 1.297s: SSV 0.107s, batch filter 0.099s, scanning Viterbi 0.015s, Forward prefilter 0.038s, GPU FB parser 0.013s, CPU workers 1.024s. Worker sub-buckets were domain workflow 1.013s, bias/null/output about 0.007s, and CPU Backward 0.000s.
+`hmmnucdb` now defaults to overlap chunking (`--overlap 2001`), enabling the GPU-resident SSV path for typical queries; use `--overlap 0` only for ordinary no-overlap diagnostic databases. `nhmmer --gpu` defaults to GPU batch filtering, scanning Viterbi, exact-F3 Forward prefilter, and GPU Forward/Backward parser handoff with all filter/parser sequence data resident on device. `--gpu-fwd-prefilter` is retained only as compatibility spelling; `--gpu-no-fwd-prefilter` restores the older CPU Forward/Backward continuation for diagnostics.
+
+The current bottleneck is CPU domain workflow after the GPU parser handoff. In a focused query_medium overlap `.nucdb` run: process elapsed 1.052s, GPU loop wall 0.599s, SSV 0.106s, batch filter 0.034s (0 bytes H2D), scanning Viterbi 0.111s (0 bytes H2D), GPU FB parser 0.024s (parser H2D 0 bytes, kernels 0.015s, matrix D2H 0.003s), CPU workers 0.264s (domain workflow 0.242s). The benchmark is volatile run-to-run; do not read one measurement as a stable wall-time win.
 
 ## GPU Architecture Summary
 
@@ -154,7 +159,7 @@ The GPU path accelerates SSV/MSV + biased-composition filter + Viterbi + Forward
 
 - Default MSV path: **fused SSV+null+bias+F1 gate kernel** (`cuda_ssv_null_bias_gate_kernel<STRIDE, WARPS>`) computes all pre-filter stages in a single kernel launch. Templated on STRIDE and WARPS-per-block (one sequence per warp) with linear rbv layout for coalesced access. Survivors compacted via atomicAdd with in-kernel float score output (D2H only ~32KB/batch vs 1.8MB). Supports both resident-database and chunk-based paths.
 - GPU Viterbi opt path: `cuda_viterbi_opt_kernel<STRIDE, WARPS>`, same multi-warp-per-block layout (one sequence per warp). W is auto-tuned at runtime from `cudaGetDeviceProperties` (typically W=4 on sm_89), overridable via `--gpu-ssv-warps` / `--gpu-vit-warps`.
-- All GPU stages enabled by default with `--gpu`: fused SSV+null+bias+gate → Viterbi prefilter (M≤2048) → Forward prefilter (M≤2044) → FB parser (hmmsearch), Forward prefilter → FB parser (nhmmer)
+- All GPU stages enabled by default with `--gpu`: fused SSV+null+bias+gate → Viterbi prefilter (M≤2048) → Forward prefilter (M≤2044) → FB parser (hmmsearch); SSV longtarget → batch F1 gate → scanning Viterbi → Forward prefilter → FB parser (nhmmer). SSV longtarget kernel uses the linear `d_rbv_lin[x * M + k]` layout (same as protein fused SSV), eliminating shared memory lookup tables and simplifying inner-loop address math. Per-query `ssv_scores` upload is cached across strands/sequences.
 - Latest all-13 profmark (multi-query single-process): **~7.3x vs CPU-1**, exact hit parity (`cpu_only=0`, `gpu_only=0`)
 - Survivor loop: sorted by sequence length (co-sorting scores/statuses) with ReconfigLength caching; CPU MSV fallback eliminated (double-precision GPU bias is authoritative)
 - CPU-side modules: domain definition, null2, hit reporting, sequence metadata assembly
@@ -186,14 +191,14 @@ These flags are not shown in `hmmsearch -h` output but are defined in `src/hmmse
 Nhmmer-specific expert flags (defined in `src/nhmmer.c`):
 
 ```
---gpu-fwd-prefilter    Deprecated compatibility spelling; GPU Fwd/Bwd parser handoff is default
---gpu-batch            GPU batch SSV/bias filtering on merged windows
---gpu-vit-prefilter    GPU Viterbi as pre-filter before scanning Viterbi
---gpu-vit-longtarget   GPU scanning Viterbi for sub-window detection
---gpu-cpu-postmsv      Bypass GPU scanning Viterbi/Fwd; use CPU postSSV
---gpu-compare          Debug: compare GPU filter scores to CPU per stage
---gpu-chunk-size N     Chunk size in residues (default 65536)
---gpu-device N         CUDA device id
+--gpu-fwd-prefilter      Deprecated compatibility spelling; GPU Fwd/Bwd parser handoff is default
+--gpu-no-fwd-prefilter   Diagnostic: disable GPU Forward/Backward parser reuse, use CPU continuation
+--gpu-batch              GPU batch SSV/bias filtering on merged windows (default-on with --gpu)
+--gpu-vit-longtarget     GPU scanning Viterbi for sub-window detection (default-on with --gpu)
+--gpu-cpu-postmsv        Bypass GPU scanning Viterbi/Fwd; use CPU postSSV
+--gpu-compare            Debug: compare GPU filter scores to CPU per stage
+--gpu-chunk-size N       Chunk size in residues (default 65536)
+--gpu-device N           CUDA device id
 ```
 
 ## Verification Checklist
@@ -228,7 +233,7 @@ Detailed architecture documentation lives in `agents_docs/`. Read in this order 
 | [nucleotide-benchmark.md](agents_docs/nucleotide-benchmark.md) | Nucleotide benchmark setup: chr22 target, query HMMs, baseline timings |
 | [nhmmer-gpu-progress.md](agents_docs/nhmmer-gpu-progress.md) | GPU nhmmer architecture, file map, benchmark results, performance analysis |
 | [nhmmer-gpu-todo.md](agents_docs/nhmmer-gpu-todo.md) | GPU nhmmer phase checklist (all phases complete), known issues |
-| [nhmmer-gpu-perf-gap.md](agents_docs/nhmmer-gpu-perf-gap.md) | Why GPU is slower than CPU-4, root causes, what would fix it |
+| [nhmmer-gpu-perf-gap.md](agents_docs/nhmmer-gpu-perf-gap.md) | GPU vs CPU-16 performance gap analysis, root causes, remaining bottlenecks |
 
 ## Code Navigation
 

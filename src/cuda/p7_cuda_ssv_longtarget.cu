@@ -35,9 +35,9 @@ lt_u8_add_sat(uint8_t a, uint8_t b)
  *   offsets      - byte offset of each chunk in dsq
  *   lengths      - length of each chunk
  *   nchunks      - number of chunks
- *   rbv          - profile emission scores [x*Q*16 + q*16 + z] (byte-encoded)
+ *   rbv_lin      - linear emission scores [x*M + k] (byte-encoded)
  *   ssv_scores   - scoredata for diagonal recovery [(k)*Kp + x]
- *   M, Q, Kp     - model dimensions
+ *   M, Kp        - model dimensions
  *   tbm_b, tec_b, base_b, bias_b - profile parameters
  *   sc_thresh    - score threshold for window detection
  *   d_windows    - output window array
@@ -47,14 +47,13 @@ lt_u8_add_sat(uint8_t a, uint8_t b)
 __global__ static void
 cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
                            int nchunks,
-                           const uint8_t *rbv, const uint8_t *ssv_scores,
-                           int M, int Q, int Kp,
+                           const uint8_t *rbv_lin, const uint8_t *ssv_scores,
+                           int M, int Kp,
                            uint8_t tbm_b, uint8_t tec_b, uint8_t tjb_b,
                            uint8_t base_b, uint8_t bias_b,
                            uint8_t sc_thresh, float scale_b,
                            P7_CUDA_LT_WINDOW *d_windows, int *d_win_count, int max_windows)
 {
-  extern __shared__ uint8_t mem[];
   int chunk = blockIdx.x;
   int tid   = threadIdx.x;
   if (chunk >= nchunks) return;
@@ -67,15 +66,6 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
   int my_count = stride;
   if (my_start + my_count > M) my_count = M - my_start;
   if (my_count < 0) my_count = 0;
-
-  /* Shared memory layout: q_lookup[M] + z_lookup[M] */
-  uint8_t *s_q = mem;
-  uint8_t *s_z = mem + M;
-  for (int k = tid; k < M; k += 32) {
-    s_q[k] = (uint8_t)(k % Q);
-    s_z[k] = (uint8_t)(k / Q);
-  }
-  __syncthreads();
 
   uint8_t xB_ssv = lt_u8_sub_sat(base_b, (uint8_t)(tjb_b + tbm_b));
 
@@ -111,7 +101,7 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
     for (int j = 0; j < my_count; j++) {
       int km1 = my_start + j;
       uint8_t old_prev = prev_reg[j];
-      uint8_t rsc = rbv[((int)x * Q + (int)s_q[km1]) * 16 + (int)s_z[km1]];
+      uint8_t rsc = rbv_lin[(int)x * M + km1];
       uint8_t v = (from_left > xB_ssv) ? from_left : xB_ssv;
       v = lt_u8_add_sat(v, bias_b);
       v = lt_u8_sub_sat(v, rsc);
@@ -573,7 +563,6 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
 {
   int status = eslOK;
   int M = cuom->M;
-  int Q = cuom->Q;
 
   /* Compute chunking */
   int step = chunk_size - overlap;
@@ -636,6 +625,7 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     if (engine->d_lt_ssv_scores) cudaFree(engine->d_lt_ssv_scores);
     engine->d_lt_ssv_scores = NULL;
     engine->lt_ssv_alloc = 0;
+    engine->lt_ssv_cached_ptr = NULL;
     if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_ssv_scores, ssv_scores_size), errbuf, errbuf_size, "cudaMalloc(lt ssv_scores)")) != eslOK) goto ERROR;
     engine->lt_ssv_alloc = ssv_scores_size;
   }
@@ -670,35 +660,38 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_dsq, engine->h_lt_dsq, total_packed, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt dsq)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_offsets, h_offsets, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt offsets)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_lengths, h_lengths, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt lengths)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+  if (ssv_scores_host != engine->lt_ssv_cached_ptr || ssv_scores_size != engine->lt_ssv_cached_size) {
+    if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+    engine->lt_ssv_cached_ptr  = ssv_scores_host;
+    engine->lt_ssv_cached_size = ssv_scores_size;
+  }
   if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
 
   /* Launch kernel */
   {
-    size_t shmem = (size_t)M * 2;
-    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, shmem);
+    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, 0);
     cudaEventRecord(engine->evt_k0);
-    cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
+    cuda_ssv_longtarget_kernel<<<nchunks, 32>>>(
       engine->d_lt_dsq, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
-      cuom->d_rbv, engine->d_lt_ssv_scores,
-      M, Q, Kp,
+      cuom->d_rbv_lin, engine->d_lt_ssv_scores,
+      M, Kp,
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,
       engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
-	    cudaEventRecord(engine->evt_k1);
-	    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
-	  }
+    cudaEventRecord(engine->evt_k1);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
+  }
 
-	  status = ssv_longtarget_download_ordered(engine, nchunks, step,
-	                                           &h_windows, &h_win_count,
-	                                           errbuf, errbuf_size);
-	  if (status != eslOK) goto ERROR;
-	  if (stats) {
-	    float ms = 0.0f;
-	    if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
-	      stats->kernel_seconds = (double)ms * 1e-3;
-	  }
+  status = ssv_longtarget_download_ordered(engine, nchunks, step,
+                                           &h_windows, &h_win_count,
+                                           errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+  if (stats) {
+    float ms = 0.0f;
+    if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
+      stats->kernel_seconds = (double)ms * 1e-3;
+  }
 
   *ret_windows  = h_windows;
   *ret_nwindows = h_win_count;
@@ -724,7 +717,6 @@ p7_cuda_SSVLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *c
 {
   int status = eslOK;
   int M = cuom->M;
-  int Q = cuom->Q;
   int step = chunk_size - overlap;
   if (step < 1) step = 1;
   int nchunks = (L <= chunk_size) ? 1 : 1 + (L - chunk_size + step - 1) / step;
@@ -780,6 +772,7 @@ p7_cuda_SSVLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *c
     if (engine->d_lt_ssv_scores) cudaFree(engine->d_lt_ssv_scores);
     engine->d_lt_ssv_scores = NULL;
     engine->lt_ssv_alloc = 0;
+    engine->lt_ssv_cached_ptr = NULL;
     if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_ssv_scores, ssv_scores_size), errbuf, errbuf_size, "cudaMalloc(lt ssv_scores)")) != eslOK) goto ERROR;
     engine->lt_ssv_alloc = ssv_scores_size;
   }
@@ -812,17 +805,20 @@ p7_cuda_SSVLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *c
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_dsq, engine->h_lt_dsq, total_packed, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt dsq)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_offsets, h_offsets, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt offsets)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_lengths, h_lengths, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt lengths)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+  if (ssv_scores_host != engine->lt_ssv_cached_ptr || ssv_scores_size != engine->lt_ssv_cached_size) {
+    if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+    engine->lt_ssv_cached_ptr  = ssv_scores_host;
+    engine->lt_ssv_cached_size = ssv_scores_size;
+  }
   if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
 
   {
-    size_t shmem = (size_t)M * 2;
-    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, shmem);
+    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, 0);
     cudaEventRecord(engine->evt_k0);
-    cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
+    cuda_ssv_longtarget_kernel<<<nchunks, 32>>>(
       engine->d_lt_dsq, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
-      cuom->d_rbv, engine->d_lt_ssv_scores,
-      M, Q, Kp,
+      cuom->d_rbv_lin, engine->d_lt_ssv_scores,
+      M, Kp,
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,
@@ -867,7 +863,6 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
 {
   int status = eslOK;
   int M = cuom->M;
-  int Q = cuom->Q;
 
   P7_CUDA_LT_WINDOW *h_windows = NULL;
   int h_win_count = 0;
@@ -890,6 +885,7 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
     if (engine->d_lt_ssv_scores) cudaFree(engine->d_lt_ssv_scores);
     engine->d_lt_ssv_scores = NULL;
     engine->lt_ssv_alloc = 0;
+    engine->lt_ssv_cached_ptr = NULL;
     if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_ssv_scores, ssv_scores_size), errbuf, errbuf_size, "cudaMalloc(lt ssv_scores)")) != eslOK) goto ERROR;
     engine->lt_ssv_alloc = ssv_scores_size;
   }
@@ -914,35 +910,38 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   /* Upload metadata (small arrays from host) */
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_offsets, h_offsets, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt offsets)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_lengths, h_lengths, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt lengths)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+  if (ssv_scores_host != engine->lt_ssv_cached_ptr || ssv_scores_size != engine->lt_ssv_cached_size) {
+    if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+    engine->lt_ssv_cached_ptr  = ssv_scores_host;
+    engine->lt_ssv_cached_size = ssv_scores_size;
+  }
   if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
 
   /* Launch kernel — data comes directly from resident nucdb on device */
   {
-    size_t shmem = (size_t)M * 2;
-    ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, shmem);
+    ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, 0);
     cudaEventRecord(engine->evt_k0);
-    cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
+    cuda_ssv_longtarget_kernel<<<nchunks, 32>>>(
       d_nucdb_data, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
-      cuom->d_rbv, engine->d_lt_ssv_scores,
-      M, Q, Kp,
+      cuom->d_rbv_lin, engine->d_lt_ssv_scores,
+      M, Kp,
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,
       engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
-	    cudaEventRecord(engine->evt_k1);
-	    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
-	  }
+    cudaEventRecord(engine->evt_k1);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
+  }
 
-	  status = ssv_longtarget_download_ordered(engine, nchunks, step,
-	                                           &h_windows, &h_win_count,
-	                                           errbuf, errbuf_size);
-	  if (status != eslOK) goto ERROR;
-	  if (stats) {
-	    float ms = 0.0f;
-	    if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
-	      stats->kernel_seconds = (double)ms * 1e-3;
-	  }
+  status = ssv_longtarget_download_ordered(engine, nchunks, step,
+                                           &h_windows, &h_win_count,
+                                           errbuf, errbuf_size);
+  if (status != eslOK) goto ERROR;
+  if (stats) {
+    float ms = 0.0f;
+    if (cudaEventElapsedTime(&ms, engine->evt_k0, engine->evt_k1) == cudaSuccess)
+      stats->kernel_seconds = (double)ms * 1e-3;
+  }
 
   *ret_windows  = h_windows;
   *ret_nwindows = h_win_count;
@@ -967,7 +966,6 @@ p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPR
 {
   int status = eslOK;
   int M = cuom->M;
-  int Q = cuom->Q;
   int max_windows = nchunks * SSV_LT_MAX_WINDOWS_PER_CHUNK;
   int ssv_scores_size = (M + 1) * Kp;
 
@@ -988,6 +986,7 @@ p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPR
     if (engine->d_lt_ssv_scores) cudaFree(engine->d_lt_ssv_scores);
     engine->d_lt_ssv_scores = NULL;
     engine->lt_ssv_alloc = 0;
+    engine->lt_ssv_cached_ptr = NULL;
     if ((status = cuda_status(cudaMalloc((void **)&engine->d_lt_ssv_scores, ssv_scores_size), errbuf, errbuf_size, "cudaMalloc(lt ssv_scores)")) != eslOK) goto ERROR;
     engine->lt_ssv_alloc = ssv_scores_size;
   }
@@ -1011,17 +1010,20 @@ p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPR
 
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_offsets, h_offsets, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt offsets)")) != eslOK) goto ERROR;
   if ((status = cuda_status(cudaMemcpy(engine->d_lt_lengths, h_lengths, sizeof(int) * nchunks, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt lengths)")) != eslOK) goto ERROR;
-  if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+  if (ssv_scores_host != engine->lt_ssv_cached_ptr || ssv_scores_size != engine->lt_ssv_cached_size) {
+    if ((status = cuda_status(cudaMemcpy(engine->d_lt_ssv_scores, ssv_scores_host, ssv_scores_size, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(lt ssv_scores)")) != eslOK) goto ERROR;
+    engine->lt_ssv_cached_ptr  = ssv_scores_host;
+    engine->lt_ssv_cached_size = ssv_scores_size;
+  }
   if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
 
   {
-    size_t shmem = (size_t)M * 2;
-    ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, shmem);
+    ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, 0);
     cudaEventRecord(engine->evt_k0);
-    cuda_ssv_longtarget_kernel<<<nchunks, 32, shmem>>>(
+    cuda_ssv_longtarget_kernel<<<nchunks, 32>>>(
       d_nucdb_data, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
-      cuom->d_rbv, engine->d_lt_ssv_scores,
-      M, Q, Kp,
+      cuom->d_rbv_lin, engine->d_lt_ssv_scores,
+      M, Kp,
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,

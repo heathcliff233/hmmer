@@ -1,6 +1,6 @@
 # GPU Support Progress
 
-Last updated: 2026-05-09 (multi-warp-per-block for SSV + Viterbi opt kernels)
+Last updated: 2026-05-11 (SSV longtarget d_rbv_lin optimization)
 
 ## Current State
 
@@ -132,7 +132,7 @@ The fused SSV+null+bias+gate kernel is the default GPU MSV path:
 
 A GPU-accelerated path for `nhmmer` is available via `--gpu`. Rebased on latest `h3-gpu` (fused SSV kernel, multi-warp-per-block, templated Viterbi).
 
-- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks) + batch MSV/bias/F1 filter + GPU scanning Viterbi + exact-F3 GPU Forward pre-filter + GPU FB parser handoff + threaded CPU domain/hit processing. There is no extra single-score Viterbi pre-filter in the nucleotide path.
+- **Architecture**: GPU SSV longtarget kernel (warp-per-chunk, 64K chunks, linear `d_rbv_lin` layout, zero shared memory) + batch MSV/bias/F1 filter + GPU scanning Viterbi + exact-F3 GPU Forward pre-filter + GPU FB parser handoff + threaded CPU domain/hit processing. There is no extra single-score Viterbi pre-filter in the nucleotide path. SSV longtarget uses the same linear rbv layout as the protein fused SSV kernel; the switch from strided `d_rbv` reduced the SSV kernel time by ~23% on 5x chr22 with query_medium. Per-query `ssv_scores` upload is cached across strands.
 - **Nucdb default**: `hmmnucdb` now defaults to overlap chunking (`--overlap 2001`) so typical `.nucdb` targets enable the GPU-resident SSV path. Use `--overlap 0` only for ordinary no-overlap diagnostics.
 - **GPU FB parser** (`nhmmer_gpu_run_fb_parser_batch`): Batch Forward+Backward parser on GPU. Forward-Backward split: prefilter saves xf, Backward-only for F3 survivors.
 - **Forward pre-filter** (`nhmmer_gpu_forward_prefilter`): GPU Forward score-only with exact F3 gate. Removes about 40% of post-Viterbi sub-windows before FB parser on the current query_medium smoke run.

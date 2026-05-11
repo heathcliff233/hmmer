@@ -1,6 +1,6 @@
 # nhmmer GPU Support — Progress
 
-Last updated: 2026-05-11
+Last updated: 2026-05-11 (SSV d_rbv_lin optimization)
 
 ## Architecture
 
@@ -763,8 +763,63 @@ Current query_medium launch/occupancy instrumentation on fast overlap `.nucdb`:
 
 | Stage | Launch shape | Occupancy | Grid coverage |
 |-------|--------------|:---:|:---:|
-| SSV longtarget | 2 launches, last grid=800, block=32, smem=1002B | 50.0% theoretical, 24 active warps/SM of 48; 97.9% device-active in SSV wall | 6.25x on 128 SMs |
+| SSV longtarget | 2 launches, last grid=800, block=32, smem=0B | 50.0% theoretical, 24 active warps/SM of 48; device-active in SSV wall | 6.25x on 128 SMs |
 | Scanning Viterbi | 2 launches, last grid=1103, block=32, smem=24192B | 8.3% theoretical, 4 active physical warps/SM of 48; about 94.4% device-active in the current focused Viterbi CUDA call after first-call buffer growth | 8.55x on 128 SMs |
+
+### SSV Longtarget `d_rbv_lin` Optimization (2026-05-11)
+
+The SSV longtarget kernel switched from the strided SIMD `d_rbv` layout to the
+linear `d_rbv_lin` layout. The old inner loop read shared memory lookup tables
+(`s_q[M]`, `s_z[M]`) every iteration and computed a complex address:
+`rbv[(x * Q + s_q[km1]) * 16 + s_z[km1]]`. The new inner loop uses
+`rbv_lin[x * M + km1]` — one multiply and one addition, zero shared memory.
+This also removes `2*M` bytes of shared memory per block, the fill loop, and
+the first `__syncthreads()`. The `d_rbv_lin` field already existed on
+`P7_CUDA_MSVPROFILE` and was populated for nucleotide profiles (Kp=18) at
+profile creation time. Per-query `ssv_scores` upload is now cached in the
+engine (pointer-identity check); this avoids one synchronous `cudaMemcpy` per
+strand after the first upload.
+
+Benchmark on 5x chr22 with query_medium overlap `.nucdb`, 16 threads, 3-run means:
+
+| Metric | Baseline | Optimized | Change |
+|--------|:---:|:---:|:---:|
+| SSV kernel (CUDA event) | 0.518s | 0.400s | −22.8% |
+| SSV wall (host) | 0.587s | 0.452s | −23.0% |
+| Total search wall | 2.698s | 2.589s | −4.0% |
+
+Parity remained clean after the change: MADE1 FASTA 465=465, MADE1 `.nucdb`
+465=465, query_short FASTA 363=363, query_medium FASTA 648=648.
+
+Latest combined all-sample result after SSV `d_rbv_lin` optimization:
+
+| Benchmark path | Wall | Hits |
+|----------------|:---:|:---:|
+| CPU-1 | 8.157s | 1476 |
+| CPU-16 | 1.089s | 1476 |
+| GPU-16 FASTA | 1.829s | 1476 |
+| GPU-16 nucdb, no overlap | 1.540s | 1476 |
+| GPU-16 overlap-nucdb | 1.297s | 1476 |
+
+Focused query_medium fast overlap `.nucdb` timing after `d_rbv_lin`:
+
+| Bucket | Time / volume |
+|--------|:---:|
+| Process elapsed | 1.052s |
+| GPU loop wall | 0.599s |
+| Search stages | 0.540s |
+| SSV longtarget | 0.106s |
+| Batch filter | 0.034s |
+| Batch F1 H2D | 0.000s, 0 bytes |
+| Scanning Viterbi | 0.111s |
+| Viterbi host pack / H2D | 0 bytes / 0.000s |
+| GPU FB parser | 0.024s |
+| Parser host prep | 0.001s |
+| Parser H2D | 0.000s, 0 bytes |
+| Parser kernels | 0.015s |
+| Parser D2H | 0.003s |
+| CPU workers | 0.264s |
+| Domain workflow | 0.242s |
 
 The 16-thread baseline changes the conclusion: GPU-16 remains hit-clean but is slower than CPU-16 on the combined all-sample benchmark. Focused query_medium shows why the occupancy counter alone was misleading. SSV is a one-warp-per-block kernel with only 50% theoretical occupancy, but it is already device-active; grouping multiple chunks per block raised theoretical occupancy and did not improve wall time. Scanning Viterbi was wasting lanes 8-31 of each physical warp for nucleotide DP; it now packs four 8-lane DP groups per physical warp, reducing the repeated scan kernel from about `0.125-0.128s` to about `0.112-0.116s` in focused runs, though current runs still show variance. Viterbi long-target now reuses two engine-owned nonblocking CUDA streams instead of creating and destroying streams on every call, and the default biased path reads F1-packed device windows directly instead of repacking/reuploading survivor sequence bytes. A score-only Forward prefilter experiment failed parity badly because `p7_cuda_ForwardScoreDsqdataSubset()` is not parser-equivalent for this nucleotide F3 gate, so the accepted path still uses the GPU Forward parser xmx handoff. The FASTA and `.nucdb` paths now avoid the all-window Forward xmx D2H transfer, CPU F3 survivor loop, survivor Forward xmx H2D transfer, and survivor metadata H2D before Backward by gating, computing compact offsets, and compacting Forward xmx on GPU before Backward. The batch F1 stage now uses a nucleotide-specific GPU gate, only copies ordered survivor indices/bias scores back, reuses persistent host survivor/metadata scratch, fills downloaded GPU window lists directly, and exposes the packed device batch to Viterbi; the Viterbi wrapper also reuses host metadata/output scratch. The GPU parser handoff binds downloaded xmx buffers directly into OMX objects for CPU domain workflow. Ordered SSV output removes the first CPU SSV-window sort, ordered Viterbi seed slots remove the normal CPU raw-seed sort, and avoidable parser/SSV/F1 handoff synchronization barriers are gone. SSV-window and scanning-Viterbi seed extend/merge now run in CUDA-managed helpers in the default path; residual CPU domain workflow remains. The final combined benchmark remains run-to-run volatile (`1.163-1.556s` observed for GPU-16 overlap `.nucdb` across recent runs), so measured micro-improvements do not yet translate to a stable end-to-end win over CPU-16.
 

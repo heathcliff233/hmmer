@@ -112,6 +112,8 @@ struct p7_cuda_msv_engine_s {
   int                 lt_meta_alloc;
   uint8_t            *d_lt_ssv_scores;
   int                 lt_ssv_alloc;
+  const uint8_t      *lt_ssv_cached_ptr;
+  int                 lt_ssv_cached_size;
   P7_CUDA_LT_WINDOW *d_lt_windows;
   int                *d_lt_win_count;
   P7_CUDA_LT_WINDOW *d_lt_windows_compact;
