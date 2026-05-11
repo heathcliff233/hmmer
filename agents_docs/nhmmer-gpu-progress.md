@@ -963,6 +963,32 @@ A fresh audit rerun on the same implementation stayed hit-clean but slower:
 CPU-1 `8.115s`, CPU-16 `1.056s`, GPU-16 FASTA `2.413s`, GPU-16 no-overlap
 `.nucdb` `1.472s`, and GPU-16 overlap `.nucdb` `1.531s`, all with `1476` hits.
 
+The resident overlap `.nucdb` path now avoids reconstructing full forward and
+reverse-complement host `ESL_SQ` objects. The old code rebuilt full host `dsq`
+strands from mapped `.nucdb` chunks even though SSV, F1, scanning Viterbi, and
+Forward/Backward parser sequence reads were already resident/gathered on the
+GPU. The default path now creates metadata-only sequence shells for the top-level
+pipeline and materializes only the survivor-window slice needed by
+`p7_pli_postFwdBwdNoF3_LongTarget()` in each CPU domain worker. Diagnostic
+fallback paths that still read `sq->dsq` keep the full reconstruction. The SSV
+threshold calculation in the `.nucdb` strand path now uses `p7_bg_NullOne(...,
+NULL, om->max_length, ...)`, matching existing SSV threshold code and removing
+the last pre-search dependency on a full host strand.
+
+Verification after the shell/slice update: `git diff --check` clean,
+`make -C src -j2 nhmmer` clean, and `NHMMER_GPU_BENCH_CPU=16
+test-speed/x-nhmmer-gpu-parity .` reported `4 passed, 0 failed`. The standard
+combined chr22 run was hit-clean: CPU-1 `9.962s`, CPU-16 `1.111s`, GPU-16 FASTA
+`1.955s`, GPU-16 no-overlap `.nucdb` `1.371s`, and GPU-16 overlap `.nucdb`
+`1.196s`, all with `1476` hits. On the larger chr22x5 target, the pre-fix GPU
+run had `nucdb reconstruct` about `0.295s` and external GPU wall `5.231s`.
+After the fix, a clean standalone GPU-16 overlap `.nucdb` run measured `4.348s`
+external wall, `4.260s` internal process elapsed, `3.801s` GPU loop wall,
+`0.459s` process outside search, `0.274s` CUDA engine create, `0.119s` shared
+`.nucdb` upload, and `nucdb reconstruct: 0.000s` for all three queries, with
+`6294` hits. A standalone CPU-16 run on the same chr22x5 FASTA target measured
+`4.893s` with `6294` hits.
+
 ```
 a7936ac8 gpu: fix scanning Viterbi threshold bug + add --gpu-compare and --gpu-cpu-postmsv
 063207a2 build: ignore src/hmmnucdb and suppress easel submodule dirty state

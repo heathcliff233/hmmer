@@ -135,6 +135,9 @@ typedef struct {
   double            t_gpu_loop_wall;  /* wall time around serial/nucdb GPU search loop */
   double            t_query_elapsed;  /* HMMER stopwatch-equivalent wall time for current query */
   double            t_query_presearch; /* per-query model/profile/output setup before GPU search loop */
+  double            t_cuda_profile_create; /* per-query CUDA profile upload/setup before GPU search loop */
+  double            t_cuda_profile_destroy; /* per-query CUDA profile teardown after GPU search loop */
+  double            t_gpu_scratch_free;     /* per-query host scratch free after GPU search loop */
   double            t_query_postloop;  /* per-query cleanup/status work between GPU loop and post-search */
   double            t_program_prequery; /* setup before first query stopwatch starts */
   double            t_program_total;  /* process wall from main timing start to teardown */

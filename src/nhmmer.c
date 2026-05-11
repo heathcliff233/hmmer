@@ -966,6 +966,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
   double          gpu_t_nucdb_upload  = 0.0;
   double          gpu_t_cuda_destroy  = 0.0;
   double          gpu_t_query_presearch_total = 0.0;
+  double          gpu_t_cuda_profile_create_total = 0.0;
+  double          gpu_t_cuda_profile_destroy_total = 0.0;
+  double          gpu_t_gpu_scratch_free_total = 0.0;
   double          gpu_t_gpu_loop_wall_total   = 0.0;
   double          gpu_t_query_postloop_total  = 0.0;
   double          gpu_t_post_search_total     = 0.0;
@@ -1171,11 +1174,15 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         P7_CUDA_MSVPROFILE *cuda_msv    = NULL;
         int     gpu_nseqs = 0;
         int64_t gpu_nres  = 0;
+        double  t_cuda_profile_create = 0.0;
 
         memset(&gpu_info, 0, sizeof(gpu_info));
         gpu_info_valid = FALSE;
 
+        clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
         status = p7_cuda_msvprofile_Create(info[0].om, &cuda_msv, errbuf, sizeof(errbuf));
+        clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
+        t_cuda_profile_create = elapsed_seconds(&tmp_ts0, &tmp_ts1);
         if (status != eslOK) p7_Fail("--gpu requested, but CUDA MSV profile creation failed: %s\n", errbuf);
 
         gpu_info.bg             = info[0].bg;
@@ -1282,6 +1289,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_gpu_loop_wall = 0;
         gpu_info.t_query_elapsed = 0;
         gpu_info.t_query_presearch = 0;
+        gpu_info.t_cuda_profile_create = t_cuda_profile_create;
+        gpu_info.t_cuda_profile_destroy = 0;
+        gpu_info.t_gpu_scratch_free = 0;
         gpu_info.t_query_postloop = 0;
         gpu_info.t_program_prequery = 0;
         gpu_info.t_program_total = 0;
@@ -1316,7 +1326,12 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
                   gpu_info.n_post_vit_windows, gpu_info.n_fwd_survivor_windows, (int64_t)info[0].th->N,
                   100.0 * (double)gpu_info.n_fwd_survivor_windows / (double)gpu_info.n_post_vit_windows);
 
+        clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
         p7_cuda_msvprofile_Destroy(cuda_msv);
+        clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
+        gpu_info.t_cuda_profile_destroy = elapsed_seconds(&tmp_ts0, &tmp_ts1);
+
+        clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
         free(gpu_info.h_ssv_scores);
         free(gpu_info.h_ssv_status);
         free(gpu_info.h_null_scores);
@@ -1332,6 +1347,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         free(gpu_info.h_nucdb_window_lengths);
         free(gpu_info.h_nucdb_window_src1_lengths);
         free(gpu_info.h_nucdb_window_src2_offsets);
+        clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
+        gpu_info.t_gpu_scratch_free = elapsed_seconds(&tmp_ts0, &tmp_ts1);
         gpu_info_valid = TRUE;
       }
       else
@@ -1492,6 +1509,9 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	          gpu_info.t_cuda_reset = elapsed_seconds(&tmp_ts0, &tmp_ts1);
 	        }
 	        gpu_t_query_presearch_total += gpu_info.t_query_presearch;
+	        gpu_t_cuda_profile_create_total += gpu_info.t_cuda_profile_create;
+	        gpu_t_cuda_profile_destroy_total += gpu_info.t_cuda_profile_destroy;
+	        gpu_t_gpu_scratch_free_total += gpu_info.t_gpu_scratch_free;
 	        gpu_t_gpu_loop_wall_total   += gpu_info.t_gpu_loop_wall;
 	        gpu_t_query_postloop_total  += gpu_info.t_query_postloop;
 	        gpu_t_post_search_total     += gpu_info.t_post_search;
@@ -1586,7 +1606,10 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	          fprintf(stderr, "  nucdb reconstruct:  %7.3fs\n", gpu_info.t_nucdb_reconstruct);
 	          fprintf(stderr, "  loop unbucketed:    %7.3fs\n", t_loop_gap > 0.0 ? t_loop_gap : 0.0);
 	          fprintf(stderr, "  pre-search setup:   %7.3fs\n", gpu_info.t_query_presearch);
+	          fprintf(stderr, "    CUDA profile create:%5.3fs\n", gpu_info.t_cuda_profile_create);
 	          fprintf(stderr, "  post-loop cleanup:  %7.3fs\n", gpu_info.t_query_postloop);
+	          fprintf(stderr, "    CUDA profile destroy:%4.3fs\n", gpu_info.t_cuda_profile_destroy);
+	          fprintf(stderr, "    scratch free:     %7.3fs\n", gpu_info.t_gpu_scratch_free);
 	          fprintf(stderr, "  post-search/report: %7.3fs\n", gpu_info.t_post_search);
 	          fprintf(stderr, "  query outside search:%6.3fs\n", t_query_outside_search);
 	          fprintf(stderr, "  query elapsed:      %7.3fs\n", gpu_info.t_query_elapsed);
@@ -1746,10 +1769,12 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     gpu_t_process_elapsed = elapsed_seconds(&prog_ts0, &prog_ts1);
     gpu_t_process_outside_search = gpu_t_process_elapsed - gpu_t_gpu_loop_wall_total;
     if (gpu_t_process_outside_search < 0.0) gpu_t_process_outside_search = 0.0;
-    fprintf(stderr, "GPU process timing: setup_engine=%.3fs shared_nucdb_open=%.3fs shared_nucdb_upload=%.3fs query_presearch=%.3fs gpu_loop_wall=%.3fs query_postloop=%.3fs post_search_report=%.3fs cuda_reset=%.3fs cuda_destroy=%.3fs process_outside_search=%.3fs process_elapsed=%.3fs\n",
+    fprintf(stderr, "GPU process timing: setup_engine=%.3fs shared_nucdb_open=%.3fs shared_nucdb_upload=%.3fs query_presearch=%.3fs cuda_profile_create=%.3fs gpu_loop_wall=%.3fs query_postloop=%.3fs cuda_profile_destroy=%.3fs scratch_free=%.3fs post_search_report=%.3fs cuda_reset=%.3fs cuda_destroy=%.3fs process_outside_search=%.3fs process_elapsed=%.3fs\n",
             gpu_t_engine_create, gpu_t_nucdb_open, gpu_t_nucdb_upload,
-            gpu_t_query_presearch_total, gpu_t_gpu_loop_wall_total,
-            gpu_t_query_postloop_total, gpu_t_post_search_total,
+            gpu_t_query_presearch_total, gpu_t_cuda_profile_create_total,
+            gpu_t_gpu_loop_wall_total, gpu_t_query_postloop_total,
+            gpu_t_cuda_profile_destroy_total, gpu_t_gpu_scratch_free_total,
+            gpu_t_post_search_total,
             gpu_t_cuda_reset_total, gpu_t_cuda_destroy,
             gpu_t_process_outside_search, gpu_t_process_elapsed);
   }

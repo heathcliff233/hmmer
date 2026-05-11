@@ -201,6 +201,37 @@ nhmmer_gpu_nucdb_get_cached_sq(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
 }
 
 static int
+nhmmer_gpu_nucdb_create_seq_shell(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
+                                  int64_t si, ESL_SQ **ret_sq)
+{
+  const P7_NUCDB_SEQ_IDX *sidx;
+  const char *seqname;
+  ESL_SQ *sq;
+  int status;
+
+  if (!ndb || !abc || !ret_sq) return eslEINVAL;
+  if (si < 0 || si >= (int64_t)ndb->hdr.nseq) return eslEINVAL;
+
+  sidx = &ndb->seq_idx[si];
+  seqname = ndb->name_blob + sidx->name_offset;
+  sq = esl_sq_CreateDigital(abc);
+  if (!sq) return eslEMEM;
+  free(sq->dsq);
+  sq->dsq = NULL;
+  sq->salloc = 0;
+  status = esl_sq_SetName(sq, seqname);
+  if (status != eslOK) { esl_sq_Destroy(sq); return status; }
+  sq->start = 1;
+  sq->end   = sidx->length;
+  sq->n     = sidx->length;
+  sq->L     = sidx->length;
+  sq->C     = 0;
+  sq->W     = sidx->length;
+  *ret_sq = sq;
+  return eslOK;
+}
+
+static int
 nhmmer_gpu_vit_window_compare(const void *a, const void *b)
 {
   const P7_CUDA_VIT_LT_WINDOW *wa = (const P7_CUDA_VIT_LT_WINDOW *)a;
@@ -883,6 +914,10 @@ typedef struct {
   P7_HMM_WINDOWLIST vit_windowlist;
 
   const ESL_SQ     *sq;
+  const P7_NUCDB   *ndb;
+  ESL_SQ           *slice_sq;
+  ESL_DSQ          *slice_dsq;
+  int64_t           slice_alloc;
   P7_HMM_WINDOW   *windows;
   int               nwindows;
   int64_t           seq_id;
@@ -911,6 +946,89 @@ typedef struct {
   int              *next_window;
   int               global_nwindows;
 } NHMMER_GPU_WORKER;
+
+static int
+nhmmer_gpu_nucdb_fill_slice(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
+                            int64_t si, int complementarity,
+                            uint64_t start, int length, const char *seqname,
+                            ESL_SQ **ret_sq, ESL_DSQ **ret_dsq, int64_t *ret_alloc)
+{
+  const P7_NUCDB_SEQ_IDX *sidx;
+  int chunk_start, chunk_count;
+  int64_t need;
+  int64_t seq_pos0;
+  ESL_SQ *sq = *ret_sq;
+  ESL_DSQ *dsq = *ret_dsq;
+  int64_t alloc = *ret_alloc;
+
+  if (!ndb || !abc || si < 0 || si >= (int64_t)ndb->hdr.nseq || start < 1 || length < 0)
+    return eslEINVAL;
+
+  sidx = &ndb->seq_idx[si];
+  if (start + (uint64_t)length - 1 > (uint64_t)sidx->length) return eslEINVAL;
+
+  if (sq == NULL) {
+    sq = esl_sq_CreateDigital(abc);
+    if (!sq) return eslEMEM;
+    free(sq->dsq);
+    sq->dsq = NULL;
+    sq->salloc = 0;
+    *ret_sq = sq;
+  }
+  if (sq->name == NULL || strcmp(sq->name, seqname) != 0) {
+    int status = esl_sq_SetName(sq, seqname);
+    if (status != eslOK) return status;
+  }
+
+  need = (int64_t)length + 2;
+  if (alloc < need) {
+    ESL_DSQ *tmp = realloc(dsq, sizeof(ESL_DSQ) * need);
+    if (!tmp) return eslEMEM;
+    dsq = tmp;
+    alloc = need;
+    *ret_dsq = dsq;
+    *ret_alloc = alloc;
+  }
+
+  dsq[0] = eslDSQ_SENTINEL;
+  dsq[length + 1] = eslDSQ_SENTINEL;
+  memset(dsq + 1, eslDSQ_SENTINEL, sizeof(ESL_DSQ) * length);
+
+  chunk_start = (complementarity == p7_NOCOMPLEMENT) ? sidx->fwd_chunk_start : sidx->rc_chunk_start;
+  chunk_count = (complementarity == p7_NOCOMPLEMENT) ? sidx->fwd_chunk_count : sidx->rc_chunk_count;
+  seq_pos0 = (int64_t)start - 1;
+
+  for (int c = 0; c < chunk_count; c++) {
+    P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+    int64_t chunk_beg = ci->seq_offset;
+    int64_t chunk_end = ci->seq_offset + ci->length;
+    int64_t req_beg = seq_pos0;
+    int64_t req_end = seq_pos0 + length;
+    int64_t ov_beg = ESL_MAX(chunk_beg, req_beg);
+    int64_t ov_end = ESL_MIN(chunk_end, req_end);
+    if (ov_beg < ov_end) {
+      int64_t dst = ov_beg - req_beg;
+      int64_t src = ov_beg - chunk_beg;
+      int64_t n   = ov_end - ov_beg;
+      memcpy(dsq + 1 + dst, ndb->chunk_data + ci->data_offset + 1 + src, n);
+    }
+  }
+
+  sq->dsq = dsq;
+  sq->n = length;
+  sq->L = sidx->length;
+  sq->C = 0;
+  sq->W = length;
+  if (complementarity == p7_NOCOMPLEMENT) {
+    sq->start = 1;
+    sq->end = sidx->length;
+  } else {
+    sq->start = sidx->length;
+    sq->end = 1;
+  }
+  sq->abc = abc;
+  return eslOK;
+}
 
 static int
 nhmmer_gpu_worker_next_window(NHMMER_GPU_WORKER *w)
@@ -987,6 +1105,10 @@ nhmmer_gpu_worker_init(NHMMER_GPU_WORKER *w, const NHMMER_GPU_INFO *info)
   w->pli_tmp->tmpseq->dsq = NULL;
 
   w->sq              = NULL;
+  w->ndb             = NULL;
+  w->slice_sq        = NULL;
+  w->slice_dsq       = NULL;
+  w->slice_alloc     = 0;
   w->windows         = NULL;
   w->nwindows        = 0;
   w->seq_id          = 0;
@@ -1020,6 +1142,11 @@ nhmmer_gpu_worker_destroy(NHMMER_GPU_WORKER *w)
     free(w->pli_tmp);
   }
   if (w->vit_windowlist.windows) free(w->vit_windowlist.windows);
+  if (w->slice_sq) {
+    w->slice_sq->dsq = NULL;
+    esl_sq_Destroy(w->slice_sq);
+  }
+  free(w->slice_dsq);
   if (w->scoredata) p7_hmm_ScoreDataDestroy(w->scoredata);
   if (w->th)        p7_tophits_Destroy(w->th);
   if (w->pli)       p7_pipeline_Destroy(w->pli);
@@ -1197,7 +1324,8 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
        use_dynamic ? (i >= 0) : (i < w->nwindows);
        i = use_dynamic ? nhmmer_gpu_worker_next_window(w) : i + 1) {
     window = w->windows + i;
-    ESL_DSQ *subseq = w->sq->dsq + window->n - 1;
+    const ESL_SQ *seq_for_window = w->sq;
+    ESL_DSQ *subseq;
     int window_len = window->length;
     size_t xoff = w->gpu_x_offsets[i];
     NHMMER_OMX_BINDING saved_oxf;
@@ -1217,14 +1345,26 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
 
     p7_oprofile_ReconfigRestLength(w->om, window_len);
 
+    if (w->ndb != NULL && w->sq->dsq == NULL) {
+      w->status = nhmmer_gpu_nucdb_fill_slice(w->ndb, w->om->abc, w->seq_id,
+                                              w->complementarity, window->n,
+                                              window_len, w->sq->name,
+                                              &w->slice_sq, &w->slice_dsq,
+                                              &w->slice_alloc);
+      if (w->status != eslOK) return;
+      seq_for_window = w->slice_sq;
+      subseq = w->slice_sq->dsq;
+    } else {
+      subseq = w->sq->dsq + window->n - 1;
+    }
     nhmmer_gpu_BindOmxXmx(w->pli->oxf, w->gpu_xf + xoff, w->om->M, window_len, TRUE, 0.0f, &saved_oxf);
     nhmmer_gpu_BindOmxXmx(w->pli->oxb, w->gpu_xb + xoff, w->om->M, window_len, FALSE, 0.0f, &saved_oxb);
 
     double domain_before = w->pli->time_domain;
     w->status = p7_pli_postFwdBwdNoF3_LongTarget(w->pli, w->om, w->bg, w->th, w->scoredata,
                                                  w->seq_id, (int)window->n, window_len, subseq,
-                                                 (int64_t)w->sq->start, w->sq->name, w->sq->source,
-                                                 w->sq->acc, w->sq->desc,
+                                                 (int64_t)seq_for_window->start, seq_for_window->name, seq_for_window->source,
+                                                 seq_for_window->acc, seq_for_window->desc,
                                                  -1, w->complementarity, &overlap, w->pli_tmp,
                                                  w->gpu_scores[i * 2]);
     nhmmer_gpu_RestoreOmxXmx(w->pli->oxb, &saved_oxb);
@@ -3109,7 +3249,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
    * First, compute SSV threshold (same as in nhmmer_gpu_serial_loop). */
   float nullsc;
   p7_bg_SetLength(info->bg, om->max_length);
-  p7_bg_NullOne(info->bg, sq->dsq, om->max_length, &nullsc);
+  p7_bg_NullOne(info->bg, NULL, om->max_length, &nullsc);
 
   float invP = esl_gumbel_invsurv(info->pli->F1, om->evparam[p7_MMU], om->evparam[p7_MLAMBDA]);
   uint8_t sc_thresh = (uint8_t)ceil(((nullsc + (invP * eslCONST_LOG2) + 3.0) * om->scale_b)
@@ -3425,6 +3565,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
         if (status != eslOK) { nworkers = i; goto VLT2_THREAD_ERROR; }
 
         workers[i].sq              = sq;
+        workers[i].ndb             = ndb;
         workers[i].worker_id       = i;
         workers[i].seq_id          = seq_id;
         workers[i].complementarity = complementarity;
@@ -3518,6 +3659,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       }
 
       w.sq              = sq;
+      w.ndb             = ndb;
       w.worker_id       = 0;
       w.seq_id          = seq_id;
       w.complementarity = complementarity;
@@ -3704,15 +3846,27 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
 
   for (int64_t si = 0; si < (int64_t)ndb->hdr.nseq; si++) {
     P7_NUCDB_SEQ_IDX *sidx = &ndb->seq_idx[si];
-    int sq_built = FALSE;
     ESL_SQ *sq = NULL;
+    int chunk_size = info->gpu_chunk_size > 0 ? info->gpu_chunk_size : NHMMER_GPU_CHUNK_SIZE;
+    int use_shell = (!info->do_compare &&
+                     !info->do_cpu_postmsv &&
+                     info->do_gpu_fwd &&
+                     p7_cuda_engine_NucdbDevPtr(info->cuda_engine) != NULL &&
+                     (int64_t)ndb->hdr.overlap >= (int64_t)om->max_length &&
+                     (int64_t)ndb->hdr.chunk_size == (int64_t)chunk_size);
+
     clock_gettime(CLOCK_MONOTONIC, &ts0);
-    status = nhmmer_gpu_nucdb_get_cached_sq(ndb, om->abc, si, p7_NOCOMPLEMENT, &sq, &sq_built);
-    if (status != eslOK) return status;
-    if (sq_built) {
-      clock_gettime(CLOCK_MONOTONIC, &ts1);
-      info->t_nucdb_reconstruct += nhmmer_gpu_elapsed(&ts0, &ts1);
+    if (use_shell) {
+      status = nhmmer_gpu_nucdb_create_seq_shell(ndb, om->abc, si, &sq);
+    } else {
+      int sq_built = FALSE;
+      status = nhmmer_gpu_nucdb_get_cached_sq(ndb, om->abc, si, p7_NOCOMPLEMENT, &sq, &sq_built);
+      if (sq_built) {
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        info->t_nucdb_reconstruct += nhmmer_gpu_elapsed(&ts0, &ts1);
+      }
     }
+    if (status != eslOK) return status;
 
     p7_pli_NewSeq(info->pli, sq);
 
@@ -3732,16 +3886,20 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
     /* Reverse complement strand — reconstruct directly from nucdb RC chunks */
     if (strands != p7_STRAND_TOPONLY && sidx->rc_chunk_count > 0) {
       ESL_SQ *sq_rc = NULL;
-      int sq_rc_built = FALSE;
-      clock_gettime(CLOCK_MONOTONIC, &ts0);
-      status = nhmmer_gpu_nucdb_get_cached_sq(ndb, om->abc, si, p7_COMPLEMENT, &sq_rc, &sq_rc_built);
-      if (status != eslOK) {
-        fprintf(stderr, "GPU nhmmer nucdb revcomp cache failed\n");
-        goto ERROR;
-      }
-      if (sq_rc_built) {
-        clock_gettime(CLOCK_MONOTONIC, &ts1);
-        info->t_nucdb_reconstruct += nhmmer_gpu_elapsed(&ts0, &ts1);
+      if (use_shell) {
+        sq_rc = sq;
+      } else {
+        int sq_rc_built = FALSE;
+        clock_gettime(CLOCK_MONOTONIC, &ts0);
+        status = nhmmer_gpu_nucdb_get_cached_sq(ndb, om->abc, si, p7_COMPLEMENT, &sq_rc, &sq_rc_built);
+        if (status != eslOK) {
+          fprintf(stderr, "GPU nhmmer nucdb revcomp cache failed\n");
+          goto ERROR;
+        }
+        if (sq_rc_built) {
+          clock_gettime(CLOCK_MONOTONIC, &ts1);
+          info->t_nucdb_reconstruct += nhmmer_gpu_elapsed(&ts0, &ts1);
+        }
       }
       nres += sq_rc->n;
 
@@ -3758,6 +3916,7 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
     p7_pipeline_Reuse(info->pli);
     if (idlen_cb) idlen_cb(idlen_data, si, sidx->length);
     info->pli->nseqs++;
+    if (use_shell) esl_sq_Destroy(sq);
   }
 
   *ret_nseqs = (int)ndb->hdr.nseq;

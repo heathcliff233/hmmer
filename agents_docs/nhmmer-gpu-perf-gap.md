@@ -368,6 +368,30 @@ no-overlap `.nucdb` `1.472s`, and GPU-16 overlap `.nucdb` `1.531s`, all with
 in the GPU processing pipeline; it is GPU kernel time, parser matrix D2H,
 CUDA/setup noise, and the allowed CPU domain/output workflow.
 
+The first concrete "outside search" fix after the 5x chr22 audit removed full
+host `.nucdb` strand reconstruction from the default resident overlap path. That
+work was not CUDA engine setup. It was CPU code walking mapped `.nucdb` chunks and
+copying an entire forward host `ESL_SQ` plus an entire reverse-complement host
+`ESL_SQ` before each sequence entered the GPU strand pipeline. This was redundant
+because SSV, F1, scanning Viterbi, and parser sequence reads already use the
+resident `.nucdb` device buffer. The default path now keeps only a metadata shell
+for sequence name/length/coordinate context and reconstructs just the survivor
+window slice needed by CPU domain definition after GPU Forward/Backward. Fallback
+diagnostic paths that still dereference `sq->dsq` keep the old full reconstruction.
+
+Measured effect on chr22x5 with `--cpu 16`: pre-fix GPU overlap `.nucdb` was
+`5.231s` external wall with `nucdb reconstruct` about `0.295s`. After the fix,
+a clean standalone GPU-16 run was `4.348s` external wall, `4.260s` internal
+process elapsed, `3.801s` GPU loop wall, `0.459s` process outside search,
+`0.274s` CUDA engine create, `0.119s` shared `.nucdb` upload, and
+`nucdb reconstruct: 0.000s`, with `6294` hits. A standalone CPU-16 run on the
+same chr22x5 FASTA target was `4.893s`, also `6294` hits. The normal chr22
+combined script after the fix measured CPU-1 `9.962s`, CPU-16 `1.111s`, GPU-16
+FASTA `1.955s`, GPU-16 no-overlap `.nucdb` `1.371s`, and GPU-16 overlap
+`.nucdb` `1.196s`, all with `1476` hits. The remaining GPU time is not hidden
+full-strand reconstruction; it is the visible search loop plus shared CUDA
+engine setup/upload, parser matrix D2H, and CPU domain/output work.
+
 ## Reproducing
 
 ```sh
