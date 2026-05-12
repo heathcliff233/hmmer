@@ -1,4 +1,7 @@
 /* hmmnucdb: create a nucleotide GPU database for nhmmer --gpu.
+ *
+ * Builds a v2 .nucdb (2-bit packed residues + mask bitmap, forward strand
+ * only). The reverse complement is generated on the fly at query time.
  */
 #include <p7_config.h>
 
@@ -21,7 +24,6 @@ static ESL_OPTIONS options[] = {
   { "-h",           eslARG_NONE,  FALSE, NULL, NULL, NULL,   NULL, NULL, "show brief help on version and usage",        1 },
   { "--chunk-size", eslARG_INT, "65536", NULL, "n>0", NULL,  NULL, NULL, "chunk size in residues (default 65536)",      2 },
   { "--overlap",    eslARG_INT,  "2001", NULL, "n>=0", NULL, NULL, NULL, "overlap between chunks in residues",          2 },
-  { "--fwd-only",   eslARG_NONE,  FALSE, NULL, NULL, NULL,   NULL, NULL, "store forward strand only (no reverse complement)", 2 },
   { "--informat",   eslARG_STRING, NULL, NULL, NULL, NULL,   NULL, NULL, "assert input <seqfile> is in format <s>",     2 },
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
@@ -42,7 +44,6 @@ main(int argc, char **argv)
   int           status;
   int64_t       chunk_size;
   int64_t       overlap;
-  int           both_strands;
 
   if (esl_opt_ProcessEnvironment(go)         != eslOK)  { printf("Failed to process environment: %s\n", go->errbuf); goto FAILURE; }
   if (esl_opt_ProcessCmdline(go, argc, argv) != eslOK)  { printf("Failed to parse command line: %s\n",  go->errbuf); goto FAILURE; }
@@ -63,9 +64,8 @@ main(int argc, char **argv)
   nucdb   = esl_opt_GetArg(go, 2);
   if (!seqfile || !nucdb) goto FAILURE;
 
-  chunk_size   = esl_opt_GetInteger(go, "--chunk-size");
-  overlap      = esl_opt_GetInteger(go, "--overlap");
-  both_strands = !esl_opt_GetBoolean(go, "--fwd-only");
+  chunk_size = esl_opt_GetInteger(go, "--chunk-size");
+  overlap    = esl_opt_GetInteger(go, "--overlap");
 
   if (esl_opt_IsOn(go, "--informat")) {
     fmt = esl_sqio_EncodeFormat(esl_opt_GetString(go, "--informat"));
@@ -84,13 +84,13 @@ main(int argc, char **argv)
   printf("Working...    ");
   fflush(stdout);
 
-  status = p7_nucdb_Write(nucdb, abc, sqfp, chunk_size, overlap, both_strands, errbuf);
+  status = p7_nucdb_Write(nucdb, abc, sqfp, chunk_size, overlap, errbuf);
   if (status != eslOK) p7_Fail("Failed to write nucdb: %s\n", errbuf);
 
   printf("done.\n");
   printf("Created nucleotide GPU database %s.nucdb for nhmmer --gpu.\n", nucdb);
-  printf("  chunk size: %" PRId64 "  overlap: %" PRId64 "  strands: %s\n",
-         chunk_size, overlap, both_strands ? "both" : "forward only");
+  printf("  chunk size: %" PRId64 "  overlap: %" PRId64 "  encoding: 2-bit+mask (forward only; RC on the fly)\n",
+         chunk_size, overlap);
 
   esl_sqfile_Close(sqfp);
   esl_alphabet_Destroy(abc);

@@ -30,12 +30,12 @@
 
 extern char nhmmer_empty_str[];
 
-/* Nucdb sequence reconstruction helpers (nhmmer_gpu_seqhelpers.c). */
-int nhmmer_gpu_nucdb_reconstruct_sq(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
-                                    int64_t si, int complementarity, ESL_SQ **ret_sq);
-int nhmmer_gpu_nucdb_get_cached_sq(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
-                                   int64_t si, int complementarity,
-                                   ESL_SQ **ret_sq, int *ret_built);
+/* Nucdb sequence slice helpers (nhmmer_gpu_seqhelpers.c).
+ * v2 .nucdb is 2-bit packed + mask bitmap, forward strand only. The RC
+ * strand is generated on the fly by both the GPU kernels and by
+ * nhmmer_gpu_nucdb_fill_slice (which the CPU domain workers call per
+ * survivor window). No helper materialises a whole-genome dsq.
+ */
 int nhmmer_gpu_nucdb_create_seq_shell(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
                                       int64_t si, ESL_SQ **ret_sq);
 int nhmmer_gpu_nucdb_fill_slice(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,

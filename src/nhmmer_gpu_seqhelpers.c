@@ -1,9 +1,18 @@
-/* nhmmer GPU pipeline: nucleotide-database sequence reconstruction helpers.
+/* nhmmer GPU pipeline: nucleotide-database sequence slice helpers (v2).
  *
- * Builds full or windowed ESL_SQ objects from .nucdb chunk storage. Pure
- * host-side code; no CUDA calls. The whole body is wrapped in HMMER_CUDA
- * because it is only linked into the GPU pipeline; CPU-only builds compile
- * this translation unit to an empty object.
+ * The .nucdb v2 on-disk layout stores forward-strand residues as 2-bit
+ * packed codes (A=0,C=1,G=2,T=3) plus a 1-bit mask bitmap indicating
+ * non-ACGT positions. The reverse-complement strand is not on disk; the
+ * CPU domain workers and the GPU kernels reverse the index and
+ * complement-XOR the 2-bit code on the fly.
+ *
+ * This file provides host-side helpers: a metadata-only shell ESL_SQ used
+ * by the pipeline top level (so the genome is NEVER materialised as
+ * byte-per-residue dsq), and a per-survivor-window slice fill that
+ * *does* emit Easel dsq bytes (codes 0..4 + N=15) because the CPU
+ * post-filter code (domain definition, null2, hit scoring) wants a
+ * standard ESL_DSQ *. Slice sizes are hundreds to a few thousand
+ * residues, so the total in-flight dsq residency is MB, not GB.
  */
 #include <p7_config.h>
 
@@ -24,102 +33,6 @@
 #include "cuda/nhmmer_cuda_internal.h"
 
 int
-nhmmer_gpu_nucdb_reconstruct_sq(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
-                                int64_t si, int complementarity, ESL_SQ **ret_sq)
-{
-  const P7_NUCDB_SEQ_IDX *sidx;
-  const char *seqname;
-  ESL_SQ *sq;
-  int c;
-
-  if (!ndb || !abc || !ret_sq) return eslEINVAL;
-  if (si < 0 || si >= (int64_t)ndb->hdr.nseq) return eslEINVAL;
-
-  sidx = &ndb->seq_idx[si];
-  seqname = ndb->name_blob + sidx->name_offset;
-
-  sq = esl_sq_CreateDigital(abc);
-  if (!sq) return eslEMEM;
-  esl_sq_SetName(sq, seqname);
-  esl_sq_GrowTo(sq, sidx->length);
-
-  if (complementarity == p7_NOCOMPLEMENT) {
-    int64_t step = (int64_t)ndb->hdr.chunk_size - (int64_t)ndb->hdr.overlap;
-    if (step < 1) step = 1;
-    for (c = 0; c < sidx->fwd_chunk_count; c++) {
-      P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[sidx->fwd_chunk_start + c];
-      uint8_t *chunk_dsq = ndb->chunk_data + ci->data_offset;
-      int64_t copy_start = 0;
-      int64_t copy_len   = ci->length;
-      if (c > 0) {
-        int64_t already_copied = ci->seq_offset;
-        int64_t prev_end = ndb->chunk_idx[sidx->fwd_chunk_start + c - 1].seq_offset +
-                           ndb->chunk_idx[sidx->fwd_chunk_start + c - 1].length;
-        if (prev_end > already_copied) {
-          copy_start = prev_end - already_copied;
-          copy_len  -= copy_start;
-        }
-      }
-      if (copy_len > 0)
-        memcpy(sq->dsq + 1 + ci->seq_offset + copy_start,
-               chunk_dsq + 1 + copy_start, copy_len);
-    }
-    sq->start = 1;
-    sq->end   = sq->n = sidx->length;
-  } else {
-    for (c = 0; c < sidx->rc_chunk_count; c++) {
-      P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[sidx->rc_chunk_start + c];
-      uint8_t *chunk_dsq = ndb->chunk_data + ci->data_offset;
-      int64_t copy_start = 0;
-      int64_t copy_len   = ci->length;
-      if (c > 0) {
-        int64_t prev_end = ndb->chunk_idx[sidx->rc_chunk_start + c - 1].seq_offset +
-                           ndb->chunk_idx[sidx->rc_chunk_start + c - 1].length;
-        if (prev_end > ci->seq_offset) {
-          copy_start = prev_end - ci->seq_offset;
-          copy_len  -= copy_start;
-        }
-      }
-      if (copy_len > 0)
-        memcpy(sq->dsq + 1 + ci->seq_offset + copy_start,
-               chunk_dsq + 1 + copy_start, copy_len);
-    }
-    sq->start = sq->n = sidx->length;
-    sq->end   = 1;
-  }
-  sq->L = sq->n;
-  sq->dsq[0] = eslDSQ_SENTINEL;
-  sq->dsq[sq->n + 1] = eslDSQ_SENTINEL;
-  *ret_sq = sq;
-  return eslOK;
-}
-
-int
-nhmmer_gpu_nucdb_get_cached_sq(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
-                               int64_t si, int complementarity,
-                               ESL_SQ **ret_sq, int *ret_built)
-{
-  ESL_SQ **slot = NULL;
-  int status;
-
-  if (!ndb || !abc || !ret_sq) return eslEINVAL;
-  if (ret_built) *ret_built = FALSE;
-  if (si < 0 || si >= (int64_t)ndb->hdr.nseq) return eslEINVAL;
-
-  if (complementarity == p7_NOCOMPLEMENT) slot = ndb->sq_cache_top;
-  else                                    slot = ndb->sq_cache_rc;
-  if (!slot) return eslEINVAL;
-
-  if (slot[si] == NULL) {
-    status = nhmmer_gpu_nucdb_reconstruct_sq(ndb, abc, si, complementarity, &slot[si]);
-    if (status != eslOK) return status;
-    if (ret_built) *ret_built = TRUE;
-  }
-  *ret_sq = slot[si];
-  return eslOK;
-}
-
-int
 nhmmer_gpu_nucdb_create_seq_shell(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
                                   int64_t si, ESL_SQ **ret_sq)
 {
@@ -135,6 +48,9 @@ nhmmer_gpu_nucdb_create_seq_shell(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
   seqname = ndb->name_blob + sidx->name_offset;
   sq = esl_sq_CreateDigital(abc);
   if (!sq) return eslEMEM;
+  /* Leave dsq unallocated — the shell is metadata-only. Workers later
+   * materialise per-survivor-window dsq slices via nhmmer_gpu_nucdb_fill_slice.
+   */
   free(sq->dsq);
   sq->dsq = NULL;
   sq->salloc = 0;
@@ -150,6 +66,14 @@ nhmmer_gpu_nucdb_create_seq_shell(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
   return eslOK;
 }
 
+/* Fill `dsq[1..length]` with the unpacked residue bytes for the requested
+ * window. On the forward strand the window is
+ *   forward_positions [start .. start+length-1]   (1-indexed).
+ * On the reverse-complement strand the nhmmer pipeline reports hit
+ * coordinates in the RC frame with start > end, so here `start` is a
+ * position in the RC sequence (1-indexed): it maps back to the forward
+ * range [L-start-length+2 .. L-start+1] read out in reverse and complemented.
+ */
 int
 nhmmer_gpu_nucdb_fill_slice(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
                             int64_t si, int complementarity,
@@ -157,12 +81,12 @@ nhmmer_gpu_nucdb_fill_slice(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
                             ESL_SQ **ret_sq, ESL_DSQ **ret_dsq, int64_t *ret_alloc)
 {
   const P7_NUCDB_SEQ_IDX *sidx;
-  int chunk_start, chunk_count;
   int64_t need;
-  int64_t seq_pos0;
   ESL_SQ *sq = *ret_sq;
   ESL_DSQ *dsq = *ret_dsq;
   int64_t alloc = *ret_alloc;
+  int abc_N;
+  int rc;
 
   if (!ndb || !abc || si < 0 || si >= (int64_t)ndb->hdr.nseq || start < 1 || length < 0)
     return eslEINVAL;
@@ -193,27 +117,67 @@ nhmmer_gpu_nucdb_fill_slice(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
     *ret_alloc = alloc;
   }
 
+  abc_N = esl_abc_XGetUnknown(abc);     /* dsq code for N: 15 for DNA */
+  rc    = (complementarity == p7_NOCOMPLEMENT) ? 0 : 1;
+
   dsq[0] = eslDSQ_SENTINEL;
   dsq[length + 1] = eslDSQ_SENTINEL;
-  memset(dsq + 1, eslDSQ_SENTINEL, sizeof(ESL_DSQ) * length);
 
-  chunk_start = (complementarity == p7_NOCOMPLEMENT) ? sidx->fwd_chunk_start : sidx->rc_chunk_start;
-  chunk_count = (complementarity == p7_NOCOMPLEMENT) ? sidx->fwd_chunk_count : sidx->rc_chunk_count;
-  seq_pos0 = (int64_t)start - 1;
+  /* Translate to forward-coordinate range [fwd_begin .. fwd_begin+length-1],
+   * 0-indexed into the forward sequence. */
+  int64_t fwd_begin;
+  int64_t L = sidx->length;
+  if (!rc) {
+    fwd_begin = (int64_t)start - 1;
+  } else {
+    /* RC window [start .. start+length-1] corresponds to forward
+     * positions [L-start-length+2 .. L-start+1] (1-indexed). 0-indexed
+     * start is L - start - length + 1. */
+    fwd_begin = L - (int64_t)start - (int64_t)length + 1;
+  }
+
+  /* Zero-init; any position not covered by a chunk stays as N. */
+  for (int i = 0; i < length; i++) dsq[1 + i] = (ESL_DSQ)abc_N;
+
+  int chunk_start = sidx->chunk_start;
+  int chunk_count = sidx->chunk_count;
+  int64_t req_end = fwd_begin + (int64_t)length;
 
   for (int c = 0; c < chunk_count; c++) {
-    P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+    const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
     int64_t chunk_beg = ci->seq_offset;
-    int64_t chunk_end = ci->seq_offset + ci->length;
-    int64_t req_beg = seq_pos0;
-    int64_t req_end = seq_pos0 + length;
-    int64_t ov_beg = ESL_MAX(chunk_beg, req_beg);
-    int64_t ov_end = ESL_MIN(chunk_end, req_end);
-    if (ov_beg < ov_end) {
-      int64_t dst = ov_beg - req_beg;
-      int64_t src = ov_beg - chunk_beg;
-      int64_t n   = ov_end - ov_beg;
-      memcpy(dsq + 1 + dst, ndb->chunk_data + ci->data_offset + 1 + src, n);
+    int64_t chunk_end = chunk_beg + (int64_t)ci->length;
+    int64_t ov_beg = fwd_begin > chunk_beg ? fwd_begin : chunk_beg;
+    int64_t ov_end = req_end   < chunk_end ? req_end   : chunk_end;
+    if (ov_beg >= ov_end) continue;
+
+    const uint8_t *packed = ndb->chunk_data + ci->data_offset;
+    const uint8_t *mask   = ndb->mask_data  + ci->mask_offset;
+
+    /* For each covered forward position [ov_beg .. ov_end-1]: */
+    for (int64_t f = ov_beg; f < ov_end; f++) {
+      int64_t pos_in_chunk = f - chunk_beg;
+      int code = p7_nucdb_unpack2bit(packed, pos_in_chunk);
+      int m    = p7_nucdb_mask_bit(mask, pos_in_chunk);
+      int val;
+      if (m) {
+        val = abc_N;
+      } else if (rc) {
+        /* Complement: A<->T (0<->3), C<->G (1<->2). */
+        val = code ^ 0x3;
+      } else {
+        val = code;
+      }
+
+      int64_t win_index;
+      if (!rc) {
+        win_index = f - fwd_begin;
+      } else {
+        /* Reversed emission: forward position f maps to RC index
+         * (length - 1 - (f - fwd_begin)). */
+        win_index = (int64_t)length - 1 - (f - fwd_begin);
+      }
+      dsq[1 + win_index] = (ESL_DSQ)val;
     }
   }
 

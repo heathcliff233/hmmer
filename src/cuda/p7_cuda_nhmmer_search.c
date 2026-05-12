@@ -52,7 +52,11 @@ nhmmer_gpu_nucdb_upload(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
     return eslOK;
   }
 
-  nucdb_data_size = (int64_t)(ndb->mmap_size - ndb->hdr.data_offset);
+  /* Upload only the packed region (2-bit residues). The mask region
+   * stays in the host mmap and is consulted only by CPU slice-fill. */
+  if (ndb->hdr.mask_offset <= ndb->hdr.data_offset)
+    return eslEFORMAT;
+  nucdb_data_size = (int64_t)(ndb->hdr.mask_offset - ndb->hdr.data_offset);
   int status = p7_cuda_engine_UploadNucdb(info->cuda_engine, ndb->chunk_data, nucdb_data_size,
                                           errbuf, errbuf_size);
   if (status == eslOK) info->nucdb_resident = TRUE;
@@ -158,6 +162,17 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
     return eslEINCOMPAT;
   }
 
+  /* PHASE 1 GATE: GPU kernels have not yet been ported to the v2
+   * 2-bit packed .nucdb layout. The host-side driver (this file) and
+   * CPU slice-fill have been updated, but the device kernels still
+   * assume byte-per-residue bytes. Running them would silently produce
+   * wrong scores. Fail cleanly until Phase 2 lands. */
+  fprintf(stderr,
+          "GPU nhmmer: .nucdb v2 (2-bit packed) is not yet supported on the "
+          "device side. Run with the CPU path for now; the GPU kernel port "
+          "is tracked as Phase 2 of the v2 .nucdb migration.\n");
+  return eslEINCOMPAT;
+
   /* Initialize the 2-slot ring. */
   NHMMER_GPU_SLOT slots[2];
   memset(slots, 0, sizeof(slots));
@@ -202,7 +217,7 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
       nres += sq_shell_fwd->n;
       status = submit_strand(slots, &slot_idx, info, ndb,
                              sq_shell_fwd, si, p7_NOCOMPLEMENT,
-                             sidx->fwd_chunk_start, sidx->fwd_chunk_count,
+                             sidx->chunk_start, sidx->chunk_count,
                              errbuf, sizeof(errbuf));
       if (status != eslOK) {
         fprintf(stderr, "GPU nhmmer nucdb forward strand failed: %s\n", errbuf);
@@ -214,9 +229,11 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
       sq_shell_fwd = NULL;
     }
 
-    /* Reverse complement strand — build its own shell (the forward one
-     * may still be referenced by workers of the previous slot). */
-    if (strands != p7_STRAND_TOPONLY && sidx->rc_chunk_count > 0) {
+    /* Reverse complement strand — reads the SAME forward chunk range; the
+     * GPU kernels and slice-fill reverse the index and complement the
+     * 2-bit code on the fly. Build its own shell (the forward one may
+     * still be referenced by workers of the previous slot). */
+    if (strands != p7_STRAND_TOPONLY && sidx->chunk_count > 0) {
       ESL_SQ *sq_shell_rc = NULL;
       status = nhmmer_gpu_nucdb_create_seq_shell(ndb, om->abc, si, &sq_shell_rc);
       if (status != eslOK) goto ERROR;
@@ -224,7 +241,7 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
 
       status = submit_strand(slots, &slot_idx, info, ndb,
                              sq_shell_rc, si, p7_COMPLEMENT,
-                             sidx->rc_chunk_start, sidx->rc_chunk_count,
+                             sidx->chunk_start, sidx->chunk_count,
                              errbuf, sizeof(errbuf));
       if (status != eslOK) {
         fprintf(stderr, "GPU nhmmer nucdb revcomp strand failed: %s\n", errbuf);
