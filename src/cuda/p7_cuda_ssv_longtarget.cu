@@ -726,7 +726,7 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
 
   /* Launch kernel */
   {
-    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, 0);
+    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, SSV_LT_BLOCK_THREADS, 0);
     cudaEventRecord(engine->evt_k0);
     SSV_LT_DISPATCH(nchunks,
       engine->d_lt_dsq, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
@@ -870,7 +870,7 @@ p7_cuda_SSVLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *c
   if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
 
   {
-    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, 0);
+    ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, SSV_LT_BLOCK_THREADS, 0);
     cudaEventRecord(engine->evt_k0);
     SSV_LT_DISPATCH(nchunks,
       engine->d_lt_dsq, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
@@ -976,7 +976,7 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
 
   /* Launch kernel — data comes directly from resident nucdb on device */
   {
-    ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, 0);
+    ssv_longtarget_set_launch_stats(stats, nchunks, step, SSV_LT_BLOCK_THREADS, 0);
     cudaEventRecord(engine->evt_k0);
     SSV_LT_DISPATCH(nchunks,
       d_nucdb_data, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
@@ -1076,7 +1076,7 @@ p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPR
   if ((status = cuda_status(cudaMemset(engine->d_lt_win_count, 0, sizeof(int) * nchunks), errbuf, errbuf_size, "cudaMemset(lt win_count)")) != eslOK) goto ERROR;
 
   {
-    ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, 0);
+    ssv_longtarget_set_launch_stats(stats, nchunks, step, SSV_LT_BLOCK_THREADS, 0);
     cudaEventRecord(engine->evt_k0);
     SSV_LT_DISPATCH(nchunks,
       d_nucdb_data, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,

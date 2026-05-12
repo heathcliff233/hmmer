@@ -99,11 +99,9 @@ cuda_viterbi_longtarget_kernel(
   unsigned int mask = 0xffu << (warp_lane & ~(VIT_LT_LANES - 1));
   int bi = blockIdx.x * groups_per_block + group;
   int N = Q * VIT_LT_LANES;
-  size_t group_stride = (size_t) N * 3 * 2;
+  size_t group_stride = (size_t) N * 3;
   if (group >= groups_per_block || bi >= nwindows) return;
-  int16_t *group_mem = vlt_mem + ((size_t) group * group_stride);
-  int16_t *prev = group_mem;
-  int16_t *curr = prev + (size_t) N * 3;
+  int16_t *dp = vlt_mem + ((size_t) group * group_stride);
 
   int src_i = seqidx ? seqidx[bi] : bi;
   int L = lengths[src_i];
@@ -117,9 +115,9 @@ cuda_viterbi_longtarget_kernel(
 
   for (int q = 0; q < Q; q++) {
     int cell = (q + lane * Q) * 3;
-    prev[cell + 0] = -32768;
-    prev[cell + 1] = -32768;
-    prev[cell + 2] = -32768;
+    dp[cell + 0] = -32768;
+    dp[cell + 1] = -32768;
+    dp[cell + 2] = -32768;
   }
 
   int16_t xN = base_w;
@@ -131,9 +129,9 @@ cuda_viterbi_longtarget_kernel(
     uint8_t x = s[i];
 
     xB = (int16_t) __shfl_sync(mask, (int) xB, 0, VIT_LT_LANES);
-    int16_t mpv = prev[((Q - 1) + lane * Q) * 3 + 0];
-    int16_t dpv = prev[((Q - 1) + lane * Q) * 3 + 1];
-    int16_t ipv = prev[((Q - 1) + lane * Q) * 3 + 2];
+    int16_t mpv = dp[((Q - 1) + lane * Q) * 3 + 0];
+    int16_t dpv = dp[((Q - 1) + lane * Q) * 3 + 1];
+    int16_t ipv = dp[((Q - 1) + lane * Q) * 3 + 2];
     mpv = (int16_t) __shfl_up_sync(mask, (int) mpv, 1, VIT_LT_LANES);
     dpv = (int16_t) __shfl_up_sync(mask, (int) dpv, 1, VIT_LT_LANES);
     ipv = (int16_t) __shfl_up_sync(mask, (int) ipv, 1, VIT_LT_LANES);
@@ -154,17 +152,17 @@ cuda_viterbi_longtarget_kernel(
       sv = vlt_i16_add_sat(sv, rwv[((int) x * Q + q) * 8 + lane]);
       if (sv > xE_lane) xE_lane = sv;
 
-      mpv = prev[cell + 0];
-      dpv = prev[cell + 1];
-      ipv = prev[cell + 2];
+      mpv = dp[cell + 0];
+      dpv = dp[cell + 1];
+      ipv = dp[cell + 2];
 
-      curr[cell + 0] = sv;
-      curr[cell + 1] = dcv;
+      dp[cell + 0] = sv;
+      dp[cell + 1] = dcv;
       dcv = vlt_i16_add_sat(sv, twv[vlt_twv_idx(p7O_MD, q, lane, Q)]);
       if (dcv > dmax_lane) dmax_lane = dcv;
       cand = vlt_i16_add_sat(mpv, twv[vlt_twv_idx(p7O_MI, q, lane, Q)]);
       sv = vlt_i16_add_sat(ipv, twv[vlt_twv_idx(p7O_II, q, lane, Q)]);
-      curr[cell + 2] = cand > sv ? cand : sv;
+      dp[cell + 2] = cand > sv ? cand : sv;
     }
 
     int xEi = (int) xE_lane;
@@ -182,7 +180,7 @@ cuda_viterbi_longtarget_kernel(
       /* Emit windows for ALL model positions k where M[k] == xE */
       for (int q = 0; q < Q; q++) {
         int cell = (q + lane * Q) * 3;
-        if (curr[cell + 0] == xE) {
+        if (dp[cell + 0] == xE) {
           int k = q + Q * lane + 1;
           if (k <= M) {
             int widx = atomicAdd(d_win_count + bi, 1);
@@ -202,9 +200,9 @@ cuda_viterbi_longtarget_kernel(
       /* Reset DP state */
       for (int q = 0; q < Q; q++) {
         int cell = (q + lane * Q) * 3;
-        curr[cell + 0] = -32768;
-        curr[cell + 1] = -32768;
-        curr[cell + 2] = -32768;
+        dp[cell + 0] = -32768;
+        dp[cell + 1] = -32768;
+        dp[cell + 2] = -32768;
       }
       if (lane == 0) {
         xN = base_w;
@@ -232,8 +230,8 @@ cuda_viterbi_longtarget_kernel(
         if (lane == 0) dcv = -32768;
         for (int q = 0; q < Q; q++) {
           int cell = (q + lane * Q) * 3;
-          if (dcv > curr[cell + 1]) curr[cell + 1] = dcv;
-          dcv = vlt_i16_add_sat(curr[cell + 1], twv[vlt_twv_idx(p7O_DD, q, lane, Q)]);
+          if (dcv > dp[cell + 1]) dp[cell + 1] = dcv;
+          dcv = vlt_i16_add_sat(dp[cell + 1], twv[vlt_twv_idx(p7O_DD, q, lane, Q)]);
         }
         int completed;
         do {
@@ -242,26 +240,22 @@ cuda_viterbi_longtarget_kernel(
           if (lane == 0) dcv = -32768;
           for (int q = 0; q < Q; q++) {
             int cell = (q + lane * Q) * 3;
-            int gt = (dcv > curr[cell + 1]);
+            int gt = (dcv > dp[cell + 1]);
             if (!__any_sync(mask, gt)) {
               completed = 0;
               break;
             }
-            if (gt) curr[cell + 1] = dcv;
-            dcv = vlt_i16_add_sat(curr[cell + 1], twv[vlt_twv_idx(p7O_DD, q, lane, Q)]);
+            if (gt) dp[cell + 1] = dcv;
+            dcv = vlt_i16_add_sat(dp[cell + 1], twv[vlt_twv_idx(p7O_DD, q, lane, Q)]);
           }
         } while (__all_sync(mask, completed));
       } else {
         dcv = (int16_t) __shfl_up_sync(mask, (int) dcv, 1, VIT_LT_LANES);
         if (lane == 0) dcv = -32768;
-        curr[lane * Q * 3 + 1] = dcv;
+        dp[lane * Q * 3 + 1] = dcv;
       }
     }
-
-    int16_t *tmp = prev;
-    prev = curr;
-    curr = tmp;
-	}
+  }
 }
 
 __global__ static void
@@ -481,7 +475,7 @@ p7_cuda_viterbi_longtarget_launch(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
   P7_CUDA_VIT_LT_WINDOW *h_windows = NULL;
 
   {
-    size_t shmem_per_group = (size_t) Q * VIT_LT_LANES * 3 * 2 * sizeof(int16_t);
+    size_t shmem_per_group = (size_t) Q * VIT_LT_LANES * 3 * sizeof(int16_t);
     int groups_per_block = VIT_LT_GROUPS_PER_BLOCK;
     while (groups_per_block > 1 && shmem_per_group * groups_per_block > 24 * 1024)
       groups_per_block >>= 1;
