@@ -215,4 +215,66 @@ nhmmer_gpu_nucdb_fill_slice(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
   return eslOK;
 }
 
+/* Build a P7_NUCSEQVIEW for a survivor window, avoiding dsq materialization.
+ * The view points directly into the mmap'd packed+mask regions of the nucdb.
+ * Returns eslOK on success, eslEINVAL if the window cannot be mapped to a
+ * single chunk (which shouldn't happen with proper overlap).
+ */
+int
+nhmmer_gpu_nucdb_build_nsv(const P7_NUCDB *ndb, int64_t si, int complementarity,
+                           uint64_t start, int length, P7_NUCSEQVIEW *nsv)
+{
+  const P7_NUCDB_SEQ_IDX *sidx;
+  int rc;
+
+  if (!ndb || si < 0 || si >= (int64_t)ndb->hdr.nseq || start < 1 || length < 0)
+    return eslEINVAL;
+
+  sidx = &ndb->seq_idx[si];
+  rc   = (complementarity == p7_NOCOMPLEMENT) ? 0 : 1;
+
+  int64_t fwd_begin;
+  if (!rc) {
+    fwd_begin = (int64_t)start - 1;
+  } else {
+    int64_t step = (int64_t)ndb->hdr.chunk_size - (int64_t)ndb->hdr.overlap;
+    if (step < 1) step = 1;
+    int cs = sidx->chunk_start;
+    int cc = sidx->chunk_count;
+    int found = 0;
+    for (int c = 0; c < cc; c++) {
+      const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[cs + c];
+      int64_t local_start = (int64_t)start - (int64_t)c * step;
+      int64_t local_end   = local_start + (int64_t)length - 1;
+      if (local_start >= 1 && local_end <= ci->length) {
+        fwd_begin = ci->seq_offset + (ci->length - local_end);
+        found = 1;
+        break;
+      }
+    }
+    if (!found)
+      fwd_begin = sidx->length - (int64_t)start - (int64_t)length + 1;
+  }
+
+  /* Find the chunk that fully contains [fwd_begin .. fwd_begin+length-1] */
+  int chunk_start = sidx->chunk_start;
+  int chunk_count = sidx->chunk_count;
+  for (int c = 0; c < chunk_count; c++) {
+    const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+    int64_t chunk_beg = ci->seq_offset;
+    int64_t chunk_end = chunk_beg + (int64_t)ci->length;
+    if (fwd_begin >= chunk_beg && (fwd_begin + length) <= chunk_end) {
+      nsv->packed   = ndb->chunk_data + ci->data_offset;
+      nsv->mask     = ndb->mask_data  + ci->mask_offset;
+      nsv->base_pos = fwd_begin - chunk_beg;
+      nsv->length   = length;
+      nsv->rc       = rc;
+      return eslOK;
+    }
+  }
+
+  /* Window spans multiple chunks — fall back (shouldn't happen with proper overlap) */
+  return eslEINVAL;
+}
+
 #endif /* HMMER_CUDA */

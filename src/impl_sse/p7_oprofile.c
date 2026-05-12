@@ -484,6 +484,50 @@ p7_oprofile_UpdateFwdEmissionScores(P7_OPROFILE *om, P7_BG *bg, float *fwd_emiss
   return eslOK;
 }
 
+/* Nucleotide-specific variant: only computes emission scores for base
+ * codes 0-3 (ACGT) and the N ambiguity code (weighted average of ACGT).
+ * Skips all other degenerate codes. Used by nhmmer GPU workers where
+ * sequences are guaranteed to contain only codes 0-3 + masked (N).
+ *
+ * rfv_N_out: caller-provided array of nq __m128 vectors to receive the
+ * pre-computed N emission scores.
+ */
+int
+p7_oprofile_UpdateFwdEmissionScores_nuc(P7_OPROFILE *om, P7_BG *bg,
+                                        float *fwd_emissions, float *sc_arr,
+                                        __m128 *rfv_N_out)
+{
+  int     M   = om->M;
+  int     k, q, x, z;
+  int     nq  = p7O_NQF(M);
+  int     Kp  = om->abc->Kp;
+  union   { __m128 v; float x[4]; } tmp;
+
+  for (k = 1, q = 0; q < nq; q++, k++) {
+    for (x = 0; x < 4; x++) {
+      for (z = 0; z < 4; z++) {
+        if (k + z*nq <= M) sc_arr[z*Kp + x] = (om->mm && om->mm[(k+z*nq)]=='m') ? 0 : log((double)(fwd_emissions[Kp * (k+z*nq) + x]) / bg->f[x]);
+        else               sc_arr[z*Kp + x] = -eslINFINITY;
+        tmp.x[z] = sc_arr[z*Kp + x];
+      }
+      om->rfv[x][q] = esl_sse_expf(tmp.v);
+    }
+
+    for (z = 0; z < 4; z++) {
+      float n_sc = 0.0f, denom = 0.0f;
+      for (x = 0; x < 4; x++) {
+        n_sc  += sc_arr[z*Kp + x] * bg->f[x];
+        denom += bg->f[x];
+      }
+      tmp.x[z] = n_sc / denom;
+    }
+    rfv_N_out[q] = esl_sse_expf(tmp.v);
+    om->rfv[15][q] = rfv_N_out[q];
+  }
+
+  return eslOK;
+}
+
 
 /* Function:  p7_oprofile_UpdateVitEmissionScores()
  * Synopsis:  Update the Viterbi part of the optimized profile match

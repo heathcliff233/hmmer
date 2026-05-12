@@ -43,11 +43,12 @@
 #include "esl_vectorops.h"
 
 #include "hmmer.h"
+#include "p7_nucdb.h"
 
 static int is_multidomain_region  (P7_DOMAINDEF *ddef, int i, int j);
 static int region_trace_ensemble  (P7_DOMAINDEF *ddef, const P7_OPROFILE *om, const ESL_DSQ *dsq, int ireg, int jreg, const P7_OMX *fwd, P7_OMX *wrk, int *ret_nc);
 static int rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OMX *ox1, P7_OMX *ox2,
-				   int i, int j, int null2_is_done, P7_BG *bg, int long_target, P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr);
+				   int i, int j, int null2_is_done, P7_BG *bg, int long_target, P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr, int nuc_mode);
 
 
 /*****************************************************************
@@ -102,6 +103,10 @@ p7_domaindef_Create(ESL_RANDOMNESS *r)
   ddef->nclustered = 0;
   ddef->noverlaps  = 0;
   ddef->nenvelopes = 0;
+  ddef->nuc_mode   = FALSE;
+  ddef->nsv        = NULL;
+  ddef->rfv_N      = NULL;
+  ddef->rfv_N_nq   = 0;
 
   /* default thresholds */
   ddef->rt1           = 0.25;
@@ -301,6 +306,7 @@ p7_domaindef_Destroy(P7_DOMAINDEF *ddef)
   p7_spensemble_Destroy(ddef->sp);
   p7_trace_Destroy(ddef->tr);
   p7_trace_Destroy(ddef->gtr);
+  if (ddef->rfv_N != NULL) free(ddef->rfv_N);
   free(ddef);
   return;
 }
@@ -341,7 +347,7 @@ p7_domaindef_ByViterbi(P7_PROFILE *gm, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_
   p7_ReconfigUnihit(gm, 0);	  /* process each domain in unihit L=0 mode */
 
   for (d = 0; d < ddef->gtr->ndom; d++)
-    rescore_isolated_domain(ddef, gm, sq, ntsq, gx1, gx2, ddef->gtr->sqfrom[d], ddef->gtr->sqto[d], FALSE, NULL, FALSE, NULL, NULL, NULL);
+    rescore_isolated_domain(ddef, gm, sq, ntsq, gx1, gx2, ddef->gtr->sqfrom[d], ddef->gtr->sqto[d], FALSE, NULL, FALSE, NULL, NULL, NULL, FALSE);
 
   /* Restore original model configuration, including length */
   if (p7_IsMulti(save_mode))  p7_ReconfigMultihit(gm, saveL); 
@@ -484,7 +490,7 @@ p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPRO
                   } else {
                   /*the !long_target argument will cause the function to recompute null2
                    * scores if this is part of a long_target (nhmmer) pipeline */
-                  if (rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i2, j2, TRUE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr) == eslOK)
+                  if (rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i2, j2, TRUE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr, ddef->nuc_mode) == eslOK)
                        last_j2 = j2;
                   }
             }
@@ -509,7 +515,7 @@ p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPRO
               ddef->dcl[ddef->ndom].oasc            = 0.0;
               ddef->ndom++;
             } else {
-              rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i, j, FALSE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr);
+              rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i, j, FALSE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr, ddef->nuc_mode);
             }
         }
         i     = -1;
@@ -786,8 +792,54 @@ reparameterize_model (P7_BG *bg, P7_OPROFILE *om, const ESL_SQ *sq, int start, i
   return eslOK;
 }
 
+/* Nucleotide-specific variant of reparameterize_model. Only rebuilds
+ * emission scores for base codes 0-3 and N (the only codes present
+ * in nucdb-derived sequences). Skips all degenerate code computation.
+ * rfv_N: caller-provided nqf-sized __m128 array for pre-computed N scores.
+ * nsv: if non-NULL, count residues from packed data instead of sq->dsq.
+ */
+static int
+reparameterize_model_nuc(P7_BG *bg, P7_OPROFILE *om, const ESL_SQ *sq,
+                         const P7_NUCSEQVIEW *nsv, int start, int L,
+                         float *fwd_emissions, float *bgf_arr, float *sc_arr, __m128 *rfv_N)
+{
+  int     K   = om->abc->K;
+  int i;
+  float tmp;
+  float   bg_smooth = 1.;
 
-/* rescore_isolated_domain()
+  if (sq != NULL || (nsv != NULL && L > 0)) {
+    int n_for_smooth = (sq != NULL) ? (int)sq->n : nsv->length;
+    bg_smooth = 25.0 / (ESL_MIN(100, ESL_MAX(50, n_for_smooth)));
+    esl_vec_FSet(bgf_arr, K, 0);
+
+    if (nsv != NULL && L > 0) {
+      P7_NUCSEQVIEW sub = p7_nucseqview_subview(nsv, start, L);
+      float total = 0;
+      for (i = 1; i <= L; i++) {
+        int code = p7_nucseqview_residue(&sub, i);
+        if (code >= 0) { bgf_arr[code] += 1.0f; total += 1.0f; }
+      }
+      if (total > 0) for (i = 0; i < K; i++) bgf_arr[i] /= total;
+      else           for (i = 0; i < K; i++) bgf_arr[i] = 0.25f;
+    } else {
+      int status = esl_sq_CountResidues(sq, start, L, bgf_arr);
+      if (status != eslOK) p7_Fail("Invalid sequence range in reparameterize_model_nuc()\n");
+      esl_vec_FNorm(bgf_arr, K);
+    }
+
+    for (i = 0; i < K; i++) {
+       tmp = bg->f[i];
+       bg->f[i] = (bg_smooth * bg->f[i]) + ((1.0 - bg_smooth) * bgf_arr[i]);
+       bgf_arr[i] = tmp;
+    }
+  } else {
+    esl_vec_FCopy(bgf_arr, K, bg->f);
+  }
+
+  p7_oprofile_UpdateFwdEmissionScores_nuc(om, bg, fwd_emissions, sc_arr, rfv_N);
+  return eslOK;
+}
  * SRE, Fri Feb  8 09:18:33 2008 [Janelia]
  *
  * We have isolated a single domain's envelope from <i>..<j> in
@@ -850,7 +902,7 @@ reparameterize_model (P7_BG *bg, P7_OPROFILE *om, const ESL_SQ *sq, int start, i
 static int
 rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, const ESL_SQ *ntsq,
 			P7_OMX *ox1, P7_OMX *ox2, int i, int j, int null2_is_done, P7_BG *bg, int long_target,
-			P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr)
+			P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr, int nuc_mode)
 {
   P7_DOMAIN     *dom           = NULL;
   int            Ld            = j-i+1;
@@ -863,27 +915,39 @@ rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, c
   int            max_env_extra = 20;
   int            orig_L;
 
+  /* Stack buffer for nuc-mode N emission scores (max ~8KB for M=2001) */
+  __m128         rfv_N_buf[p7O_NQF(om->M)];
+
 
   if (long_target) {
-    //temporarily change model length to env_len. The nhmmer pipeline will tack
-    //on the appropriate cost to account for the longer actual window
     orig_L = om->L;
     p7_oprofile_ReconfigRestLength(om, j-i+1);
   }
 
   if (long_target && scores_arr!=NULL) {
-    // Modify bg and om in-place to avoid having to clone (allocate) a massive
-    // number of times when there are many hits
-    reparameterize_model (bg, om, sq, i, j-i+1, fwd_emissions_arr, bg_tmp->f, scores_arr);
+    if (nuc_mode)
+      reparameterize_model_nuc(bg, om, sq, ddef->nsv, i, j-i+1, fwd_emissions_arr, bg_tmp->f, scores_arr, rfv_N_buf);
+    else
+      reparameterize_model(bg, om, sq, i, j-i+1, fwd_emissions_arr, bg_tmp->f, scores_arr);
   }
 
-  p7_Forward (sq->dsq + i-1, Ld, om,      ox1, &envsc);
-  p7_Backward(sq->dsq + i-1, Ld, om, ox1, ox2, NULL);
+  if (nuc_mode && ddef->nsv) {
+    P7_NUCSEQVIEW sub = p7_nucseqview_subview(ddef->nsv, i, Ld);
+    p7_Forward_nuc (&sub, om, rfv_N_buf, ox1, &envsc);
+    p7_Backward_nuc(&sub, om, rfv_N_buf, ox1, ox2, NULL);
+  } else {
+    p7_Forward (sq->dsq + i-1, Ld, om,      ox1, &envsc);
+    p7_Backward(sq->dsq + i-1, Ld, om, ox1, ox2, NULL);
+  }
 
   status = p7_Decoding(om, ox1, ox2, ox2);      /* <ox2> is now overwritten with post probabilities     */
   if (status == eslERANGE) { /* rare: numeric overflow; domain is assumed to be repetitive garbage [J3/119-121] */
-    if (long_target && scores_arr) 
-      reparameterize_model(bg, om, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr); /* revert to original bg model */
+    if (long_target && scores_arr) {
+      if (nuc_mode)
+        reparameterize_model_nuc(bg, om, NULL, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr, rfv_N_buf);
+      else
+        reparameterize_model(bg, om, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr);
+    }
     status = eslFAIL;
     goto ERROR;
   }
@@ -927,17 +991,30 @@ rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, c
       p7_oprofile_ReconfigRestLength(om, j-i+1);
 
       if (scores_arr!=NULL) {
-        //revert bg and om back to original, then forward to new values
-        reparameterize_model (bg, om, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr);
-        reparameterize_model (bg, om, sq, i, Ld, fwd_emissions_arr, bg_tmp->f, scores_arr);
+        if (nuc_mode) {
+          reparameterize_model_nuc(bg, om, NULL, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr, rfv_N_buf);
+          reparameterize_model_nuc(bg, om, sq, ddef->nsv, i, Ld, fwd_emissions_arr, bg_tmp->f, scores_arr, rfv_N_buf);
+        } else {
+          reparameterize_model(bg, om, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr);
+          reparameterize_model(bg, om, sq, i, Ld, fwd_emissions_arr, bg_tmp->f, scores_arr);
+        }
       }
 
-      p7_Forward (sq->dsq + i-1, Ld, om,      ox1, &envsc);
-      p7_Backward(sq->dsq + i-1, Ld, om, ox1, ox2, NULL);
+      if (nuc_mode && ddef->nsv) {
+        P7_NUCSEQVIEW sub = p7_nucseqview_subview(ddef->nsv, i, Ld);
+        p7_Forward_nuc (&sub, om, rfv_N_buf, ox1, &envsc);
+        p7_Backward_nuc(&sub, om, rfv_N_buf, ox1, ox2, NULL);
+      } else {
+        p7_Forward (sq->dsq + i-1, Ld, om,      ox1, &envsc);
+        p7_Backward(sq->dsq + i-1, Ld, om, ox1, ox2, NULL);
+      }
 
       status = p7_Decoding(om, ox1, ox2, ox2);      /* <ox2> is now overwritten with post probabilities     */
       if (status == eslERANGE) { /* rare: numeric overflow; domain is assumed to be repetitive garbage [J3/119-121] */
-          reparameterize_model(bg, om, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr); /* revert to original bg model */
+          if (nuc_mode)
+            reparameterize_model_nuc(bg, om, NULL, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr, rfv_N_buf);
+          else
+            reparameterize_model(bg, om, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr);
           status = eslFAIL;
           goto ERROR;
       }
@@ -960,10 +1037,17 @@ rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, c
      * reparameterization
      */
     domcorrection = envsc;
-    if (scores_arr!=NULL) { //revert bg and om back to original,
-                            //and while I'm at it, capture what the default parameterized score would have been, for "null2"
-      reparameterize_model (bg, om, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr);
-      p7_Forward (sq->dsq + i-1, Ld, om,      ox1, &domcorrection);
+    if (scores_arr!=NULL) {
+      if (nuc_mode)
+        reparameterize_model_nuc(bg, om, NULL, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr, rfv_N_buf);
+      else
+        reparameterize_model(bg, om, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr);
+      if (nuc_mode && ddef->nsv) {
+        P7_NUCSEQVIEW sub = p7_nucseqview_subview(ddef->nsv, i, Ld);
+        p7_Forward_nuc(&sub, om, rfv_N_buf, ox1, &domcorrection);
+      } else {
+        p7_Forward(sq->dsq + i-1, Ld, om, ox1, &domcorrection);
+      }
     }
 
     p7_oprofile_ReconfigRestLength(om, orig_L);

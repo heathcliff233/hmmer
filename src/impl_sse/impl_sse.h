@@ -276,6 +276,7 @@ extern size_t       p7_oprofile_Sizeof(P7_OPROFILE *om);
 extern P7_OPROFILE *p7_oprofile_Copy(P7_OPROFILE *om);
 extern P7_OPROFILE *p7_oprofile_Clone(const P7_OPROFILE *om);
 extern int          p7_oprofile_UpdateFwdEmissionScores(P7_OPROFILE *om, P7_BG *bg, float *fwd_emissions, float *sc_arr);
+extern int          p7_oprofile_UpdateFwdEmissionScores_nuc(P7_OPROFILE *om, P7_BG *bg, float *fwd_emissions, float *sc_arr, __m128 *rfv_N_out);
 extern int          p7_oprofile_UpdateVitEmissionScores(P7_OPROFILE *om, P7_BG *bg, float *fwd_emissions, float *sc_arr);
 extern int          p7_oprofile_UpdateMSVEmissionScores(P7_OPROFILE *om, P7_BG *bg, float *fwd_emissions, float *sc_arr);
 
@@ -308,6 +309,13 @@ extern int p7_Forward       (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om,  
 extern int p7_ForwardParser (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om,                    P7_OMX *fwd, float *opt_sc);
 extern int p7_Backward      (const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
 extern int p7_BackwardParser(const ESL_DSQ *dsq, int L, const P7_OPROFILE *om, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
+
+/* fwdback_nuc.c */
+struct p7_nucseqview_s;
+extern int p7_Forward_nuc       (const struct p7_nucseqview_s *nsv, const P7_OPROFILE *om, const __m128 *rfv_N, P7_OMX *fwd, float *opt_sc);
+extern int p7_ForwardParser_nuc (const struct p7_nucseqview_s *nsv, const P7_OPROFILE *om, const __m128 *rfv_N, P7_OMX *fwd, float *opt_sc);
+extern int p7_Backward_nuc     (const struct p7_nucseqview_s *nsv, const P7_OPROFILE *om, const __m128 *rfv_N, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
+extern int p7_BackwardParser_nuc(const struct p7_nucseqview_s *nsv, const P7_OPROFILE *om, const __m128 *rfv_N, const P7_OMX *fwd, P7_OMX *bck, float *opt_sc);
 
 /* io.c */
 extern int p7_oprofile_Write(FILE *ffp, FILE *pfp, P7_OPROFILE *om);

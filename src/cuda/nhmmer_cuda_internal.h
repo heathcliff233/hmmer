@@ -22,6 +22,7 @@
 
 #include "hmmer.h"
 #include "nhmmer_internal.h"
+#include "p7_nucdb.h"
 #include "cuda/p7_cuda.h"
 
 #define NHMMER_GPU_CHUNK_SIZE  65536
@@ -42,6 +43,8 @@ int nhmmer_gpu_nucdb_fill_slice(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
                                 int64_t si, int complementarity,
                                 uint64_t start, int length, const char *seqname,
                                 ESL_SQ **ret_sq, ESL_DSQ **ret_dsq, int64_t *ret_alloc);
+int nhmmer_gpu_nucdb_build_nsv(const P7_NUCDB *ndb, int64_t si, int complementarity,
+                               uint64_t start, int length, P7_NUCSEQVIEW *nsv);
 
 /* Window helpers and synthetic-chunk lifecycle (nhmmer_gpu_windows.c). */
 int  nhmmer_gpu_windowlist_alloc(P7_HMM_WINDOWLIST *wl, int n);

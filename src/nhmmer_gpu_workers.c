@@ -100,6 +100,7 @@ nhmmer_gpu_worker_init(NHMMER_GPU_WORKER *w, const NHMMER_GPU_INFO *info)
   if (status != eslOK) goto ERROR;
 
   w->pli->strands = info->pli->strands;
+  w->pli->ddef->nuc_mode = TRUE;
 
   ESL_ALLOC(w->pli_tmp, sizeof(P7_PIPELINE_LONGTARGET_OBJS));
   w->pli_tmp->tmpseq = NULL;
@@ -344,16 +345,36 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
     p7_oprofile_ReconfigRestLength(w->om, window_len);
 
     if (w->ndb != NULL && w->sq->dsq == NULL) {
-      w->status = nhmmer_gpu_nucdb_fill_slice(w->ndb, w->om->abc, w->seq_id,
+      /* Build zero-copy nucseqview for nuc Forward/Backward */
+      P7_NUCSEQVIEW nsv_local;
+      int nsv_ok = nhmmer_gpu_nucdb_build_nsv(w->ndb, w->seq_id,
                                               w->complementarity, window->n,
-                                              window_len, w->sq->name,
-                                              &w->slice_sq, &w->slice_dsq,
-                                              &w->slice_alloc);
-      if (w->status != eslOK) return;
-      seq_for_window = w->slice_sq;
-      subseq = w->slice_sq->dsq;
+                                              window_len, &nsv_local);
+      if (nsv_ok == eslOK) {
+        w->pli->ddef->nsv = &nsv_local;
+        /* Decode the window for alidisplay/CountResidues use */
+        w->status = nhmmer_gpu_nucdb_fill_slice(w->ndb, w->om->abc, w->seq_id,
+                                                w->complementarity, window->n,
+                                                window_len, w->sq->name,
+                                                &w->slice_sq, &w->slice_dsq,
+                                                &w->slice_alloc);
+        if (w->status != eslOK) return;
+        seq_for_window = w->slice_sq;
+        subseq = w->slice_sq->dsq;
+      } else {
+        w->pli->ddef->nsv = NULL;
+        w->status = nhmmer_gpu_nucdb_fill_slice(w->ndb, w->om->abc, w->seq_id,
+                                                w->complementarity, window->n,
+                                                window_len, w->sq->name,
+                                                &w->slice_sq, &w->slice_dsq,
+                                                &w->slice_alloc);
+        if (w->status != eslOK) return;
+        seq_for_window = w->slice_sq;
+        subseq = w->slice_sq->dsq;
+      }
     } else {
       subseq = w->sq->dsq + window->n - 1;
+      w->pli->ddef->nsv = NULL;
     }
     nhmmer_gpu_BindOmxXmx(w->pli->oxf, w->gpu_xf + xoff, w->om->M, window_len, TRUE, 0.0f, &saved_oxf);
     nhmmer_gpu_BindOmxXmx(w->pli->oxb, w->gpu_xb + xoff, w->om->M, window_len, FALSE, 0.0f, &saved_oxb);
@@ -367,6 +388,7 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
                                                  w->gpu_scores[i * 2]);
     nhmmer_gpu_RestoreOmxXmx(w->pli->oxb, &saved_oxb);
     nhmmer_gpu_RestoreOmxXmx(w->pli->oxf, &saved_oxf);
+    w->pli->ddef->nsv = NULL;
     nhmmer_gpu_trace_domain_window(w, "post_fb", i, window, domain_before, w->status);
     if (w->status != eslOK) return;
 

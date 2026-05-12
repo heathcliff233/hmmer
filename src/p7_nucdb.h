@@ -109,4 +109,50 @@ p7_nucdb_mask_bit(const uint8_t *mask, int64_t pos)
   return (mask[pos >> 3] >> (int)(pos & 7)) & 0x1;
 }
 
+/* A zero-copy view into a window of mmap'd nucdb packed data.
+ * Used by nuc-specific Forward/Backward to avoid dsq materialization.
+ */
+typedef struct p7_nucseqview_s {
+  const uint8_t *packed;      /* pointer into nucdb packed chunk region */
+  const uint8_t *mask;        /* pointer into nucdb mask chunk region */
+  int64_t        base_pos;    /* forward-strand offset of window position 1 within the chunk */
+  int            length;      /* window length (L) */
+  int            rc;          /* 1 = reverse-complement, 0 = forward */
+} P7_NUCSEQVIEW;
+
+/* Get the emission table index for position i (1-indexed) in the view.
+ * Returns 0-3 (ACGT) or -1 (masked/N). */
+static inline int
+p7_nucseqview_residue(const P7_NUCSEQVIEW *view, int i)
+{
+  int64_t pos;
+  if (!view->rc)
+    pos = view->base_pos + (int64_t)(i - 1);
+  else
+    pos = view->base_pos + (int64_t)(view->length - i);
+
+  if (p7_nucdb_mask_bit(view->mask, pos))
+    return -1;
+
+  int code = p7_nucdb_unpack2bit(view->packed, pos);
+  return view->rc ? (code ^ 0x3) : code;
+}
+
+/* Create a sub-view for an envelope [env_start..env_start+env_len-1] within
+ * the parent view (1-indexed positions in the parent). */
+static inline P7_NUCSEQVIEW
+p7_nucseqview_subview(const P7_NUCSEQVIEW *parent, int env_start, int env_len)
+{
+  P7_NUCSEQVIEW sub;
+  sub.packed = parent->packed;
+  sub.mask   = parent->mask;
+  sub.rc     = parent->rc;
+  sub.length = env_len;
+  if (!parent->rc)
+    sub.base_pos = parent->base_pos + (int64_t)(env_start - 1);
+  else
+    sub.base_pos = parent->base_pos + (int64_t)(parent->length - (env_start + env_len - 1));
+  return sub;
+}
+
 #endif /* p7NUCDB_INCLUDED */
