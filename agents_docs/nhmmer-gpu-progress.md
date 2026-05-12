@@ -1,6 +1,6 @@
 # nhmmer GPU Support - Progress
 
-Last updated: 2026-05-12 (v2 format + 4-row tables + multi-warp SSV)
+Last updated: 2026-05-13 (nuc-specific CPU F/B + P7_NUCSEQVIEW packed-data path)
 
 This file records the current accepted `nhmmer --gpu` state. Older per-change
 benchmark logs were intentionally removed; use git history for that level of
@@ -17,13 +17,14 @@ Default `nhmmer --gpu` is a nucleotide long-target pipeline:
 5. Host-side Viterbi seed extend/merge/split (was device `<<<1,1>>>` kernel).
 6. GPU Forward parser F3 gate.
 7. GPU Backward parser handoff.
-8. Threaded CPU domain definition, null2, hit storage, thresholding, and output.
+8. Threaded CPU domain definition with nuc-optimized Forward/Backward.
 
-The accepted path no longer has a separate single-score GPU Viterbi prefilter.
-Scanning Viterbi is the CPU-equivalent Viterbi boundary. GPU Forward/Backward
-parser handoff is default-on and unconditional; the previous `--gpu-fwd-prefilter`
-/ `--gpu-no-fwd-prefilter` diagnostic flags were removed along with all
-non-default branches in the 2026-05-12 async-pass cleanup.
+The CPU domain workers use:
+- `P7_NUCSEQVIEW` zero-copy view into mmap'd nucdb packed+mask data
+- `p7_Forward_nuc` / `p7_Backward_nuc` reading 2-bit residues on the fly
+- `UpdateFwdEmissionScores_nuc` rebuilding only 5 emission rows (ACGT + N)
+- `fill_slice` decode still called for `p7_alidisplay_Create` (dsq needed
+  for alignment display only; planned for elimination)
 
 All serial `<<<1,1>>>` kernels (prefix sums, extend/merge, F1 compaction) have
 been replaced with host-side code. The pattern is: D2H per-chunk/window counts
@@ -106,6 +107,42 @@ previous single-warp-per-block layout.  Key parameters:
 - Measured occupancy: 83% on large datasets (40 active warps/SM of 48 on RTX
   4090 sm_89).
 
+## Nuc-Specific CPU Forward/Backward (landed 2026-05-13)
+
+CPU domain workers now use a specialized Forward/Backward path optimized for the
+nucleotide 2-bit+mask format:
+
+**`P7_NUCSEQVIEW`** (`src/p7_nucdb.h`): a zero-copy view into mmap'd nucdb packed
+data. Inline accessor `p7_nucseqview_residue()` returns residue code 0–3 or -1
+(masked/N) via 2-bit unpack + mask check. `p7_nucseqview_subview()` creates
+sub-envelope views without copying.
+
+**`fwdback_nuc.c`** (`src/impl_sse/fwdback_nuc.c`): Forward/Backward engines that
+replace `rp = om->rfv[dsq[i]]` with:
+```c
+int code = p7_nucseqview_residue(nsv, i);
+rp = (code >= 0) ? om->rfv[code] : rfv_N;
+```
+Same Q-loop structure as standard engines; the per-residue overhead is 3 ALU ops
++ 1 highly-predictable branch (mask is 0 for >99% of genomic positions).
+
+**`UpdateFwdEmissionScores_nuc`** (`src/impl_sse/p7_oprofile.c`): only rebuilds
+emission scores for 5 residue codes (ACGT + N). Skips all 13 IUPAC degenerate
+codes and their `esl_abc_FExpectScVec` computation. Eliminates 72% of
+`esl_sse_expf` calls per `reparameterize_model` invocation.
+
+**`reparameterize_model_nuc`** (`src/p7_domaindef.c`): counts residues directly
+from `P7_NUCSEQVIEW` packed data when available; falls back to
+`esl_sq_CountResidues` on the dsq when nsv is NULL.
+
+Gating: `ddef->nuc_mode = TRUE` (set on GPU worker pipeline creation) +
+`ddef->nsv != NULL` (set per window from `nhmmer_gpu_nucdb_build_nsv()`).
+
+Impact: ~9% reduction in domain workflow wall time on chr22/query_medium;
+measurable improvement in `reparameterize_model` cost. The Q-loop itself is
+unchanged — it remains the dominant cost and the target for AVX2 widening
+(see `nhmmer-gpu-todo.md` P0).
+
 ## Fast `.nucdb` Path
 
 The default resident overlap `.nucdb` path:
@@ -133,9 +170,10 @@ reconstruction.
 | `src/nhmmer_internal.h` | `NHMMER_GPU_INFO` and GPU window/batch structs (public API) |
 | `src/cuda/nhmmer_cuda_internal.h` | Cross-TU contract: worker/OMX structs, shared macros, internal decls |
 | `src/nhmmer_gpu.c` | CPU-only stubs (~50 lines) for non-CUDA builds |
-| `src/nhmmer_gpu_seqhelpers.c` | `.nucdb` ESL_SQ reconstruction (full / shell / slice) |
+| `src/nhmmer_gpu_seqhelpers.c` | `.nucdb` ESL_SQ reconstruction (full / shell / slice) + `build_nsv` |
 | `src/nhmmer_gpu_windows.c` | Windowlist helpers + synthetic-chunk lifecycle |
-| `src/nhmmer_gpu_workers.c` | CPU worker pool, OMX special-state binding, scalar Viterbi debug |
+| `src/nhmmer_gpu_workers.c` | CPU worker pool, OMX special-state binding, nsv wiring |
+| `src/impl_sse/fwdback_nuc.c` | Nuc-specific SSE Forward/Backward (reads P7_NUCSEQVIEW) |
 | `src/cuda/p7_cuda_nhmmer_filters.c` | Scratch arenas, batch SSV/bias/F1 filter, nucdb resident mapping |
 | `src/cuda/p7_cuda_nhmmer_viterbi.c` | Scanning Viterbi longtarget orchestration |
 | `src/cuda/p7_cuda_nhmmer_fwd.c` | GPU Forward prefilter + Forward/Backward parser dispatch |

@@ -1,34 +1,27 @@
 # nhmmer GPU vs CPU Performance Breakdown
 
-Last updated: 2026-05-12 (v2 format + 4-row tables + multi-warp SSV + Viterbi occupancy analysis)
+Last updated: 2026-05-13 (nuc F/B + P7_NUCSEQVIEW; fill_slice still present)
 
 This file explains the current GPU/CPU performance gap. Historical run logs and
 obsolete hypotheses were removed; use git history for old intermediate numbers.
 
 ## Summary
 
-The accepted GPU path no longer redoes CPU Forward/Backward after GPU scanning
-Viterbi. Default `nhmmer --gpu` uses GPU Forward parser F3 gating plus GPU
-Backward parser handoff, then CPU domain definition/output.
-
-All serial `<<<1,1>>>` kernels (prefix sums, extend/merge, F1 ordered
-compaction) have been replaced with host-side code, eliminating kernel launch
-overhead and synchronization points between the main compute kernels.
-
-The `.nucdb` v2 format (2-bit packed, on-the-fly RC, 4-row emission tables, 16k
-default chunk size) and multi-warp SSV longtarget kernel were landed in the same
-pass, delivering an additional ~16% speedup on chr22x5 over the v1 async
-baseline.
+The accepted GPU path uses nuc-specific Forward/Backward engines (`fwdback_nuc.c`)
+that read directly from mmap'd 2-bit packed data via `P7_NUCSEQVIEW`, plus a
+nuc-optimized emission score rebuild that skips degenerate code computation.
 
 Current gap drivers are:
 
-- **Scanning Viterbi kernel time** — the primary bottleneck, with only 8.3%
-  occupancy on sm_89 due to shared-memory pressure (24192 B/block, 4 blocks/SM).
-- GPU SSV kernel time (now 83% occupancy; secondary).
+- **CPU Forward/Backward Q-loop** — the single largest time consumer. Q=126
+  SSE iterations per residue (M=501), called 4–5× per domain envelope. AVX2
+  (Q=63) would halve this.
+- **`fill_slice` decode** — still called per window for `p7_alidisplay_Create`.
+  Costs ~1s/query on chr22x20. Planned for elimination.
+- **Scanning Viterbi kernel time** — 8.3% occupancy on sm_89, the dominant GPU
+  stage (2.1s on chr22x20/query_medium).
+- GPU SSV kernel time (83% occupancy; secondary).
 - F1 batch filter and FB parser kernel time.
-- Parser matrix D2H needed by the CPU domain workflow.
-- CPU domain definition/output after the GPU parser handoff.
-- Shared CUDA setup and `.nucdb` upload, especially on small workloads.
 
 Recent non-causes:
 
