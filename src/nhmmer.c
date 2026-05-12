@@ -199,6 +199,7 @@ static ESL_OPTIONS options[] = {
   { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "deprecated: GPU Forward/Backward parser reuse is default with --gpu", 99 },
   { "--gpu-no-fwd-prefilter",eslARG_NONE,FALSE, NULL, NULL,    NULL, "--gpu", "--gpu-fwd-prefilter", "diagnostic: disable default GPU Forward/Backward parser reuse", 99 },
   { "--gpu-cpu-postmsv", eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "bypass GPU scanning Viterbi/Fwd; use CPU postSSV for alignment testing", 99 },
+  { "--gpu-cpu-domcorr", eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "diagnostic: run rescore_isolated_domain 2nd Forward on CPU (default GPU)", 99 },
   { "--gpu-compare",     eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "debug: compare GPU filter scores to CPU at each pipeline stage", 99 },
 #endif
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
@@ -1198,6 +1199,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.do_gpu_batch   = TRUE;
         gpu_info.do_gpu_vit_lt  = TRUE;
         gpu_info.do_gpu_fwd     = ! esl_opt_GetBoolean(go, "--gpu-no-fwd-prefilter");
+        gpu_info.do_gpu_domcorr = gpu_info.do_gpu_fwd && ! esl_opt_GetBoolean(go, "--gpu-cpu-domcorr");
         gpu_info.do_cpu_postmsv = esl_opt_GetBoolean(go, "--gpu-cpu-postmsv");
         gpu_info.do_compare     = esl_opt_GetBoolean(go, "--gpu-compare");
         gpu_info.do_domain_trace = (getenv("HMMER_NHMMER_GPU_DOMAIN_TRACE") != NULL);
@@ -1280,6 +1282,12 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_gpu_fb_d2h    = 0;
         gpu_info.gpu_fb_packed_bytes = 0;
         gpu_info.t_cpu_workers   = 0;
+        gpu_info.t_gpu_domcorr        = 0;
+        gpu_info.t_gpu_domcorr_h2d    = 0;
+        gpu_info.t_gpu_domcorr_kernel = 0;
+        gpu_info.t_gpu_domcorr_d2h    = 0;
+        gpu_info.gpu_domcorr_envelopes = 0;
+        gpu_info.gpu_domcorr_launches  = 0;
         gpu_info.t_nucdb_open    = gpu_t_nucdb_open;
         gpu_info.t_nucdb_upload  = gpu_t_nucdb_upload;
         gpu_info.t_nucdb_reconstruct = 0;
@@ -1591,6 +1599,12 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	            fprintf(stderr, "    CPU Backward:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bck, 100.0*gpu_info.t_worker_bck/t_search);
 	            fprintf(stderr, "    domain workflow: %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_domain, 100.0*gpu_info.t_worker_domain/t_search);
 	            fprintf(stderr, "    hit reporting:   %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_output, 100.0*gpu_info.t_worker_output/t_search);
+	            fprintf(stderr, "    GPU domcorr:     %7.3fs  (%4.1f%%) %" PRId64 " envs %" PRId64 " launches\n",
+	                    gpu_info.t_gpu_domcorr, 100.0*gpu_info.t_gpu_domcorr/t_search,
+	                    gpu_info.gpu_domcorr_envelopes, gpu_info.gpu_domcorr_launches);
+	            fprintf(stderr, "      H2D:           %7.3fs\n", gpu_info.t_gpu_domcorr_h2d);
+	            fprintf(stderr, "      kernel:        %7.3fs\n", gpu_info.t_gpu_domcorr_kernel);
+	            fprintf(stderr, "      D2H:           %7.3fs\n", gpu_info.t_gpu_domcorr_d2h);
 	          } else {
 	            fprintf(stderr, "GPU timing: all zeros (t_ssv=%.6f t_merge=%.6f t_batch=%.6f t_vit=%.6f t_fwd=%.6f t_cpu=%.6f)\n",
 	                    gpu_info.t_ssv, gpu_info.t_merge, gpu_info.t_batch_filter,

@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <time.h>
 
 #ifdef HMMER_THREADS
 #include <pthread.h>
@@ -132,6 +133,9 @@ nhmmer_gpu_worker_init(NHMMER_GPU_WORKER *w, const NHMMER_GPU_INFO *info)
   w->next_window     = NULL;
   w->global_nwindows = 0;
   w->prefilter_x_offsets = NULL;
+  w->domcorr_pending.entries = NULL;
+  w->domcorr_pending.n       = 0;
+  w->domcorr_pending.nalloc  = 0;
 #ifdef HMMER_THREADS
   w->work_mutex      = NULL;
 #endif
@@ -158,6 +162,7 @@ nhmmer_gpu_worker_destroy(NHMMER_GPU_WORKER *w)
     esl_sq_Destroy(w->slice_sq);
   }
   free(w->slice_dsq);
+  free(w->domcorr_pending.entries);
   if (w->scoredata) p7_hmm_ScoreDataDestroy(w->scoredata);
   if (w->th)        p7_tophits_Destroy(w->th);
   if (w->pli)       p7_pipeline_Destroy(w->pli);
@@ -318,6 +323,12 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
   int          use_dynamic = (w->next_window != NULL);
   P7_HMM_WINDOW *window;
 
+  /* P1: connect the pending-list pointer to the worker's pipeline; the
+   * strand orchestrator owns the do_gpu_domcorr flag and consumes the list
+   * once after this thread joins. */
+  w->pli->gpu_domcorr_pending = &w->domcorr_pending;
+  w->domcorr_pending.n        = 0;  /* reuse across strands; do not free entries */
+
   for (i = use_dynamic ? nhmmer_gpu_worker_next_window(w) : 0;
        use_dynamic ? (i >= 0) : (i < w->nwindows);
        i = use_dynamic ? nhmmer_gpu_worker_next_window(w) : i + 1) {
@@ -406,6 +417,108 @@ nhmmer_gpu_RestoreOmxXmx(P7_OMX *ox, const NHMMER_OMX_BINDING *saved)
   ox->L              = saved->L;
   ox->has_own_scales = saved->has_own_scales;
   ox->totscale       = saved->totscale;
+}
+
+/* P1: after all workers in a strand have joined, run the deferred 2nd-pass
+ * Forwards as a single batched GPU call and patch hit->dcl[0].dombias /
+ * .domcorrection for every queued entry. No-op if no entry is queued. The
+ * pending lists are owned by workers; this function consumes them in place
+ * (sets pend->n = 0 on return) so the workers can be reused on the next
+ * strand without reallocation. */
+int
+nhmmer_gpu_flush_domcorr(NHMMER_GPU_INFO *info, NHMMER_GPU_WORKER *workers, int nworkers,
+                         char *errbuf, int errbuf_size)
+{
+  int status = eslOK;
+  int total = 0;
+  int w, k;
+  const uint8_t **dsq_ptrs   = NULL;
+  int            *lengths    = NULL;
+  float          *gpu_scores = NULL;
+  int            *gpu_statuses = NULL;
+  struct timespec ts0, ts1;
+  double h2d_sec = 0.0, kernel_sec = 0.0, d2h_sec = 0.0;
+
+  if (info == NULL || workers == NULL || nworkers <= 0) return eslOK;
+  if (info->cuda_engine == NULL || info->cuda_msv == NULL) return eslOK;
+
+  for (w = 0; w < nworkers; w++) total += workers[w].domcorr_pending.n;
+  if (total == 0) return eslOK;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts0);
+
+  dsq_ptrs     = (const uint8_t **)malloc(sizeof(uint8_t *) * total);
+  lengths      = (int *)           malloc(sizeof(int)       * total);
+  gpu_scores   = (float *)         malloc(sizeof(float)     * total);
+  gpu_statuses = (int *)           malloc(sizeof(int)       * total);
+  if (!dsq_ptrs || !lengths || !gpu_scores || !gpu_statuses) {
+    status = eslEMEM;
+    if (errbuf && errbuf_size > 0)
+      snprintf(errbuf, errbuf_size, "domcorr flush: out of memory (total=%d)", total);
+    goto DONE;
+  }
+
+  {
+    int off = 0;
+    for (w = 0; w < nworkers; w++) {
+      P7_GPU_DOMCORR_PENDING *pend = &workers[w].domcorr_pending;
+      for (k = 0; k < pend->n; k++) {
+        dsq_ptrs[off] = pend->entries[k].dsq;
+        lengths[off]  = pend->entries[k].n;
+        off++;
+      }
+    }
+  }
+
+  status = p7_cuda_DomainScoreOnlyFwdBatch(info->cuda_engine, info->cuda_msv,
+                                           total, dsq_ptrs, lengths,
+                                           gpu_scores, gpu_statuses,
+                                           &h2d_sec, &kernel_sec, &d2h_sec,
+                                           errbuf, errbuf_size);
+  if (status != eslOK) goto DONE;
+
+  /* Patch hit fields per pending entry. p7_FLogsum mirrors the formula used
+   * by p7_pli_postViterbi_LongTarget's tail (p7_pipeline.c:1058) so the
+   * GPU dombias is computed identically to that path. The
+   * postFwd_LongTarget_Core path itself sets hit->dcl[0].dombias = dom_bias
+   * = dom->domcorrection, so we follow that convention here. */
+  {
+    int off = 0;
+    for (w = 0; w < nworkers; w++) {
+      P7_GPU_DOMCORR_PENDING *pend = &workers[w].domcorr_pending;
+      for (k = 0; k < pend->n; k++, off++) {
+        P7_HIT *hit = pend->entries[k].hit;
+        float   envsc = pend->entries[k].envsc;
+        if (hit == NULL) continue;  /* domain skipped by ali_len<8 in hit-reporting */
+        if (gpu_statuses[off] != eslOK) {
+          /* Kernel rejected this envelope (eslEINVAL/eslERANGE). Leave the
+           * sentinel zero so the hit reports as if domcorrection had not
+           * fired; matches the CPU eslERANGE-skipped behavior in
+           * rescore_isolated_domain. */
+          continue;
+        }
+        float dom_corr = gpu_scores[off] - envsc;
+        hit->dcl[0].domcorrection = dom_corr;
+        hit->dcl[0].dombias       = dom_corr;
+      }
+      pend->n = 0;
+    }
+  }
+
+  clock_gettime(CLOCK_MONOTONIC, &ts1);
+  info->t_gpu_domcorr        += nhmmer_gpu_elapsed(&ts0, &ts1);
+  info->t_gpu_domcorr_h2d    += h2d_sec;
+  info->t_gpu_domcorr_kernel += kernel_sec;
+  info->t_gpu_domcorr_d2h    += d2h_sec;
+  info->gpu_domcorr_envelopes += total;
+  info->gpu_domcorr_launches += 1;
+
+ DONE:
+  free(dsq_ptrs);
+  free(lengths);
+  free(gpu_scores);
+  free(gpu_statuses);
+  return status;
 }
 
 int

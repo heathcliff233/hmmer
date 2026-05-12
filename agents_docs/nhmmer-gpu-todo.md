@@ -91,13 +91,32 @@ This work proved cross-window batching and kernel parallelization ideas, but the
 
 **Historical finding**: CPU workers (domain definition + hit reporting) consumed 44–94% of GPU wall time depending on model size. Current query_medium fast `.nucdb` worker time is still dominated by CPU domain workflow, but total wall is now faster than CPU-4 in the smoke run after the GPU window-ordering fixes.
 
+## P1 (2026-05-12): GPU domcorrection Forward — landed, neutral wall
+
+- [x] Score-only Forward batch launcher `p7_cuda_DomainScoreOnlyFwdBatch`
+  (`src/cuda/p7_cuda_domain_rescore.cu`), reusing existing engine buffers.
+- [x] Deferred-domcorrection hook in `rescore_isolated_domain`
+  (`src/p7_domaindef.c`) and hit-attach hook in `postFwd_LongTarget_Core`
+  (`src/p7_pipeline.c`).
+- [x] Per-worker `P7_GPU_DOMCORR_PENDING` list; strand-level flush after
+  `pthread_join` in `nhmmer_gpu_flush_domcorr` (`src/nhmmer_gpu_workers.c`).
+- [x] Hidden diagnostic flag `--gpu-cpu-domcorr`.
+- [x] Hit parity exact (1476/6294 across chr22 + chr22x5 benches).
+- [ ] Wall-time speedup: no measurable improvement; the saved CPU work is
+      ~15 ms per worker, which the GPU launch+patch overhead absorbs.
+
 ## Open Performance Work
 
-### P1 — Move envelope-finding to GPU (high impact, very high effort)
+### P1 — GPU domcorrection Forward (landed; neutral)
+
+See above. Defers the 2nd-pass `p7_Forward` to a batched GPU call. Useful as
+infrastructure for future Phase-10-style work, but no standalone speedup.
+
+### P2 — Move envelope-finding to GPU (high impact, very high effort)
 
 CPU workers are still the largest GPU timing bucket. The bottleneck is `p7_domaindef_ByPosteriorHeuristics()` and related CPU domain workflow after parser handoff. Moving this workflow to GPU would eliminate the largest remaining bottleneck, but it is high-risk because domain definition is tightly coupled to posterior decoding and hit reporting semantics.
 
-### P2 — Parallelize OptAcc kernel (low impact, medium effort)
+### P3 — Parallelize OptAcc kernel (low impact, medium effort)
 
 `cuda_domain_optacc_kernel` still uses 1 thread/block. Needs a max-prefix scan (instead of sum-prefix scan used in Forward/Backward). Lower priority since OptAcc is not the dominant kernel.
 

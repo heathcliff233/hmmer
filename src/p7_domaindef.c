@@ -47,7 +47,8 @@
 static int is_multidomain_region  (P7_DOMAINDEF *ddef, int i, int j);
 static int region_trace_ensemble  (P7_DOMAINDEF *ddef, const P7_OPROFILE *om, const ESL_DSQ *dsq, int ireg, int jreg, const P7_OMX *fwd, P7_OMX *wrk, int *ret_nc);
 static int rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OMX *ox1, P7_OMX *ox2,
-				   int i, int j, int null2_is_done, P7_BG *bg, int long_target, P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr);
+				   int i, int j, int null2_is_done, P7_BG *bg, int long_target, P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr,
+				   P7_GPU_DOMCORR_PENDING *gpu_domcorr_pending);
 
 
 /*****************************************************************
@@ -341,7 +342,7 @@ p7_domaindef_ByViterbi(P7_PROFILE *gm, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_
   p7_ReconfigUnihit(gm, 0);	  /* process each domain in unihit L=0 mode */
 
   for (d = 0; d < ddef->gtr->ndom; d++)
-    rescore_isolated_domain(ddef, gm, sq, ntsq, gx1, gx2, ddef->gtr->sqfrom[d], ddef->gtr->sqto[d], FALSE, NULL, FALSE, NULL, NULL, NULL);
+    rescore_isolated_domain(ddef, gm, sq, ntsq, gx1, gx2, ddef->gtr->sqfrom[d], ddef->gtr->sqto[d], FALSE, NULL, FALSE, NULL, NULL, NULL, NULL);
 
   /* Restore original model configuration, including length */
   if (p7_IsMulti(save_mode))  p7_ReconfigMultihit(gm, saveL); 
@@ -385,7 +386,8 @@ p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPRO
 				   P7_OMX *oxf, P7_OMX *oxb, P7_OMX *fwd, P7_OMX *bck,
 				   P7_DOMAINDEF *ddef, P7_BG *bg, int long_target,
 				   P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr,
-				   int envelopes_only)
+				   int envelopes_only,
+				   P7_GPU_DOMCORR_PENDING *gpu_domcorr_pending)
 {
   int i, j;
   int triggered;
@@ -484,7 +486,7 @@ p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPRO
                   } else {
                   /*the !long_target argument will cause the function to recompute null2
                    * scores if this is part of a long_target (nhmmer) pipeline */
-                  if (rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i2, j2, TRUE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr) == eslOK)
+                  if (rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i2, j2, TRUE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr, gpu_domcorr_pending) == eslOK)
                        last_j2 = j2;
                   }
             }
@@ -509,7 +511,7 @@ p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPRO
               ddef->dcl[ddef->ndom].oasc            = 0.0;
               ddef->ndom++;
             } else {
-              rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i, j, FALSE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr);
+              rescore_isolated_domain(ddef, om, sq, ntsq, fwd, bck, i, j, FALSE, bg, long_target, bg_tmp, scores_arr, fwd_emissions_arr, gpu_domcorr_pending);
             }
         }
         i     = -1;
@@ -850,7 +852,8 @@ reparameterize_model (P7_BG *bg, P7_OPROFILE *om, const ESL_SQ *sq, int start, i
 static int
 rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, const ESL_SQ *ntsq,
 			P7_OMX *ox1, P7_OMX *ox2, int i, int j, int null2_is_done, P7_BG *bg, int long_target,
-			P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr)
+			P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr,
+			P7_GPU_DOMCORR_PENDING *gpu_domcorr_pending)
 {
   P7_DOMAIN     *dom           = NULL;
   int            Ld            = j-i+1;
@@ -963,15 +966,26 @@ rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, c
     if (scores_arr!=NULL) { //revert bg and om back to original,
                             //and while I'm at it, capture what the default parameterized score would have been, for "null2"
       reparameterize_model (bg, om, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr);
-      p7_Forward (sq->dsq + i-1, Ld, om,      ox1, &domcorrection);
+      if (gpu_domcorr_pending != NULL) {
+        /* P1: skip the 2nd-pass Forward; the strand orchestrator runs it
+         * batched on GPU after pthread_join. Hit-reporting in
+         * postFwd_LongTarget_Core queues (dsq, n, hit, envsc) and patches
+         * dom_bias/dom_correction once the GPU returns. Leave a sentinel
+         * so any consumer of dom->domcorrection before patch sees zero. */
+        dom->domcorrection = 0.0f;
+      } else {
+        p7_Forward (sq->dsq + i-1, Ld, om,      ox1, &domcorrection);
+      }
     }
 
     p7_oprofile_ReconfigRestLength(om, orig_L);
 
-    if (domcorrection < envsc)  //negative bias correction shouldn't happen. Stick with the original score.
-      envsc = domcorrection;
+    if (gpu_domcorr_pending == NULL) {
+      if (domcorrection < envsc)  //negative bias correction shouldn't happen. Stick with the original score.
+        envsc = domcorrection;
 
-    dom->domcorrection = domcorrection - envsc;
+      dom->domcorrection = domcorrection - envsc;
+    }
 
   }  else {
 
@@ -1122,7 +1136,7 @@ main(int argc, char **argv)
 
   p7_Forward (sq->dsq, sq->n, om,      fwd, &overall_sc); 
   p7_Backward(sq->dsq, sq->n, om, fwd, bck, &sc);       
-  p7_domaindef_ByPosteriorHeuristics(sq, NULL, om, oxf, oxb, fwd, bck, ddef, NULL, FALSE, NULL, NULL, NULL, FALSE);
+  p7_domaindef_ByPosteriorHeuristics(sq, NULL, om, oxf, oxb, fwd, bck, ddef, NULL, FALSE, NULL, NULL, NULL, FALSE, NULL);
 
 
   printf("Overall raw likelihood score: %.2f nats\n", overall_sc);
@@ -1271,7 +1285,7 @@ main(int argc, char **argv)
 	  p7_GForward (sq->dsq, sq->n, gm, fwd, &overall_sc); 
 	  if (! do_baseline) {
 	    p7_GBackward(sq->dsq, sq->n, gm, bck, &sc);       
-	    p7_domaindef_ByPosteriorHeuristics(sq, gm, fwd, bck, gxf, gxb, ddef, NULL, FALSE, NULL, NULL, NULL, FALSE);
+	    p7_domaindef_ByPosteriorHeuristics(sq, gm, fwd, bck, gxf, gxb, ddef, NULL, FALSE, NULL, NULL, NULL, FALSE, NULL);
 	    //Is this even being compiled by any tests? Looks like there's a fair amount of bit rot here
 	  }
 	}

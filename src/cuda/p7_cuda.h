@@ -384,6 +384,23 @@ extern int  p7_cuda_DomainRescoreBatch(P7_CUDA_ENGINE *engine,
                                        int     *h_statuses,
                                        char    *errbuf, int errbuf_size);
 
+/* Score-only Forward batch (P1): runs cuda_domain_fwd_scoreonly_kernel for
+ * the 2nd-pass domcorrection Forward inside rescore_isolated_domain. Per-
+ * envelope dsq is staged via the engine's d_dom_dsq_all buffer; the resident
+ * profile rfv/tfv is reused. Output is one float per envelope plus a status.
+ * Optional ret_*_sec arguments receive H2D / kernel / D2H sub-times. */
+extern int  p7_cuda_DomainScoreOnlyFwdBatch(P7_CUDA_ENGINE *engine,
+                                            const P7_CUDA_MSVPROFILE *cuom,
+                                            int ndomains,
+                                            const uint8_t **h_dsq_ptrs,
+                                            const int      *h_lengths,
+                                            float   *h_domcorrection,
+                                            int     *h_statuses,
+                                            double  *ret_h2d_sec,
+                                            double  *ret_kernel_sec,
+                                            double  *ret_d2h_sec,
+                                            char    *errbuf, int errbuf_size);
+
 extern int  p7_cuda_ViterbiLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                       const ESL_DSQ *dsq, int L,
                                       const P7_HMM_WINDOW *windows, int nwindows,

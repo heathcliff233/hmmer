@@ -1227,6 +1227,159 @@ dom_grow_d(void **ptr, size_t *alloc, size_t needed, char *errbuf, int errbuf_si
 }
 
 /* ================================================================
+ * Host entry point: p7_cuda_DomainScoreOnlyFwdBatch
+ *
+ * Batches the score-only Forward used by rescore_isolated_domain to compute
+ * the domcorrection score. One block per envelope, running the
+ * cuda_domain_fwd_scoreonly_kernel with the profile's resident rfv and tfv
+ * (same device buffers used by the GPU FB parser). Returns one float per
+ * envelope plus a status code.
+ *
+ * Unihit mode (nj=0) matches the CPU-side 2nd Forward at
+ * p7_domaindef.c:966 (p7_oprofile_ReconfigRestLength leaves the model in
+ * unihit mode when the domcorrection pass runs).
+ *
+ * Engine ownership: reuses the Phase 10 engine buffers d_dom_dsq_all,
+ * d_dom_dsq_ptrs, d_dom_lengths, d_dom_domcorr, d_dom_statuses. The
+ * DP/xmx/rfv/trace/orig_rfv buffers are not touched.
+ * ================================================================ */
+extern "C" int
+p7_cuda_DomainScoreOnlyFwdBatch(P7_CUDA_ENGINE *engine,
+                                const P7_CUDA_MSVPROFILE *cuom,
+                                int ndomains,
+                                const uint8_t **h_dsq_ptrs,
+                                const int      *h_lengths,
+                                float   *h_domcorrection,
+                                int     *h_statuses,
+                                double  *ret_h2d_sec,
+                                double  *ret_kernel_sec,
+                                double  *ret_d2h_sec,
+                                char    *errbuf, int errbuf_size)
+{
+  int status;
+  int Q  = cuom->Q;
+  int Kp = cuom->Kp;
+  int N  = Q * 4;
+  int T_par = next_pow2_at_least((N + 1) / 2, 32);
+  if (T_par > 1024) T_par = 1024;
+  size_t shmem_par = sizeof(float) * ((size_t)2 * N * 3 + (size_t)N + (size_t)2 * T_par);
+  size_t total_dsq = 0;
+  size_t off;
+  int b;
+  uint8_t  **h_d_dsq_ptrs = NULL;
+  double t0, t1;
+
+  if (ret_h2d_sec)    *ret_h2d_sec = 0.0;
+  if (ret_kernel_sec) *ret_kernel_sec = 0.0;
+  if (ret_d2h_sec)    *ret_d2h_sec = 0.0;
+
+  if (ndomains == 0) return eslOK;
+
+  h_d_dsq_ptrs = (uint8_t **)malloc(sizeof(uint8_t *) * ndomains);
+  if (!h_d_dsq_ptrs) ESL_XFAIL(eslEMEM, errbuf, "malloc host arrays");
+
+  for (b = 0; b < ndomains; b++) total_dsq += h_lengths[b] + 2;
+
+  /* Grow per-domain metadata buffers (lengths, dsq_ptrs, domcorr, statuses). */
+  if (ndomains > engine->dom_meta_alloc) {
+    if (engine->d_dom_dsq_ptrs)    { cudaFree(engine->d_dom_dsq_ptrs);    engine->d_dom_dsq_ptrs = NULL; }
+    if (engine->d_dom_rfv_ptrs)    { cudaFree(engine->d_dom_rfv_ptrs);    engine->d_dom_rfv_ptrs = NULL; }
+    if (engine->d_dom_lengths)     { cudaFree(engine->d_dom_lengths);     engine->d_dom_lengths = NULL; }
+    if (engine->d_dom_dp_offsets)  { cudaFree(engine->d_dom_dp_offsets);  engine->d_dom_dp_offsets = NULL; }
+    if (engine->d_dom_xmx_offsets) { cudaFree(engine->d_dom_xmx_offsets); engine->d_dom_xmx_offsets = NULL; }
+    if (engine->d_dom_envsc)       { cudaFree(engine->d_dom_envsc);       engine->d_dom_envsc = NULL; }
+    if (engine->d_dom_bcksc)       { cudaFree(engine->d_dom_bcksc);       engine->d_dom_bcksc = NULL; }
+    if (engine->d_dom_oasc)        { cudaFree(engine->d_dom_oasc);        engine->d_dom_oasc = NULL; }
+    if (engine->d_dom_domcorr)     { cudaFree(engine->d_dom_domcorr);     engine->d_dom_domcorr = NULL; }
+    if (engine->d_dom_statuses)    { cudaFree(engine->d_dom_statuses);    engine->d_dom_statuses = NULL; }
+    if (engine->d_dom_trace_N)     { cudaFree(engine->d_dom_trace_N);     engine->d_dom_trace_N = NULL; }
+    int alloc_n = ndomains;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_dsq_ptrs,    sizeof(uint8_t *) * alloc_n), errbuf, errbuf_size, "malloc ptrs")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_rfv_ptrs,    sizeof(float *)   * alloc_n), errbuf, errbuf_size, "malloc ptrs")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_lengths,     sizeof(int)       * alloc_n), errbuf, errbuf_size, "malloc")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_dp_offsets,  sizeof(size_t)    * alloc_n), errbuf, errbuf_size, "malloc")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_xmx_offsets, sizeof(size_t)    * alloc_n), errbuf, errbuf_size, "malloc")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_envsc,       sizeof(float)     * alloc_n), errbuf, errbuf_size, "malloc")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_bcksc,       sizeof(float)     * alloc_n), errbuf, errbuf_size, "malloc")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_oasc,        sizeof(float)     * alloc_n), errbuf, errbuf_size, "malloc")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_domcorr,     sizeof(float)     * alloc_n), errbuf, errbuf_size, "malloc")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_statuses,    sizeof(int)       * alloc_n), errbuf, errbuf_size, "malloc")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaMalloc(&engine->d_dom_trace_N,     sizeof(int)       * alloc_n), errbuf, errbuf_size, "malloc")) != eslOK) goto ERROR;
+    engine->dom_meta_alloc = alloc_n;
+  }
+
+  if ((status = dom_grow_d((void **)&engine->d_dom_dsq_all, &engine->dom_dsq_alloc,
+                           total_dsq, errbuf, errbuf_size, "grow dsq")) != eslOK) goto ERROR;
+
+  /* ---- H2D: stage dsqs + metadata ---- */
+  t0 = host_seconds();
+  {
+    uint8_t *h_dsq_staging = (uint8_t *)malloc(total_dsq);
+    if (!h_dsq_staging) ESL_XFAIL(eslEMEM, errbuf, "malloc dsq staging");
+    off = 0;
+    for (b = 0; b < ndomains; b++) {
+      size_t len = h_lengths[b] + 2;
+      memcpy(h_dsq_staging + off, h_dsq_ptrs[b], len);
+      h_d_dsq_ptrs[b] = engine->d_dom_dsq_all + off;
+      off += len;
+    }
+    if ((status = cuda_status(cudaMemcpy(engine->d_dom_dsq_all, h_dsq_staging,
+                              total_dsq, cudaMemcpyHostToDevice), errbuf, errbuf_size, "H2D dsq bulk")) != eslOK) { free(h_dsq_staging); goto ERROR; }
+    free(h_dsq_staging);
+  }
+  if ((status = cuda_status(cudaMemcpy((void *)engine->d_dom_dsq_ptrs, h_d_dsq_ptrs, sizeof(uint8_t *) * ndomains, cudaMemcpyHostToDevice), errbuf, errbuf_size, "H2D ptrs")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(engine->d_dom_lengths, h_lengths, sizeof(int) * ndomains, cudaMemcpyHostToDevice), errbuf, errbuf_size, "H2D lengths")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemset(engine->d_dom_statuses, 0, sizeof(int) * ndomains), errbuf, errbuf_size, "memset statuses")) != eslOK) goto ERROR;
+  t1 = host_seconds();
+  if (ret_h2d_sec) *ret_h2d_sec = t1 - t0;
+
+  /* Score-only Forward runs in unihit mode: nj=0 matches the CPU-side
+   * p7_Forward call inside rescore_isolated_domain, which executes with
+   * om reconfigured by p7_oprofile_ReconfigRestLength (unihit). */
+  {
+    float nj = 0.0f;
+
+    if (shmem_par > 48 * 1024) {
+      int max_dynamic_shmem = 0;
+      cudaError_t attr_status = cudaDeviceGetAttribute(&max_dynamic_shmem,
+                                                       cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                                                       engine->device_id);
+      if (attr_status != cudaSuccess || (size_t)max_dynamic_shmem < shmem_par) {
+        if (errbuf && errbuf_size > 0)
+          snprintf(errbuf, errbuf_size,
+                   "domain scoreonly shmem %zu B exceeds device max %d B (M=%d)",
+                   shmem_par, max_dynamic_shmem, cuom->M);
+        status = eslERANGE;
+        goto ERROR;
+      }
+      cudaFuncSetAttribute(cuda_domain_fwd_scoreonly_kernel,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_par);
+    }
+
+    t0 = host_seconds();
+    cuda_domain_fwd_scoreonly_kernel<<<ndomains, T_par, shmem_par>>>(
+      engine->d_dom_dsq_ptrs, engine->d_dom_lengths, cuom->d_rfv, cuom->d_tfv,
+      Q, Kp, nj, engine->d_dom_domcorr, engine->d_dom_statuses);
+    if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "scoreonly kernel launch")) != eslOK) goto ERROR;
+    if ((status = cuda_status(cudaDeviceSynchronize(), errbuf, errbuf_size, "scoreonly sync")) != eslOK) goto ERROR;
+    t1 = host_seconds();
+    if (ret_kernel_sec) *ret_kernel_sec = t1 - t0;
+  }
+
+  t0 = host_seconds();
+  if ((status = cuda_status(cudaMemcpy(h_domcorrection, engine->d_dom_domcorr, sizeof(float) * ndomains, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "D2H domcorr")) != eslOK) goto ERROR;
+  if ((status = cuda_status(cudaMemcpy(h_statuses,      engine->d_dom_statuses, sizeof(int)   * ndomains, cudaMemcpyDeviceToHost), errbuf, errbuf_size, "D2H statuses")) != eslOK) goto ERROR;
+  t1 = host_seconds();
+  if (ret_d2h_sec) *ret_d2h_sec = t1 - t0;
+
+  status = eslOK;
+
+ ERROR:
+  free(h_d_dsq_ptrs);
+  return status;
+}
+
+/* ================================================================
  * Host entry point: p7_cuda_DomainRescoreBatch
  * ================================================================ */
 extern "C" int

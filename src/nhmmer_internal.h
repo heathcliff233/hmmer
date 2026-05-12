@@ -41,6 +41,7 @@ typedef struct {
   int               do_gpu_batch;       /* --gpu-batch: batch SSV/bias on GPU */
   int               do_gpu_vit_lt;      /* --gpu-vit-longtarget: scanning Viterbi on GPU */
   int               do_gpu_fwd;         /* default GPU Fwd/Bwd parser handoff */
+  int               do_gpu_domcorr;     /* P1: defer rescore_isolated_domain 2nd Forward to GPU batch (default-on with --gpu-fwd; --gpu-cpu-domcorr disables) */
   int               do_cpu_postmsv;     /* --gpu-cpu-postmsv: bypass GPU Vit+Fwd, use CPU postSSV */
   int               do_compare;         /* --gpu-compare: print GPU vs CPU score mismatches */
   int               do_domain_trace;    /* env HMMER_NHMMER_GPU_DOMAIN_TRACE: per-window CPU domain timing */
@@ -126,6 +127,13 @@ typedef struct {
   double            t_gpu_fb_d2h;    /* CUDA D2H inside GPU FB parser */
   int64_t           gpu_fb_packed_bytes; /* total parser sequence bytes uploaded */
   double            t_cpu_workers;   /* CPU domaindef + hit reporting (wallclock around threaded section) */
+  /* GPU domcorrection batch (P1) sub-times. */
+  double            t_gpu_domcorr;        /* total wall around the GPU domcorrection batch + patch */
+  double            t_gpu_domcorr_h2d;    /* CUDA H2D inside GPU domcorrection batch */
+  double            t_gpu_domcorr_kernel; /* CUDA kernel inside GPU domcorrection batch */
+  double            t_gpu_domcorr_d2h;    /* CUDA D2H inside GPU domcorrection batch */
+  int64_t           gpu_domcorr_envelopes;/* total envelopes run through the GPU domcorrection kernel */
+  int64_t           gpu_domcorr_launches; /* number of GPU domcorrection batches issued */
   double            t_nucdb_open;     /* one-time .nucdb open/mmap, charged outside per-query search */
   double            t_nucdb_upload;   /* one-time .nucdb H2D upload, charged outside per-query search */
   double            t_nucdb_reconstruct; /* CPU reconstruction of full ESL_SQ strands from .nucdb chunks */

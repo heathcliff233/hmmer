@@ -291,6 +291,8 @@ p7_pipeline_Create(const ESL_GETOPTS *go, int M_hint, int L_hint, int long_targe
   pli->show_alignments = (go && esl_opt_GetBoolean(go, "--noali") ? FALSE : TRUE);
   pli->cuda_engine     = NULL;
   pli->cuda_msv        = NULL;
+  pli->do_gpu_domcorr      = 0;
+  pli->gpu_domcorr_pending = NULL;
   pli->hfp             = NULL;
   pli->errbuf[0]       = '\0';
 
@@ -938,7 +940,7 @@ p7_Pipeline_PostFwdWithParserMatrices(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *
   pli->n_past_fwd++;
 
   t0 = p7_pipeline_WallTime();
-  status = p7_domaindef_ByPosteriorHeuristics(sq, ntsq, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, FALSE, NULL, NULL, NULL, FALSE);
+  status = p7_domaindef_ByPosteriorHeuristics(sq, ntsq, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, FALSE, NULL, NULL, NULL, FALSE, NULL);
   pli->time_domain += p7_pipeline_WallTime() - t0;
   if (status != eslOK) ESL_FAIL(status, pli->errbuf, "domain definition workflow failure"); /* eslERANGE can happen  */
   if (pli->ddef->nregions   == 0) return eslOK; /* score passed threshold but there's no discrete domains here       */
@@ -1325,7 +1327,7 @@ p7_pli_postViterbi_LongTarget(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_T
   {
     double _t0 = p7_pipeline_WallTime();
     status = p7_domaindef_ByPosteriorHeuristics(pli_tmp->tmpseq, NULL, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, TRUE,
-                                                pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE);
+                                                pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE, NULL);
     pli->time_domain += p7_pipeline_WallTime() - _t0;
   }
 
@@ -1567,7 +1569,8 @@ postFwd_LongTarget_Core(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS
   {
     double _t0 = p7_pipeline_WallTime();
     status = p7_domaindef_ByPosteriorHeuristics(pli_tmp->tmpseq, NULL, om, pli->oxf, pli->oxb, pli->fwd, pli->bck, pli->ddef, bg, TRUE,
-                                                pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE);
+                                                pli_tmp->bg, (pli->do_null2?pli_tmp->scores:NULL), pli_tmp->fwd_emissions_arr, FALSE,
+                                                pli->do_gpu_domcorr ? pli->gpu_domcorr_pending : NULL);
     pli->time_domain += p7_pipeline_WallTime() - _t0;
   }
 
@@ -1607,6 +1610,27 @@ postFwd_LongTarget_Core(P7_PIPELINE *pli, P7_OPROFILE *om, P7_BG *bg, P7_TOPHITS
         p7_pli_computeAliScores(dom, subseq, data, om->abc->Kp);
 
       p7_tophits_CreateNextHit(hitlist, &hit);
+
+      if (pli->do_gpu_domcorr && pli->gpu_domcorr_pending != NULL) {
+        /* P1: queue this domain for the GPU 2nd-pass Forward. Order
+         * matches the hit-reporting iteration so the strand orchestrator
+         * can patch hit->dcl[0].dombias / .domcorrection in lockstep.
+         * dom->ienv/jenv are still in window-local coords here (the
+         * coordinate transform below mutates hit->dcl[0], not dom). */
+        P7_GPU_DOMCORR_PENDING *pend = pli->gpu_domcorr_pending;
+        if (pend->n == pend->nalloc) {
+          int new_alloc = (pend->nalloc == 0) ? 64 : pend->nalloc * 2;
+          P7_GPU_DOMCORR_ENTRY *grown = realloc(pend->entries, sizeof(P7_GPU_DOMCORR_ENTRY) * new_alloc);
+          if (grown == NULL) ESL_EXCEPTION(eslEMEM, "domcorr pending realloc failure");
+          pend->entries = grown;
+          pend->nalloc  = new_alloc;
+        }
+        pend->entries[pend->n].dsq   = subseq + (dom->ienv - 1);
+        pend->entries[pend->n].n     = (int)(dom->jenv - dom->ienv + 1);
+        pend->entries[pend->n].hit   = hit;
+        pend->entries[pend->n].envsc = dom->envsc;
+        pend->n++;
+      }
 
       hit->ndom        = 1;
       hit->best_domain = 0;

@@ -1,10 +1,39 @@
 # nhmmer GPU Support - Progress
 
-Last updated: 2026-05-11
+Last updated: 2026-05-12
 
 This file records the current accepted `nhmmer --gpu` state. Older per-change
 benchmark logs were intentionally removed; use git history for that level of
 detail.
+
+## P1 (2026-05-12): GPU domcorrection Forward — landed, no measurable speedup
+
+The 2nd-pass `p7_Forward` for `domcorrection` inside `rescore_isolated_domain`
+(`src/p7_domaindef.c:966`) is now batched on GPU after `pthread_join` via the
+new `p7_cuda_DomainScoreOnlyFwdBatch` launcher
+(`src/cuda/p7_cuda_domain_rescore.cu`). Hidden flag `--gpu-cpu-domcorr`
+restores the CPU 2nd Forward.
+
+5-run median chr22x5 query_medium overlap nucdb, 16 CPU threads:
+
+| Path | gpu_loop_wall | domain workflow |
+|------|:---:|:---:|
+| GPU domcorr (P1) | 2.443s | 1.070s |
+| CPU domcorr (`--gpu-cpu-domcorr`) | 2.431s | 1.066s |
+
+Within run-to-run noise. P1 alone does not improve wall time because the CPU
+2nd Forward is already very fast on small envelope windows (M=501, L_env~50-200),
+runs in parallel across 16 threads, and the GPU launch + transfer overhead
+fully cancels the saving.
+
+Hit parity preserved exactly: chr22 combined 1476/1476/1476/1476/1476 across
+CPU-1/CPU-16/GPU-FASTA/GPU-nucdb/GPU-overlap-nucdb. chr22x5 combined 6294
+hits in both modes. `test-speed/x-nhmmer-gpu-parity .` 4/4 PASS.
+
+The infrastructure is in place for a follow-on Phase-10-style port that moves
+the matrix-coupled F+B+Decoding+OptAcc+OATrace chain to GPU; that bundle has a
+much higher saving ceiling but reintroduces the historical 0.6% MADE1 parity
+drift and requires parallelizing the OptAcc kernel.
 
 ## Current Architecture
 

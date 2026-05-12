@@ -1,9 +1,28 @@
 # nhmmer GPU vs CPU Performance Breakdown
 
-Last updated: 2026-05-11
+Last updated: 2026-05-12
 
 This file explains the current GPU/CPU performance gap. Historical run logs and
 obsolete hypotheses were removed; use git history for old intermediate numbers.
+
+## 2026-05-12 P1 attempt: GPU domcorrection Forward (no wall-time win)
+
+The 2nd-pass `p7_Forward` inside `rescore_isolated_domain` was moved to a
+batched GPU call after `pthread_join`. Parity exact (1476/6294 hits). Wall
+time unchanged within noise:
+
+| Path (chr22x5 query_medium, 16 threads, 5-run median) | gpu_loop_wall | domain workflow | GPU domcorr |
+|---|:---:|:---:|:---:|
+| GPU domcorr on (P1 default) | 2.443s | 1.070s | ~0.007s (2405 envs / 10 launches) |
+| GPU domcorr off (`--gpu-cpu-domcorr`) | 2.431s | 1.066s | 0s |
+
+Why P1 alone doesn't help: the 2nd Forward runs on 50–200 residue envelope
+windows across 16 threads in parallel, is already SSE-vectorized, and each
+call is ~50–100 µs. Deferring it to GPU saves only ~15 ms per worker, of
+which the per-launch overhead + D2H patch consumes most. The remaining CPU
+`rescore_isolated_domain` work (1st Forward, Backward, Decoding,
+OptimalAccuracy, OATrace, alidisplay) is the dominant cost and still runs
+on CPU.
 
 ## Summary
 

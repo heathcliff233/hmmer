@@ -94,6 +94,11 @@ typedef struct {
   P7_CUDA_MSVPROFILE *cuda_msv;
   int               worker_id;
   int               do_domain_trace;
+  /* GPU domcorrection deferral list (P1). Populated during phase 1 (the
+   * existing pthread fan-out) when do_gpu_domcorr is set on the worker's
+   * pli; consumed by a single GPU batch call in the strand orchestrator
+   * after pthread_join. */
+  P7_GPU_DOMCORR_PENDING domcorr_pending;
 #ifdef HMMER_THREADS
   pthread_mutex_t  *work_mutex;
 #endif
@@ -122,6 +127,11 @@ void nhmmer_gpu_worker_process(NHMMER_GPU_WORKER *w);
 void nhmmer_gpu_worker_process_post_vit(NHMMER_GPU_WORKER *w);
 void nhmmer_gpu_worker_process_post_fwd(NHMMER_GPU_WORKER *w);
 void nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w);
+/* P1: after pthread_join, batches all workers' deferred 2nd-pass Forwards
+ * on the GPU and patches hit->dcl[0].dombias / .domcorrection per entry.
+ * No-op if no worker has pending entries. */
+int  nhmmer_gpu_flush_domcorr(NHMMER_GPU_INFO *info, NHMMER_GPU_WORKER *workers, int nworkers,
+                              char *errbuf, int errbuf_size);
 void nhmmer_gpu_BindOmxXmx(P7_OMX *ox, float *xmx, int M, int L,
                            int has_own_scales, float totscale,
                            NHMMER_OMX_BINDING *saved);

@@ -747,9 +747,29 @@ typedef struct p7_hit_s {
 } P7_HIT;
 
 
+/* GPU domcorrection deferral list. Worker-local; one entry per envelope
+ * that needs its 2nd-pass Forward computed on GPU. Filled in two stages:
+ * rescore_isolated_domain queues (dsq, n) at envelope time, then the hit-
+ * reporting loop attaches (hit, envsc) once the corresponding hit exists.
+ * After a single GPU batch call, the strand orchestrator applies
+ * domcorrection per entry into hit->dcl[0].dombias and ->domcorrection. */
+typedef struct p7_gpu_domcorr_entry_s {
+  const ESL_DSQ *dsq;       /* points into worker-local dsq buffer */
+  int            n;         /* envelope length (Ld) */
+  P7_HIT        *hit;       /* hit to patch; NULL if attach has not happened yet */
+  float          envsc;     /* envelope Forward score (NATS), captured from CPU 1st-pass */
+} P7_GPU_DOMCORR_ENTRY;
+
+typedef struct p7_gpu_domcorr_pending_s {
+  P7_GPU_DOMCORR_ENTRY *entries;
+  int                   n;
+  int                   nalloc;
+} P7_GPU_DOMCORR_PENDING;
+
+
 /* Structure: P7_TOPHITS
  * merging when we prepare to output results. "hit" list is NULL and
- * unavailable until after we do a sort.  
+ * unavailable until after we do a sort.
  */
 typedef struct p7_tophits_s {
   P7_HIT **hit;         /* sorted pointer array                     */
@@ -1299,6 +1319,16 @@ typedef struct p7_pipeline_s {
   P7_CUDA_ENGINE     *cuda_engine; /* optional CUDA runtime for hmmsearch --gpu */
   P7_CUDA_MSVPROFILE *cuda_msv;    /* optional CUDA MSV profile for current query */
 
+  /* nhmmer GPU domcorrection batching. When do_gpu_domcorr is TRUE the
+   * worker has pre-allocated a pending list; rescore_isolated_domain defers
+   * its 2nd-pass Forward and queues (dsq_slice, length) into the list, and
+   * the hit-reporting loop in postFwd_LongTarget_Core attaches the hit and
+   * envsc once the hit is created. The float is filled after a single GPU
+   * batch call at the end of the strand. The opaque pointer is owned by
+   * the nhmmer GPU worker layer; CPU-only and non-nhmmer paths never see it. */
+  int                            do_gpu_domcorr;
+  P7_GPU_DOMCORR_PENDING        *gpu_domcorr_pending;
+
   P7_HMMFILE   *hfp;		/* COPY of open HMM database (if scan mode) */
   char          errbuf[eslERRBUFSIZE];
 } P7_PIPELINE;
@@ -1594,7 +1624,8 @@ extern int p7_domaindef_ByViterbi            (P7_PROFILE *gm, const ESL_SQ *sq, 
 extern int p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPROFILE *om, P7_OMX *oxf, P7_OMX *oxb, P7_OMX *fwd, P7_OMX *bck,
 				                                  P7_DOMAINDEF *ddef, P7_BG *bg, int long_target,
 				                                  P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr,
-				                                  int envelopes_only);
+				                                  int envelopes_only,
+				                                  P7_GPU_DOMCORR_PENDING *gpu_domcorr_pending);
 extern int reparameterize_model(P7_BG *bg, P7_OPROFILE *om, const ESL_SQ *sq, int start, int L,
                                 float *fwd_emissions, float *bgf_arr, float *sc_arr);
 

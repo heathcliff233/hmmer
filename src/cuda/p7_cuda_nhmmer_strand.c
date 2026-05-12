@@ -305,6 +305,9 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
         workers[i].prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc : NULL;
         workers[i].prefilter_x_offsets = (use_skip_fwd && !gpu_fb_ok) ? surv_xf_offsets : NULL;
         workers[i].prefilter_xf_offset = 0;
+        /* P1: enable GPU domcorrection deferral only on the GPU FB parser
+         * continuation path; other continuations stay on CPU. */
+        workers[i].pli->do_gpu_domcorr = (gpu_fb_ok && info->do_gpu_domcorr) ? 1 : 0;
       }
 
       for (i = 1; i < nworkers; i++) {
@@ -329,6 +332,12 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       status = workers[0].status;
       for (i = 1; i < nworkers && status == eslOK; i++)
         status = workers[i].status;
+
+      /* P1: flush all workers' deferred 2nd-pass Forwards as one GPU batch
+       * and patch hit fields. No-op when do_gpu_domcorr is off. */
+      if (status == eslOK && gpu_fb_ok && info->do_gpu_domcorr) {
+        status = nhmmer_gpu_flush_domcorr(info, workers, nworkers, errbuf, errbuf_size);
+      }
 
       {
         double w_null = 0, w_bias = 0, w_bck = 0, w_domain = 0, w_output = 0;
@@ -394,6 +403,7 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       w.prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc : NULL;
       w.prefilter_x_offsets = NULL;
       w.prefilter_xf_offset = 0;
+      w.pli->do_gpu_domcorr = (gpu_fb_ok && info->do_gpu_domcorr) ? 1 : 0;
 
       if (gpu_fb_ok)
         nhmmer_gpu_worker_process_post_fb(&w);
@@ -402,6 +412,11 @@ nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complemen
       else
         nhmmer_gpu_worker_process_post_vit(&w);
       status = w.status;
+
+      /* P1: flush deferred 2nd-pass Forwards. */
+      if (status == eslOK && gpu_fb_ok && info->do_gpu_domcorr) {
+        status = nhmmer_gpu_flush_domcorr(info, &w, 1, errbuf, errbuf_size);
+      }
 
       if (status == eslOK) {
         p7_tophits_Merge(info->th, w.th);
@@ -885,6 +900,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
         workers[i].prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc : NULL;
         workers[i].prefilter_x_offsets = (use_skip_fwd && !gpu_fb_ok) ? surv_xf_offsets : NULL;
         workers[i].prefilter_xf_offset = 0;
+        workers[i].pli->do_gpu_domcorr = (gpu_fb_ok && info->do_gpu_domcorr) ? 1 : 0;
       }
 
       for (i = 1; i < nworkers; i++) {
@@ -907,6 +923,11 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       status = workers[0].status;
       for (i = 1; i < nworkers && status == eslOK; i++)
         status = workers[i].status;
+
+      /* P1: flush all workers' deferred 2nd-pass Forwards. */
+      if (status == eslOK && gpu_fb_ok && info->do_gpu_domcorr) {
+        status = nhmmer_gpu_flush_domcorr(info, workers, nworkers, errbuf, errbuf_size);
+      }
 
       {
         double w_null = 0, w_bias = 0, w_bck = 0, w_domain = 0, w_output = 0;
@@ -977,6 +998,7 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       w.prefilter_fwdsc    = (use_skip_fwd && !gpu_fb_ok) ? prefilter_fwdsc : NULL;
       w.prefilter_x_offsets = NULL;
       w.prefilter_xf_offset = 0;
+      w.pli->do_gpu_domcorr = (gpu_fb_ok && info->do_gpu_domcorr) ? 1 : 0;
 
       if (gpu_fb_ok)
         nhmmer_gpu_worker_process_post_fb(&w);
@@ -985,6 +1007,11 @@ nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
       else
         nhmmer_gpu_worker_process_post_vit(&w);
       status = w.status;
+
+      /* P1: flush deferred 2nd-pass Forwards. */
+      if (status == eslOK && gpu_fb_ok && info->do_gpu_domcorr) {
+        status = nhmmer_gpu_flush_domcorr(info, &w, 1, errbuf, errbuf_size);
+      }
 
       if (status == eslOK) {
         info->t_worker_null   += w.pli->time_null;
