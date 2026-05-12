@@ -130,10 +130,28 @@ nhmmer_gpu_nucdb_fill_slice(const P7_NUCDB *ndb, const ESL_ALPHABET *abc,
   if (!rc) {
     fwd_begin = (int64_t)start - 1;
   } else {
-    /* RC window [start .. start+length-1] corresponds to forward
-     * positions [L-start-length+2 .. L-start+1] (1-indexed). 0-indexed
-     * start is L - start - length + 1. */
-    fwd_begin = L - (int64_t)start - (int64_t)length + 1;
+    /* RC scan is per-chunk: position `start` (1-based) came from chunk c
+     * where c*step < start <= c*step + chunk_len. Local pos = start - c*step.
+     * Forward pos = ci->seq_offset + ci->length - local_pos (0-based).
+     * Forward start of window = ci->seq_offset + ci->length - (start + length - 1 - c*step). */
+    int64_t step = (int64_t)ndb->hdr.chunk_size - (int64_t)ndb->hdr.overlap;
+    if (step < 1) step = 1;
+    int found_chunk = 0;
+    int cs = sidx->chunk_start;
+    int cc = sidx->chunk_count;
+    for (int c = 0; c < cc; c++) {
+      const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[cs + c];
+      int64_t local_start = (int64_t)start - (int64_t)c * step;
+      int64_t local_end   = local_start + (int64_t)length - 1;
+      if (local_start >= 1 && local_end <= ci->length) {
+        fwd_begin = ci->seq_offset + (ci->length - local_end);
+        found_chunk = 1;
+        break;
+      }
+    }
+    if (!found_chunk) {
+      fwd_begin = L - (int64_t)start - (int64_t)length + 1;
+    }
   }
 
   /* Zero-init; any position not covered by a chunk stays as N. */

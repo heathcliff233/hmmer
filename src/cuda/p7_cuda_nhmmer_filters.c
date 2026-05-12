@@ -426,18 +426,119 @@ nhmmer_gpu_try_map_nucdb_windows(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,
 
     if (w->length <= 0) return eslFAIL;
 
-    /* For RC strand, convert scan-space window to forward positions.
-     * RC scan position p (1-based) → forward 0-based position: L - p.
-     * Window covers RC positions w->n .. w->n + w->length - 1.
-     * Forward 0-based range: [L - (w->n + length - 1), L - w->n].
-     * start0 = L - w->n - length + 1. */
     if (complementarity == p7_COMPLEMENT) {
-      int64_t tL = (int64_t)w->target_len;
-      start0 = tL - (int64_t)w->n - (int64_t)w->length + 1;
-      if (start0 < 0) start0 = 0;
-    } else {
-      start0 = (int64_t)w->n - 1;
+      /* RC scan: global RC position w->n came from chunk c where
+       * c*step < w->n <= c*step + chunk_len. Local position = w->n - c*step.
+       * Forward position of scan pos p in chunk c = ci->seq_offset + ci->length - local_p.
+       * Forward start of window = ci->seq_offset + ci->length - (w->n + w->length - 1 - c*step).
+       * We must find the chunk first, then compute start0. */
+      guess = ((int64_t)w->n - 1) / step;
+      if (guess < 0) guess = 0;
+      if (guess >= chunk_count) guess = chunk_count - 1;
+
+      for (int delta = 0; delta <= 2 && !found; delta++) {
+        for (int sign = -1; sign <= 1; sign += 2) {
+          int64_t c = guess + sign * delta;
+          if (delta == 0 && sign > -1) continue;
+          if (c < 0 || c >= chunk_count) continue;
+
+          const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+          int64_t local_start = (int64_t)w->n - c * step;
+          int64_t local_end   = local_start + (int64_t)w->length - 1;
+          if (local_start < 1 || local_end > ci->length) continue;
+
+          /* Forward position (0-based) of the window region: */
+          start0 = ci->seq_offset + (ci->length - local_end);
+          end0   = start0 + (int64_t)w->length;
+          int64_t rel = start0 - ci->seq_offset;
+
+          if ((int64_t)ci->data_offset * 4 + rel > INT32_MAX || w->length > INT32_MAX)
+            return eslFAIL;
+          info->h_nucdb_window_offsets[i] = (int)((int64_t)ci->data_offset * 4 + rel);
+          info->h_nucdb_window_lengths[i] = (int)w->length;
+          info->h_nucdb_window_src1_lengths[i] = (int)w->length;
+          info->h_nucdb_window_src2_offsets[i] = 0;
+          found = TRUE;
+          break;
+        }
+      }
+      /* Fallback: linear scan for RC */
+      for (int64_t c = 0; c < chunk_count && !found; c++) {
+        const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+        int64_t local_start = (int64_t)w->n - c * step;
+        int64_t local_end   = local_start + (int64_t)w->length - 1;
+        if (local_start < 1 || local_end > ci->length) continue;
+
+        start0 = ci->seq_offset + (ci->length - local_end);
+        int64_t rel = start0 - ci->seq_offset;
+
+        if ((int64_t)ci->data_offset * 4 + rel > INT32_MAX || w->length > INT32_MAX)
+          return eslFAIL;
+        info->h_nucdb_window_offsets[i] = (int)((int64_t)ci->data_offset * 4 + rel);
+        info->h_nucdb_window_lengths[i] = (int)w->length;
+        info->h_nucdb_window_src1_lengths[i] = (int)w->length;
+        info->h_nucdb_window_src2_offsets[i] = 0;
+        found = TRUE;
+      }
+      /* Two-chunk span for RC */
+      if (!found) {
+        for (int64_t c = 0; c < chunk_count - 1; c++) {
+          const P7_NUCDB_CHUNK_IDX *ci = &ndb->chunk_idx[chunk_start + c];
+          const P7_NUCDB_CHUNK_IDX *cj = &ndb->chunk_idx[chunk_start + c + 1];
+          int64_t local_start = (int64_t)w->n - c * step;
+          int64_t local_end   = local_start + (int64_t)w->length - 1;
+          if (local_start < 1 || local_start > ci->length) continue;
+          if (local_end <= ci->length) continue;
+
+          /* Window spans chunk boundary in RC scan space.
+           * Part 1 covers local RC positions [local_start .. ci->length] in chunk c.
+           *   Forward range: ci->seq_offset + [ci->length - ci->length .. ci->length - local_start]
+           *                = ci->seq_offset + [0 .. ci->length - local_start]
+           * Part 2 covers local RC positions [1 .. local_end - ci->length] in chunk c+1.
+           *   Forward range: cj->seq_offset + [cj->length - (local_end - ci->length) .. cj->length - 1]
+           *
+           * The gather kernel reverses: output[0] should read the highest RC scan position
+           * (part 2's first forward position). Output[len_in_cj..] reads part 1.
+           * src1 = part 2 forward range (it's the "earlier" in output after reversal)
+           * src2 = part 1 forward range
+           */
+          int64_t len_in_c  = ci->length - local_start + 1;
+          int64_t len_in_cj = (int64_t)w->length - len_in_c;
+
+          /* Part 2: chunk c+1, local RC positions 1..len_in_cj
+           * Forward start: cj->seq_offset + cj->length - len_in_cj */
+          int64_t fwd_start_cj = cj->seq_offset + cj->length - len_in_cj;
+          int64_t rel_cj = fwd_start_cj - cj->seq_offset;
+
+          /* Part 1: chunk c, local RC positions local_start..ci->length
+           * Forward start: ci->seq_offset + 0 = ci->seq_offset */
+          int64_t fwd_start_c = ci->seq_offset;
+          int64_t rel_c = 0;
+
+          if ((int64_t)cj->data_offset * 4 + rel_cj > INT32_MAX ||
+              (int64_t)ci->data_offset * 4 + rel_c > INT32_MAX ||
+              w->length > INT32_MAX)
+            return eslFAIL;
+
+          /* For RC gather: output[k] reads position (L-1-k) from the logical
+           * concatenation [src1 || src2]. src1 has len_in_cj elements (from part 2),
+           * src2 has len_in_c elements (from part 1). */
+          info->h_nucdb_window_offsets[i] = (int)((int64_t)cj->data_offset * 4 + rel_cj);
+          info->h_nucdb_window_lengths[i] = (int)w->length;
+          info->h_nucdb_window_src1_lengths[i] = (int)len_in_cj;
+          info->h_nucdb_window_src2_offsets[i] = (int)((int64_t)ci->data_offset * 4 + rel_c);
+          found = TRUE;
+          needs_gather = TRUE;
+          break;
+        }
+      }
+
+      if (!found) return eslFAIL;
+      continue;  /* skip the forward path below */
     }
+
+    /* Forward strand: w->n is 1-based forward position. */
+    start0 = (int64_t)w->n - 1;
     end0 = start0 + (int64_t)w->length;
     if (start0 < 0) return eslFAIL;
     guess = start0 / step;
