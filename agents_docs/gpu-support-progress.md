@@ -144,7 +144,7 @@ A GPU-accelerated path for `nhmmer` is available via `--gpu`. Rebased on latest 
 - **Engine reuse**: CUDA engine created once before query loop, saves ~250ms per additional query.
 - **Hit parity**: Current smoke parity is exact for MADE1/query_short/query_medium main-output hit lines; query_medium CPU-4 FASTA and GPU fast `.nucdb` both produced 648 hit lines. A strict `--tblout` audit for query_medium produced 215 CPU rows and 215 GPU rows with no diff.
 - **Performance**: Current speed-script rerun on chr22, RTX 4090, 4 CPU threads: query_medium CPU-4 FASTA 1.669s, GPU FASTA 1.589s, GPU ordinary `.nucdb` 1.340s, GPU fast overlap `.nucdb` 1.232s. Focused repeats showed CPU-4 FASTA wall 1.77s and GPU fast `.nucdb` wall 1.53-1.86s, with GPU timing totals 1.141-1.319s. GPU worker time is almost entirely domain workflow (~0.79s in focused repeats); CPU Backward is 0.000s in the handoff path.
-- **Files**: `src/nhmmer_gpu.c`, `src/nhmmer_internal.h`, `src/cuda/p7_cuda_ssv_longtarget.cu`, `src/cuda/p7_cuda_viterbi_longtarget.cu`, `src/cuda/p7_cuda_domain_rescore.cu`, `src/cuda/p7_cuda_fb_parser.cu`
+- **Files**: `src/nhmmer_internal.h`, `src/cuda/nhmmer_cuda_internal.h`, `src/nhmmer_gpu_workers.c`, `src/nhmmer_gpu_windows.c`, `src/nhmmer_gpu_seqhelpers.c`, `src/cuda/p7_cuda_nhmmer_filters.c`, `src/cuda/p7_cuda_nhmmer_viterbi.c`, `src/cuda/p7_cuda_nhmmer_fwd.c`, `src/cuda/p7_cuda_nhmmer_strand.c`, `src/cuda/p7_cuda_nhmmer_search.c`, `src/cuda/p7_cuda_ssv_longtarget.cu`, `src/cuda/p7_cuda_viterbi_longtarget.cu`, `src/cuda/p7_cuda_domain_rescore.cu`, `src/cuda/p7_cuda_fb_parser.cu`
 - **Detailed docs**: See `nhmmer-gpu-progress.md` and `nhmmer-gpu-todo.md`.
 
 ## History

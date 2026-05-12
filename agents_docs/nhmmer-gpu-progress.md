@@ -58,8 +58,17 @@ reconstruction.
 | File | Role |
 |------|------|
 | `src/nhmmer.c` | CLI, engine lifecycle, shared `.nucdb` open/upload, timing output |
-| `src/nhmmer_internal.h` | `NHMMER_GPU_INFO` and GPU window/batch structs |
-| `src/nhmmer_gpu.c` | GPU orchestration, `.nucdb` shell/slice handling, CPU domain handoff |
+| `src/nhmmer_internal.h` | `NHMMER_GPU_INFO` and GPU window/batch structs (public API) |
+| `src/cuda/nhmmer_cuda_internal.h` | Cross-TU contract: worker/OMX structs, shared macros, internal decls |
+| `src/nhmmer_gpu.c` | CPU-only stubs (~50 lines) for non-CUDA builds |
+| `src/nhmmer_gpu_seqhelpers.c` | `.nucdb` ESL_SQ reconstruction (full / shell / slice) |
+| `src/nhmmer_gpu_windows.c` | Windowlist helpers + synthetic-chunk lifecycle |
+| `src/nhmmer_gpu_workers.c` | CPU worker pool, OMX special-state binding, scalar Viterbi debug |
+| `src/cuda/p7_cuda_nhmmer_filters.c` | Scratch arenas, batch SSV/bias/F1 filter, nucdb resident mapping |
+| `src/cuda/p7_cuda_nhmmer_viterbi.c` | Scanning Viterbi longtarget orchestration |
+| `src/cuda/p7_cuda_nhmmer_fwd.c` | GPU Forward prefilter + Forward/Backward parser dispatch |
+| `src/cuda/p7_cuda_nhmmer_strand.c` | Per-strand orchestration (FASTA and `.nucdb` paths) |
+| `src/cuda/p7_cuda_nhmmer_search.c` | Public outer loops (`serial_loop`, `nucdb_loop`, `nucdb_upload`) |
 | `src/cuda/p7_cuda_ssv_longtarget.cu` | SSV long-target kernels, host prefix sum + extend/merge |
 | `src/cuda/p7_cuda_viterbi_longtarget.cu` | Scanning Viterbi kernels, host prefix sum + extend/merge/split |
 | `src/cuda/p7_cuda_ssv.cu` | Fused SSV/null/bias/F1 gate kernel, host F1 compaction |

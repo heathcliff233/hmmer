@@ -108,6 +108,7 @@ HDRS =  hmmer.h \
 		cuda_msv.h \
 		cuda/p7_cuda.h \
 		cuda/p7_cuda_internal.h \
+		cuda/nhmmer_cuda_internal.h \
 		cachedb.h \
 		hmmsearch_internal.h \
 		nhmmer_internal.h \
@@ -148,6 +149,9 @@ OBJS =  build.o\
 		hmmer.o\
 		hmmsearch_gpu.o\
 		nhmmer_gpu.o\
+		nhmmer_gpu_seqhelpers.o\
+		nhmmer_gpu_windows.o\
+		nhmmer_gpu_workers.o\
 		logsum.o\
 	modelconfig.o\
 	modelstats.o\
@@ -296,6 +300,21 @@ cuda/%.o: cuda/%.cu ${HDRS} p7_config.h
 	${QUIET_CC}${NVCC} ${CUDA_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
 
 cuda/p7_cuda_stub.o: cuda/p7_cuda_stub.c ${HDRS} p7_config.h
+	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
+
+cuda/p7_cuda_nhmmer_filters.o: cuda/p7_cuda_nhmmer_filters.c ${HDRS} p7_config.h
+	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
+
+cuda/p7_cuda_nhmmer_search.o: cuda/p7_cuda_nhmmer_search.c ${HDRS} p7_config.h
+	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
+
+cuda/p7_cuda_nhmmer_fwd.o: cuda/p7_cuda_nhmmer_fwd.c ${HDRS} p7_config.h
+	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
+
+cuda/p7_cuda_nhmmer_viterbi.o: cuda/p7_cuda_nhmmer_viterbi.c ${HDRS} p7_config.h
+	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
+
+cuda/p7_cuda_nhmmer_strand.o: cuda/p7_cuda_nhmmer_strand.c ${HDRS} p7_config.h
 	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
 
 ${PROGS} ${AUXPROGS}: % : %.o  libhmmer.a ../${ESLDIR}/libeasel.a 
