@@ -77,6 +77,7 @@ extern void p7_cuda_engine_GetStats(const P7_CUDA_ENGINE *engine, P7_CUDA_MSV_ST
 
 extern int  p7_cuda_msvprofile_Create(const P7_OPROFILE *om, P7_CUDA_MSVPROFILE **ret_cuom, char *errbuf, int errbuf_size);
 extern void p7_cuda_msvprofile_Destroy(P7_CUDA_MSVPROFILE *cuom);
+extern int  p7_cuda_msvprofile_CreateNucTables(P7_CUDA_MSVPROFILE *cuom, const P7_OPROFILE *om, char *errbuf, int errbuf_size);
 extern int  p7_cuda_msvprofile_UpdateLength(P7_CUDA_MSVPROFILE *cuom, const P7_OPROFILE *om, int L, char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_MSVFilter(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,

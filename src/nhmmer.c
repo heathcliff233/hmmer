@@ -1174,9 +1174,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 
         clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
         status = p7_cuda_msvprofile_Create(info[0].om, &cuda_msv, errbuf, sizeof(errbuf));
+        if (status != eslOK) p7_Fail("--gpu requested, but CUDA MSV profile creation failed: %s\n", errbuf);
+        status = p7_cuda_msvprofile_CreateNucTables(cuda_msv, info[0].om, errbuf, sizeof(errbuf));
+        if (status != eslOK) p7_Fail("--gpu requested, but CUDA nuc emission table creation failed: %s\n", errbuf);
         clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
         t_cuda_profile_create = elapsed_seconds(&tmp_ts0, &tmp_ts1);
-        if (status != eslOK) p7_Fail("--gpu requested, but CUDA MSV profile creation failed: %s\n", errbuf);
 
         gpu_info.bg             = info[0].bg;
         gpu_info.pli            = info[0].pli;

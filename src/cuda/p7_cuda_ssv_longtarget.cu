@@ -10,6 +10,8 @@
 
 #define SSV_LT_MAX_STRIDE 64
 #define SSV_LT_MAX_WINDOWS_PER_CHUNK 1024
+#define SSV_LT_WARPS_PER_BLOCK 4
+#define SSV_LT_BLOCK_THREADS (SSV_LT_WARPS_PER_BLOCK * 32)
 
 __device__ static inline uint8_t
 lt_u8_sub_sat(uint8_t a, uint8_t b)
@@ -25,26 +27,9 @@ lt_u8_add_sat(uint8_t a, uint8_t b)
 }
 
 /* SSV longtarget kernel: one block (32 threads) per chunk.
- *
- * For each chunk, runs the SSV DP scan. When xE >= sc_thresh, performs
- * diagonal recovery (backward walk) and extension (forward walk), then
- * emits a window and resets DP state. This exactly replicates the CPU
- * p7_SSVFilter_longtarget() algorithm.
- *
- * Parameters:
- *   dsq          - packed digital sequences (all chunks contiguous)
- *   offsets      - byte offset of each chunk in dsq
- *   lengths      - length of each chunk
- *   nchunks      - number of chunks
- *   rbv_lin      - linear emission scores [x*M + k] (byte-encoded)
- *   ssv_scores   - scoredata for diagonal recovery [(k)*Kp + x]
- *   M, Kp        - model dimensions
- *   tbm_b, tec_b, base_b, bias_b - profile parameters
- *   sc_thresh    - score threshold for window detection
- *   d_windows    - output window array
- *   d_win_count  - atomic counter for total windows emitted
- *   max_windows  - capacity of d_windows
+ * Templated on MAX_STRIDE to reduce register pressure for small models.
  */
+template<int MAX_STRIDE>
 __global__ static void
 cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *lengths,
                            int nchunks,
@@ -56,41 +41,30 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
                            P7_CUDA_LT_WINDOW *d_windows, int *d_win_count, int max_windows,
                            int packed_2bit = 0, int rc_flag = 0)
 {
-  int chunk = blockIdx.x;
-  int tid   = threadIdx.x;
+  int warp_id = threadIdx.x / 32;
+  int lane    = threadIdx.x & 31;
+  int chunk   = blockIdx.x * (blockDim.x / 32) + warp_id;
   if (chunk >= nchunks) return;
 
   const uint8_t *sdsq = dsq + offsets[chunk];
   int L = lengths[chunk];
 
   int stride = (M + 31) / 32;
-  int my_start = tid * stride;
+  int my_start = lane * stride;
   int my_count = stride;
   if (my_start + my_count > M) my_count = M - my_start;
   if (my_count < 0) my_count = 0;
 
   uint8_t xB_ssv = lt_u8_sub_sat(base_b, (uint8_t)(tjb_b + tbm_b));
 
-  /* Register-based DP state */
-  uint8_t prev_reg[SSV_LT_MAX_STRIDE];
+  uint8_t prev_reg[MAX_STRIDE];
   for (int j = 0; j < my_count; j++) prev_reg[j] = 0;
 
   uint8_t last_prev = 0;
-
-  /* Shared variables for cross-warp communication */
-  __shared__ int    s_hit_detected;
-  __shared__ uint8_t s_best_score;
-  __shared__ int    s_best_k;
-  __shared__ int    s_skip_to;
-
-  if (tid == 0) {
-    s_hit_detected = 0;
-    s_skip_to = 0;
-  }
-  __syncthreads();
+  int skip_to = 0;
 
   for (int i = 1; i <= L; i++) {
-    if (i <= s_skip_to) continue;
+    if (i <= skip_to) continue;
 
     uint8_t x;
     if (packed_2bit) {
@@ -101,7 +75,7 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
     }
 
     uint8_t from_left = __shfl_up_sync(0xffffffff, last_prev, 1);
-    if (tid == 0) from_left = 0;
+    if (lane == 0) from_left = 0;
 
     uint8_t xE_local = 0;
     int     xE_k_local = -1;
@@ -123,7 +97,6 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
 
     last_prev = (my_count > 0) ? prev_reg[my_count - 1] : 0;
 
-    /* Warp reduction to find max xE and which model position hit it */
     for (int s = 16; s > 0; s >>= 1) {
       uint8_t other_sc = __shfl_down_sync(0xffffffff, xE_local, s);
       int     other_k  = __shfl_down_sync(0xffffffff, xE_k_local, s);
@@ -133,87 +106,72 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
       }
     }
 
-    /* Thread 0 checks threshold */
-    if (tid == 0 && xE_local >= sc_thresh) {
-      s_hit_detected = 1;
-      s_best_score = xE_local;
-      s_best_k = xE_k_local;
-    }
-    __syncthreads();
+    /* Lane 0 has the warp-wide max. Check threshold. */
+    int new_skip = 0;
+    if (lane == 0 && xE_local >= sc_thresh) {
+      int end = xE_k_local;
+      int rem_sc = (int)xE_local;
+      int sc = rem_sc;
+      int start = end;
+      int target_end = i;
+      int target_start = i;
 
-    if (s_hit_detected) {
-      if (tid == 0) {
-        int end = s_best_k;
-        int rem_sc = (int)s_best_score;
-        int sc = rem_sc;
-        int start = end;
-        int target_end = i;
-        int target_start = i;
-
-        /* Backward walk: recover diagonal start
-         * Threshold: base_b - tjb_b - tbm_b (same as CPU) */
-        int walk_threshold = (int)base_b - (int)tjb_b - (int)tbm_b;
-        while (rem_sc > walk_threshold && target_start > 0) {
-          int rx;
-          if (packed_2bit) { int rp = rc_flag ? (L - target_start) : (target_start - 1); rx = p7_nucdb_fetch1(sdsq, rp, rc_flag); }
-          else { rx = (int)sdsq[target_start]; }
-          rem_sc -= (int)bias_b - (int)ssv_scores[start * Kp + rx];
-          --start;
-          --target_start;
-        }
-        start++;
-        target_start++;
-
-        /* Forward walk: extend diagonal (up to 5 positions past max) */
-        int k = end + 1;
-        int n = target_end + 1;
-        int max_end = target_end;
-        int max_sc = sc;
-        int pos_since_max = 0;
-        while (k < M && n <= L) {
-          int fx;
-          if (packed_2bit) { int fp = rc_flag ? (L - n) : (n - 1); fx = p7_nucdb_fetch1(sdsq, fp, rc_flag); }
-          else { fx = (int)sdsq[n]; }
-          sc += (int)bias_b - (int)ssv_scores[k * Kp + fx];
-          if (sc >= max_sc) {
-            max_sc = sc;
-            max_end = n;
-            pos_since_max = 0;
-          } else {
-            pos_since_max++;
-            if (pos_since_max == 5) break;
-          }
-          k++;
-          n++;
-        }
-
-        end += (max_end - target_end);
-        target_end = max_end;
-
-        /* Score conversion: same as CPU
-         * ret_sc = ((max_sc - tjb_b) - base_b) / scale_b - 3.0 */
-        float ret_sc = ((float)(max_sc - (int)tjb_b) - (float)base_b);
-        ret_sc /= scale_b;
-        ret_sc -= 3.0f;
-
-        /* Emit window */
-        int widx = chunk * SSV_LT_MAX_WINDOWS_PER_CHUNK + atomicAdd(d_win_count + chunk, 1);
-        if (widx < (chunk + 1) * SSV_LT_MAX_WINDOWS_PER_CHUNK && widx < max_windows) {
-          d_windows[widx].chunk_id     = chunk;
-          d_windows[widx].target_start = target_start;
-          d_windows[widx].target_end   = target_end;
-          d_windows[widx].model_start  = (int16_t)start;
-          d_windows[widx].model_end    = (int16_t)end;
-          d_windows[widx].score        = ret_sc;
-        }
-
-        /* Skip forward past the hit (same as CPU: i = target_end) */
-        s_skip_to = target_end;
-        s_hit_detected = 0;
+      int walk_threshold = (int)base_b - (int)tjb_b - (int)tbm_b;
+      while (rem_sc > walk_threshold && target_start > 0) {
+        int rx;
+        if (packed_2bit) { int rp = rc_flag ? (L - target_start) : (target_start - 1); rx = p7_nucdb_fetch1(sdsq, rp, rc_flag); }
+        else { rx = (int)sdsq[target_start]; }
+        rem_sc -= (int)bias_b - (int)ssv_scores[start * Kp + rx];
+        --start;
+        --target_start;
       }
-      __syncthreads();
+      start++;
+      target_start++;
 
-      /* Reset DP state after hit */
+      int k = end + 1;
+      int n = target_end + 1;
+      int max_end = target_end;
+      int max_sc = sc;
+      int pos_since_max = 0;
+      while (k < M && n <= L) {
+        int fx;
+        if (packed_2bit) { int fp = rc_flag ? (L - n) : (n - 1); fx = p7_nucdb_fetch1(sdsq, fp, rc_flag); }
+        else { fx = (int)sdsq[n]; }
+        sc += (int)bias_b - (int)ssv_scores[k * Kp + fx];
+        if (sc >= max_sc) {
+          max_sc = sc;
+          max_end = n;
+          pos_since_max = 0;
+        } else {
+          pos_since_max++;
+          if (pos_since_max == 5) break;
+        }
+        k++;
+        n++;
+      }
+
+      end += (max_end - target_end);
+      target_end = max_end;
+
+      float ret_sc = ((float)(max_sc - (int)tjb_b) - (float)base_b);
+      ret_sc /= scale_b;
+      ret_sc -= 3.0f;
+
+      int widx = chunk * SSV_LT_MAX_WINDOWS_PER_CHUNK + atomicAdd(d_win_count + chunk, 1);
+      if (widx < (chunk + 1) * SSV_LT_MAX_WINDOWS_PER_CHUNK && widx < max_windows) {
+        d_windows[widx].chunk_id     = chunk;
+        d_windows[widx].target_start = target_start;
+        d_windows[widx].target_end   = target_end;
+        d_windows[widx].model_start  = (int16_t)start;
+        d_windows[widx].model_end    = (int16_t)end;
+        d_windows[widx].score        = ret_sc;
+      }
+
+      new_skip = target_end;
+    }
+    new_skip = __shfl_sync(0xffffffff, new_skip, 0);
+    if (new_skip > 0) {
+      skip_to = new_skip;
       for (int j = 0; j < my_count; j++) prev_reg[j] = 0;
       last_prev = 0;
     }
@@ -240,8 +198,8 @@ ssv_longtarget_set_launch_stats(P7_CUDA_SSV_LT_STATS *stats, int nchunks, int ch
   if (cudaGetDevice(&dev) != cudaSuccess) return;
   if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return;
   if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks,
-                                                    cuda_ssv_longtarget_kernel,
-                                                    block_threads, shmem) != cudaSuccess)
+                                                    cuda_ssv_longtarget_kernel<SSV_LT_MAX_STRIDE>,
+                                                    SSV_LT_BLOCK_THREADS, shmem) != cudaSuccess)
     return;
 
   {
@@ -258,6 +216,15 @@ ssv_longtarget_set_launch_stats(P7_CUDA_SSV_LT_STATS *stats, int nchunks, int ch
                                       : 0.0;
   }
 }
+
+#define SSV_LT_DISPATCH(NCHUNKS, ARGS...) do { \
+  int _stride = (M + 31) / 32; \
+  int _grid = ((NCHUNKS) + SSV_LT_WARPS_PER_BLOCK - 1) / SSV_LT_WARPS_PER_BLOCK; \
+  if      (_stride <= 8)  cuda_ssv_longtarget_kernel<8> <<<_grid, SSV_LT_BLOCK_THREADS>>>(ARGS); \
+  else if (_stride <= 16) cuda_ssv_longtarget_kernel<16><<<_grid, SSV_LT_BLOCK_THREADS>>>(ARGS); \
+  else if (_stride <= 32) cuda_ssv_longtarget_kernel<32><<<_grid, SSV_LT_BLOCK_THREADS>>>(ARGS); \
+  else                    cuda_ssv_longtarget_kernel<64><<<_grid, SSV_LT_BLOCK_THREADS>>>(ARGS); \
+} while(0)
 
 __global__ static void
 cuda_ssv_longtarget_compact_kernel(const P7_CUDA_LT_WINDOW *src,
@@ -761,9 +728,9 @@ p7_cuda_SSVLongtarget(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
   {
     ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, 0);
     cudaEventRecord(engine->evt_k0);
-    cuda_ssv_longtarget_kernel<<<nchunks, 32>>>(
+    SSV_LT_DISPATCH(nchunks,
       engine->d_lt_dsq, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
-      cuom->d_rbv_lin, engine->d_lt_ssv_scores,
+      (cuom->d_rbv_lin_nuc ? cuom->d_rbv_lin_nuc : cuom->d_rbv_lin), engine->d_lt_ssv_scores,
       M, Kp,
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,
@@ -905,9 +872,9 @@ p7_cuda_SSVLongtargetWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *c
   {
     ssv_longtarget_set_launch_stats(stats, nchunks, chunk_size, 32, 0);
     cudaEventRecord(engine->evt_k0);
-    cuda_ssv_longtarget_kernel<<<nchunks, 32>>>(
+    SSV_LT_DISPATCH(nchunks,
       engine->d_lt_dsq, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
-      cuom->d_rbv_lin, engine->d_lt_ssv_scores,
+      (cuom->d_rbv_lin_nuc ? cuom->d_rbv_lin_nuc : cuom->d_rbv_lin), engine->d_lt_ssv_scores,
       M, Kp,
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,
@@ -1011,9 +978,9 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
   {
     ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, 0);
     cudaEventRecord(engine->evt_k0);
-    cuda_ssv_longtarget_kernel<<<nchunks, 32>>>(
+    SSV_LT_DISPATCH(nchunks,
       d_nucdb_data, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
-      cuom->d_rbv_lin, engine->d_lt_ssv_scores,
+      (cuom->d_rbv_lin_nuc ? cuom->d_rbv_lin_nuc : cuom->d_rbv_lin), engine->d_lt_ssv_scores,
       M, Kp,
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,
@@ -1111,9 +1078,9 @@ p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPR
   {
     ssv_longtarget_set_launch_stats(stats, nchunks, step, 32, 0);
     cudaEventRecord(engine->evt_k0);
-    cuda_ssv_longtarget_kernel<<<nchunks, 32>>>(
+    SSV_LT_DISPATCH(nchunks,
       d_nucdb_data, engine->d_lt_offsets, engine->d_lt_lengths, nchunks,
-      cuom->d_rbv_lin, engine->d_lt_ssv_scores,
+      (cuom->d_rbv_lin_nuc ? cuom->d_rbv_lin_nuc : cuom->d_rbv_lin), engine->d_lt_ssv_scores,
       M, Kp,
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,

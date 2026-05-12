@@ -73,8 +73,6 @@ nhmmer_gpu_run_strand_gpu_phase(NHMMER_GPU_INFO *info, NHMMER_GPU_SLOT *slot,
   uint8_t sc_thresh = (uint8_t)ceil(((nullsc + (invP * eslCONST_LOG2) + 3.0) * om->scale_b)
                                     + om->base_b + om->tec_b + om->tjb_b);
 
-  int chunk_size = info->gpu_chunk_size > 0 ? info->gpu_chunk_size : NHMMER_GPU_CHUNK_SIZE;
-
   P7_HMM_WINDOW *gpu_merged_windows = NULL;
   P7_CUDA_SSV_LT_STATS ssv_stats;
   int gpu_nwindows = 0;

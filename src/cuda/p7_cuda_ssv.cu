@@ -677,7 +677,7 @@ cuda_nhmmer_gather_windows_kernel(const uint8_t *src_dsq,
 #define SSV_NHMMER_FUSED_LAUNCH(STRIDE_VAL, WARPS_VAL) \
   cuda_ssv_null_bias_gate_kernel<STRIDE_VAL, WARPS_VAL><<<(nseq + (WARPS_VAL) - 1) / (WARPS_VAL), 32 * (WARPS_VAL), shmem>>>( \
     d_dsq_ptr, d_off_ptr, d_len_ptr, d_tjb_ptr, nseq, \
-    cuom->d_rbv, cuom->d_rbv_lin, cuom->M, cuom->Q, cuom->Kp, \
+    cuom->d_rbv, (cuom->d_rbv_lin_nuc ? cuom->d_rbv_lin_nuc : cuom->d_rbv_lin), cuom->M, cuom->Q, (cuom->Kp_nuc ? cuom->Kp_nuc : cuom->Kp), \
     cuom->tbm_b, cuom->tec_b, cuom->tjb_b, \
     cuom->base_b, cuom->bias_b, cuom->scale_b, \
     engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo, \
@@ -691,7 +691,7 @@ cuda_nhmmer_gather_windows_kernel(const uint8_t *src_dsq,
 #define SSV_NHMMER_MASK_LAUNCH(STRIDE_VAL, WARPS_VAL) \
   cuda_ssv_null_bias_gate_kernel<STRIDE_VAL, WARPS_VAL><<<(nseq + (WARPS_VAL) - 1) / (WARPS_VAL), 32 * (WARPS_VAL), shmem>>>( \
     d_dsq_ptr, d_off_ptr, d_len_ptr, d_tjb_ptr, nseq, \
-    cuom->d_rbv, cuom->d_rbv_lin, cuom->M, cuom->Q, cuom->Kp, \
+    cuom->d_rbv, (cuom->d_rbv_lin_nuc ? cuom->d_rbv_lin_nuc : cuom->d_rbv_lin), cuom->M, cuom->Q, (cuom->Kp_nuc ? cuom->Kp_nuc : cuom->Kp), \
     cuom->tbm_b, cuom->tec_b, cuom->tjb_b, \
     cuom->base_b, cuom->bias_b, cuom->scale_b, \
     engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo, \

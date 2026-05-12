@@ -129,7 +129,6 @@ cuda_viterbi_longtarget_kernel(
 
   for (int i = 1; i <= L; i++) {
     uint8_t x = s[i];
-    if (x >= Kp) continue;
 
     xB = (int16_t) __shfl_sync(mask, (int) xB, 0, VIT_LT_LANES);
     int16_t mpv = prev[((Q - 1) + lane * Q) * 3 + 0];
@@ -519,7 +518,7 @@ p7_cuda_viterbi_longtarget_launch(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
     cuda_viterbi_longtarget_kernel<<<nblocks, block_threads, shmem>>>(
       d_dsq, d_offsets, d_lengths, d_seqidx,
       nwindows,
-      cuom->d_rwv, cuom->d_twv, M, Q, cuom->Kp,
+      (cuom->d_rwv_nuc ? cuom->d_rwv_nuc : cuom->d_rwv), cuom->d_twv, M, Q, (cuom->Kp_nuc ? cuom->Kp_nuc : cuom->Kp),
       nj, scale_w, max_length,
       cuom->xw_e_loop, cuom->xw_e_move,
       cuom->base_w, cuom->ddbound_w,

@@ -148,16 +148,15 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
     return status;
   }
 
-  int chunk_size = info->gpu_chunk_size > 0 ? info->gpu_chunk_size : NHMMER_GPU_CHUNK_SIZE;
+  int chunk_size = (int)ndb->hdr.chunk_size;
   if (p7_cuda_engine_NucdbDevPtr(info->cuda_engine) == NULL ||
-      (int64_t)ndb->hdr.overlap < (int64_t)om->max_length ||
-      (int64_t)ndb->hdr.chunk_size != (int64_t)chunk_size)
+      (int64_t)ndb->hdr.overlap < (int64_t)om->max_length)
   {
     fprintf(stderr,
-            "GPU nhmmer requires an overlap .nucdb with chunk_size=%d overlap>=%d "
+            "GPU nhmmer requires an overlap .nucdb with overlap>=%d "
             "(got chunk_size=%" PRId64 " overlap=%" PRId64 "). "
             "Rebuild with `hmmnucdb` (defaults to --overlap 2001).\n",
-            chunk_size, (int)om->max_length,
+            (int)om->max_length,
             (int64_t)ndb->hdr.chunk_size, (int64_t)ndb->hdr.overlap);
     return eslEINCOMPAT;
   }

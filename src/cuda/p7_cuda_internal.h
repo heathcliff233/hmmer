@@ -256,6 +256,12 @@ struct p7_cuda_msv_profile_s {
   float    scale_w;
   int16_t  base_w;
   int16_t  ddbound_w;
+
+  /* nhmmer-specific 4-row emission tables (codes 0..3 only) */
+  int      Kp_nuc;         /* = 4 when nuc tables active, 0 otherwise */
+  uint8_t *d_rbv_lin_nuc;  /* [x * M + k] for x in {0,1,2,3} */
+  int16_t *d_rwv_nuc;      /* [((int)x * Qw + q) * 8 + lane] for x in {0,1,2,3} */
+  float   *d_rfv_nuc;      /* [((int)x * Qf + q) * 4 + lane] for x in {0,1,2,3} */
 };
 
 static inline int

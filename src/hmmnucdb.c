@@ -22,8 +22,8 @@
 static ESL_OPTIONS options[] = {
   /* name           type       default env  range toggles reqs incomp help                                            docgroup */
   { "-h",           eslARG_NONE,  FALSE, NULL, NULL, NULL,   NULL, NULL, "show brief help on version and usage",        1 },
-  { "--chunk-size", eslARG_INT, "65536", NULL, "n>0", NULL,  NULL, NULL, "chunk size in residues (default 65536)",      2 },
-  { "--overlap",    eslARG_INT,  "2001", NULL, "n>=0", NULL, NULL, NULL, "overlap between chunks in residues",          2 },
+  { "--chunk-size", eslARG_INT, "16384", NULL, "n>0", NULL,  NULL, NULL, "chunk size in residues (default 16384)",      2 },
+  { "--overlap",    eslARG_INT,  "1024", NULL, "n>=0", NULL, NULL, NULL, "overlap between chunks in residues",          2 },
   { "--informat",   eslARG_STRING, NULL, NULL, NULL, NULL,   NULL, NULL, "assert input <seqfile> is in format <s>",     2 },
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };

@@ -1240,7 +1240,7 @@ p7_cuda_ForwardBackwardParser(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
                               errbuf, errbuf_size, "cudaFuncSetAttribute(forward parser shared memory)")) != eslOK) goto ERROR;
   }
   cuda_forward_parser_xmx_kernel<<<1, 1, shmem>>>(engine->d_dsq, L,
-                                                  cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                  (cuom->d_rfv_nuc ? cuom->d_rfv_nuc : cuom->d_rfv), cuom->d_tfv, cuom->M, cuom->Qf, (cuom->Kp_nuc ? cuom->Kp_nuc : cuom->Kp),
                                                   cuom->xf_e_loop, cuom->xf_e_move,
                                                   cuom->xf_n_loop, cuom->xf_n_move,
                                                   cuom->xf_c_loop, cuom->xf_c_move,
@@ -1259,7 +1259,7 @@ p7_cuda_ForwardBackwardParser(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
                               errbuf, errbuf_size, "cudaFuncSetAttribute(backward parser shared memory)")) != eslOK) goto ERROR;
   }
   cuda_backward_parser_xmx_kernel<<<1, 1, shmem>>>(engine->d_dsq, L,
-                                                   cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                   (cuom->d_rfv_nuc ? cuom->d_rfv_nuc : cuom->d_rfv), cuom->d_tfv, cuom->M, cuom->Qf, (cuom->Kp_nuc ? cuom->Kp_nuc : cuom->Kp),
                                                    cuom->xf_e_loop, cuom->xf_e_move,
                                                    cuom->xf_n_loop, cuom->xf_n_move,
                                                    cuom->xf_c_loop, cuom->xf_c_move,
@@ -1546,7 +1546,7 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     }
     cuda_forward_parser_xmx_batch_parallel_kernel<<<nidx, fwd_threads, fwd_shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
                                                                                     d_seqidx_use, nidx, d_x_offsets_use,
-                                                                                    cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                                                    (cuom->d_rfv_nuc ? cuom->d_rfv_nuc : cuom->d_rfv), cuom->d_tfv, cuom->M, cuom->Qf, (cuom->Kp_nuc ? cuom->Kp_nuc : cuom->Kp),
                                                                                     cuom->xf_e_loop, cuom->xf_e_move,
                                                                                     cuom->xf_n_loop, cuom->xf_n_move,
                                                                                     cuom->xf_c_loop, cuom->xf_c_move,
@@ -1563,7 +1563,7 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     }
     cuda_forward_parser_xmx_batch_kernel<<<nidx, 1, shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
                                                              d_seqidx_use, nidx, d_x_offsets_use,
-                                                             cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                             (cuom->d_rfv_nuc ? cuom->d_rfv_nuc : cuom->d_rfv), cuom->d_tfv, cuom->M, cuom->Qf, (cuom->Kp_nuc ? cuom->Kp_nuc : cuom->Kp),
                                                              cuom->xf_e_loop, cuom->xf_e_move,
                                                              cuom->xf_n_loop, cuom->xf_n_move,
                                                              cuom->xf_c_loop, cuom->xf_c_move,
@@ -1586,7 +1586,7 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     }
     cuda_backward_parser_xmx_batch_parallel_kernel<<<nidx, bck_threads, bck_shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
                                                                                      d_seqidx_use, nidx, d_x_offsets_use,
-                                                                                     cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                                                     (cuom->d_rfv_nuc ? cuom->d_rfv_nuc : cuom->d_rfv), cuom->d_tfv, cuom->M, cuom->Qf, (cuom->Kp_nuc ? cuom->Kp_nuc : cuom->Kp),
                                                                                      cuom->xf_e_loop, cuom->xf_e_move,
                                                                                      cuom->xf_n_loop, cuom->xf_n_move,
                                                                                      cuom->xf_c_loop, cuom->xf_c_move,
@@ -1603,7 +1603,7 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     }
     cuda_backward_parser_xmx_batch_kernel<<<nidx, 1, shmem>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
                                                               d_seqidx_use, nidx, d_x_offsets_use,
-                                                              cuom->d_rfv, cuom->d_tfv, cuom->M, cuom->Qf, cuom->Kp,
+                                                              (cuom->d_rfv_nuc ? cuom->d_rfv_nuc : cuom->d_rfv), cuom->d_tfv, cuom->M, cuom->Qf, (cuom->Kp_nuc ? cuom->Kp_nuc : cuom->Kp),
                                                               cuom->xf_e_loop, cuom->xf_e_move,
                                                               cuom->xf_n_loop, cuom->xf_n_move,
                                                               cuom->xf_c_loop, cuom->xf_c_move,

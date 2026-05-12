@@ -292,6 +292,9 @@ p7_cuda_msvprofile_Destroy(P7_CUDA_MSVPROFILE *cuom)
   if (!cuom) return;
   if (cuom->d_rbv) cudaFree(cuom->d_rbv);
   if (cuom->d_rbv_lin) cudaFree(cuom->d_rbv_lin);
+  if (cuom->d_rbv_lin_nuc) cudaFree(cuom->d_rbv_lin_nuc);
+  if (cuom->d_rwv_nuc) cudaFree(cuom->d_rwv_nuc);
+  if (cuom->d_rfv_nuc) cudaFree(cuom->d_rfv_nuc);
   if (cuom->d_prefix_lengths) cudaFree(cuom->d_prefix_lengths);
   if (cuom->d_suffix_lengths) cudaFree(cuom->d_suffix_lengths);
   if (cuom->d_rfv) cudaFree(cuom->d_rfv);
@@ -300,6 +303,67 @@ p7_cuda_msvprofile_Destroy(P7_CUDA_MSVPROFILE *cuom)
   if (cuom->d_twv) cudaFree(cuom->d_twv);
   free(cuom->h_tjb_by_len);
   free(cuom);
+}
+
+extern "C" int
+p7_cuda_msvprofile_CreateNucTables(P7_CUDA_MSVPROFILE *cuom, const P7_OPROFILE *om,
+                                   char *errbuf, int errbuf_size)
+{
+  int status;
+  int M  = cuom->M;
+  int Q  = cuom->Q;
+  int Qw = cuom->Qw;
+  int Qf = cuom->Qf;
+  int Kp = cuom->Kp;
+
+  /* Build d_rbv_lin_nuc: 4 rows × M bytes */
+  {
+    size_t lin_bytes = (size_t)4 * (size_t)M;
+    uint8_t *h_rbv_lin_nuc = (uint8_t *)malloc(lin_bytes);
+    if (!h_rbv_lin_nuc) return eslEMEM;
+    const uint8_t *src = (const uint8_t *)om->rbv[0];
+    for (int x = 0; x < 4; x++) {
+      for (int k = 0; k < M; k++) {
+        int q = k % Q;
+        int z = k / Q;
+        h_rbv_lin_nuc[x * M + k] = src[(x * Q + q) * 16 + z];
+      }
+    }
+    if ((status = cuda_status(cudaMalloc((void **)&cuom->d_rbv_lin_nuc, lin_bytes), errbuf, errbuf_size, "cudaMalloc(rbv_lin_nuc)")) != eslOK) { free(h_rbv_lin_nuc); return status; }
+    if ((status = cuda_status(cudaMemcpy(cuom->d_rbv_lin_nuc, h_rbv_lin_nuc, lin_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(rbv_lin_nuc)")) != eslOK) { free(h_rbv_lin_nuc); return status; }
+    free(h_rbv_lin_nuc);
+  }
+
+  /* Build d_rwv_nuc: 4 rows of Viterbi int16 emissions */
+  {
+    size_t rwv_bytes = sizeof(int16_t) * (size_t)4 * (size_t)Qw * 8;
+    int16_t *h_rwv_nuc = (int16_t *)malloc(rwv_bytes);
+    if (!h_rwv_nuc) return eslEMEM;
+    const int16_t *rwv_src = (const int16_t *)om->rwv[0];
+    size_t row_bytes = sizeof(int16_t) * (size_t)Qw * 8;
+    for (int x = 0; x < 4; x++)
+      memcpy(h_rwv_nuc + (size_t)x * Qw * 8, rwv_src + (size_t)x * Qw * 8, row_bytes);
+    if ((status = cuda_status(cudaMalloc((void **)&cuom->d_rwv_nuc, rwv_bytes), errbuf, errbuf_size, "cudaMalloc(rwv_nuc)")) != eslOK) { free(h_rwv_nuc); return status; }
+    if ((status = cuda_status(cudaMemcpy(cuom->d_rwv_nuc, h_rwv_nuc, rwv_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(rwv_nuc)")) != eslOK) { free(h_rwv_nuc); return status; }
+    free(h_rwv_nuc);
+  }
+
+  /* Build d_rfv_nuc: 4 rows of Forward float emissions */
+  {
+    size_t rfv_bytes = sizeof(float) * (size_t)4 * (size_t)Qf * 4;
+    float *h_rfv_nuc = (float *)malloc(rfv_bytes);
+    if (!h_rfv_nuc) return eslEMEM;
+    const float *rfv_src = (const float *)om->rfv[0];
+    size_t row_bytes = sizeof(float) * (size_t)Qf * 4;
+    for (int x = 0; x < 4; x++)
+      memcpy(h_rfv_nuc + (size_t)x * Qf * 4, rfv_src + (size_t)x * Qf * 4, row_bytes);
+    if ((status = cuda_status(cudaMalloc((void **)&cuom->d_rfv_nuc, rfv_bytes), errbuf, errbuf_size, "cudaMalloc(rfv_nuc)")) != eslOK) { free(h_rfv_nuc); return status; }
+    if ((status = cuda_status(cudaMemcpy(cuom->d_rfv_nuc, h_rfv_nuc, rfv_bytes, cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(rfv_nuc)")) != eslOK) { free(h_rfv_nuc); return status; }
+    free(h_rfv_nuc);
+  }
+
+  cuom->Kp_nuc = 4;
+  return eslOK;
 }
 
 int
