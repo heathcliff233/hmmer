@@ -317,6 +317,9 @@ cuda/p7_cuda_nhmmer_viterbi.o: cuda/p7_cuda_nhmmer_viterbi.c ${HDRS} p7_config.h
 cuda/p7_cuda_nhmmer_strand.o: cuda/p7_cuda_nhmmer_strand.c ${HDRS} p7_config.h
 	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
 
+cuda/nhmmer_gpu_slot.o: cuda/nhmmer_gpu_slot.c ${HDRS} p7_config.h
+	${QUIET_CC}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${MYINCDIRS} -o $@ -c $<
+
 ${PROGS} ${AUXPROGS}: % : %.o  libhmmer.a ../${ESLDIR}/libeasel.a 
 	${QUIET_GEN}${CC} ${CFLAGS} ${PTHREAD_CFLAGS} ${PIC_CFLAGS} ${NEON_CFLAGS} ${SSE_CFLAGS} ${VMX_CFLAGS} ${DEFS} ${CPPFLAGS} ${LDFLAGS} ${CUDA_LDFLAGS} ${MYLIBDIRS} -o $@ $@.o ${LIBS}
 

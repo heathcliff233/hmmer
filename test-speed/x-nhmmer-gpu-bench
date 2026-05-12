@@ -96,14 +96,10 @@ if [ "$MODE" = "all" ]; then
     run_bench "CPU-${CPU_THREADS}" "$NHMMER" --cpu "$CPU_THREADS" --noali "$combined_hmm" "$TARGET"
 
     if "$NHMMER" -h 2>&1 | grep -q "\-\-gpu"; then
-        run_bench "GPU-${CPU_THREADS} (FASTA)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$combined_hmm" "$TARGET"
-
-        if [ -f "$NUCDB" ]; then
-            run_bench "GPU-${CPU_THREADS} (nucdb-o0)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$combined_hmm" "$NUCDB"
-        fi
-
         if [ -f "$OVERLAP_NUCDB" ]; then
             run_bench "GPU-${CPU_THREADS} (nucdb-fast)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$combined_hmm" "$OVERLAP_NUCDB"
+        else
+            echo "  (overlap nucdb missing — build with: src/hmmnucdb chr22.fa chr22-overlap.nucdb)"
         fi
     else
         echo "  (GPU not available — build with --enable-cuda)"
@@ -122,16 +118,12 @@ for q in "${QUERIES[@]}"; do
     run_bench "CPU-1" "$NHMMER" --cpu 1 --noali "$HMM" "$TARGET"
     run_bench "CPU-${CPU_THREADS}" "$NHMMER" --cpu "$CPU_THREADS" --noali "$HMM" "$TARGET"
 
-    # GPU requires --enable-cuda build
+    # GPU requires --enable-cuda build; only overlap .nucdb is supported under --gpu
     if "$NHMMER" -h 2>&1 | grep -q "\-\-gpu"; then
-        run_bench "GPU-${CPU_THREADS} (FASTA)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$HMM" "$TARGET"
-
-        if [ -f "$NUCDB" ]; then
-            run_bench "GPU-${CPU_THREADS} (nucdb-o0)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$HMM" "$NUCDB"
-        fi
-
         if [ -f "$OVERLAP_NUCDB" ]; then
             run_bench "GPU-${CPU_THREADS} (nucdb-fast)" "$NHMMER" --gpu --cpu "$CPU_THREADS" --noali "$HMM" "$OVERLAP_NUCDB"
+        else
+            echo "  (overlap nucdb missing — build with: src/hmmnucdb chr22.fa chr22-overlap.nucdb)"
         fi
     else
         echo "  (GPU not available — build with --enable-cuda)"

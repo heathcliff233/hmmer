@@ -37,31 +37,30 @@ Recent non-causes:
 
 System: RTX 4090, `--cpu 16` unless stated otherwise.
 
-Standard chr22 combined benchmark:
+Standard chr22 combined benchmark (2026-05-12, 5 runs):
 
-| Path | Time | Hits |
-|------|:---:|:---:|
-| CPU-1 | 9.962s | 1476 |
-| CPU-16 | 1.111s | 1476 |
-| GPU-16 FASTA | 1.955s | 1476 |
-| GPU-16 no-overlap `.nucdb` | 1.371s | 1476 |
-| GPU-16 overlap `.nucdb` | 1.196s | 1476 |
+| Path | Hits | min | median |
+|------|:---:|:---:|:---:|
+| CPU-1 | 1476 | 8.487s | — |
+| CPU-16 | 1476 | 0.963s | 1.077s |
+| GPU-16 overlap `.nucdb` | 1476 | 0.968s | 1.023s |
 
-Larger chr22x5 benchmark (median of 3 runs):
+Larger chr22x5 benchmark (5 runs):
 
-| Path | Time | Hits |
-|------|:---:|:---:|
-| CPU-16 FASTA | 4.893s | 6294 |
-| GPU-16 overlap `.nucdb` | ~3.75s process / ~3.37s GPU loop | 6294 |
+| Path | Hits | min | median |
+|------|:---:|:---:|:---:|
+| CPU-16 | 6294 | 3.882s | 4.019s |
+| GPU-16 overlap `.nucdb` | 6294 | 2.715s | 2.924s |
 
 ## Current 5x GPU Breakdown
 
-Standalone GPU-16 overlap `.nucdb`, all three sample queries, chr22x5:
+Standalone GPU-16 overlap `.nucdb`, all three sample queries, chr22x5 (pre-async
+serial snapshot; the async ring now hides most CPU worker time behind GPU):
 
 | Bucket | Time |
 |--------|:---:|
-| Internal process elapsed | ~3.75s |
-| GPU loop wall | ~3.37s |
+| Internal process elapsed | ~2.92s (async) |
+| GPU loop wall (serial snapshot) | ~3.37s |
 | Process outside search | ~0.38s |
 | CUDA engine create | ~0.21s |
 | Shared `.nucdb` upload | ~0.10s |
@@ -166,9 +165,12 @@ stage remains a large end-to-end bucket.
 For small chr22, GPU-16 only narrowly trails or matches CPU-16 because fixed
 CUDA setup/upload and CPU domain workflow are large relative to total work.
 
-For chr22x5, GPU-16 is faster (~3.75s vs ~4.89s, ~23% speedup), but the
-speedup is limited because nearly half of the GPU loop is still CPU
-worker/domain workflow:
+For chr22x5, GPU-16 is faster (median 2.924s vs CPU-16 median 4.019s, ~27%
+speedup). The async 2-slot strand pipeline (2026-05-12) hides nearly all CPU
+worker time behind the next strand's GPU kernels — on query_medium the
+breakdown reports `CPU workers 1.762s` with `main-thread wait 0.144s` and
+`overlap saved 1.618s`. The remaining wall is dominated by GPU kernels
+themselves:
 
 - CPU workers: ~1.65s of ~3.37s GPU loop wall.
 - CPU domain workflow: ~1.53s.

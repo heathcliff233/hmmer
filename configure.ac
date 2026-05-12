@@ -463,7 +463,7 @@ if test "$enable_cuda" = "yes" || test "$enable_cuda" = "check"; then
     CUDA_CFLAGS="-arch=${CUDA_ARCH}"
     CUDA_LDFLAGS="-L/usr/local/cuda/lib64"
     CUDA_LIBS="-lcudart"
-    CUDA_OBJ='cuda/p7_cuda_runtime.o cuda/p7_cuda_msv.o cuda/p7_cuda_ssv.o cuda/p7_cuda_bias.o cuda/p7_cuda_viterbi.o cuda/p7_cuda_forward.o cuda/p7_cuda_fb_parser.o cuda/p7_cuda_ssv_longtarget.o cuda/p7_cuda_viterbi_longtarget.o cuda/p7_cuda_domain_rescore.o cuda/p7_cuda_nhmmer_filters.o cuda/p7_cuda_nhmmer_fwd.o cuda/p7_cuda_nhmmer_viterbi.o cuda/p7_cuda_nhmmer_strand.o cuda/p7_cuda_nhmmer_search.o'
+    CUDA_OBJ='cuda/p7_cuda_runtime.o cuda/p7_cuda_msv.o cuda/p7_cuda_ssv.o cuda/p7_cuda_bias.o cuda/p7_cuda_viterbi.o cuda/p7_cuda_forward.o cuda/p7_cuda_fb_parser.o cuda/p7_cuda_ssv_longtarget.o cuda/p7_cuda_viterbi_longtarget.o cuda/p7_cuda_domain_rescore.o cuda/p7_cuda_nhmmer_filters.o cuda/p7_cuda_nhmmer_fwd.o cuda/p7_cuda_nhmmer_viterbi.o cuda/p7_cuda_nhmmer_strand.o cuda/p7_cuda_nhmmer_search.o cuda/nhmmer_gpu_slot.o'
     enable_cuda=yes
     ],[
     if test "$enable_cuda" = "yes"; then

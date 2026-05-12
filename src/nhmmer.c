@@ -191,15 +191,8 @@ static ESL_OPTIONS options[] = {
   { "--cpu",        eslARG_INT, p7_NCPU,"HMMER_NCPU","n>=0",NULL,  NULL,  CPUOPTS,         "number of parallel CPU workers to use for multithreads",      12 },
 #endif
 #ifdef HMMER_CUDA
-  { "--gpu",              eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, NULL,          "use CUDA GPU for the SSV filter stage",                        12 },
-  { "--gpu-device",       eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,        "CUDA device id for --gpu",                                     99 },
-  { "--gpu-chunk-size",   eslARG_INT, "65536", NULL, "n>0", NULL, "--gpu", NULL,       "chunk size (residues) for GPU SSV longtarget scan",             99 },
-  { "--gpu-batch",        eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU batch SSV/bias filtering on merged windows",            99 },
-  { "--gpu-vit-longtarget",eslARG_NONE, FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "use GPU scanning Viterbi for longtarget sub-window detection",   99 },
-  { "--gpu-fwd-prefilter",eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "deprecated: GPU Forward/Backward parser reuse is default with --gpu", 99 },
-  { "--gpu-no-fwd-prefilter",eslARG_NONE,FALSE, NULL, NULL,    NULL, "--gpu", "--gpu-fwd-prefilter", "diagnostic: disable default GPU Forward/Backward parser reuse", 99 },
-  { "--gpu-cpu-postmsv", eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "bypass GPU scanning Viterbi/Fwd; use CPU postSSV for alignment testing", 99 },
-  { "--gpu-compare",     eslARG_NONE,   FALSE, NULL, NULL,    NULL, "--gpu", NULL,    "debug: compare GPU filter scores to CPU at each pipeline stage", 99 },
+  { "--gpu",              eslARG_NONE,   FALSE, NULL, NULL,    NULL,  NULL, NULL,          "use CUDA GPU (requires an overlap .nucdb target)",              12 },
+  { "--gpu-device",       eslARG_INT,      "0", NULL, "n>=0",  NULL, "--gpu", NULL,        "CUDA device id for --gpu",                                      99 },
 #endif
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
@@ -984,8 +977,11 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
     clock_gettime(CLOCK_MONOTONIC, &tmp_ts0);
     status = p7_nucdb_Open(cfg->dbfile, &gpu_shared_nucdb, errbuf);
     clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
-    if (status == eslOK) {
-      gpu_t_nucdb_open = elapsed_seconds(&tmp_ts0, &tmp_ts1);
+    if (status != eslOK)
+      p7_Fail("--gpu requires an overlap .nucdb target (build with `hmmnucdb`, which defaults to --overlap 2001): %s\n", errbuf);
+
+    gpu_t_nucdb_open = elapsed_seconds(&tmp_ts0, &tmp_ts1);
+    {
       NHMMER_GPU_INFO upload_info;
       memset(&upload_info, 0, sizeof(upload_info));
       upload_info.cuda_engine = cuda_engine;
@@ -994,9 +990,6 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
       clock_gettime(CLOCK_MONOTONIC, &tmp_ts1);
       gpu_t_nucdb_upload = elapsed_seconds(&tmp_ts0, &tmp_ts1);
       if (status != eslOK) p7_Fail("--gpu requested, but .nucdb upload failed: %s\n", errbuf);
-    } else {
-      gpu_shared_nucdb = NULL;
-      gpu_t_nucdb_open = 0.0;
     }
   }
 #endif
@@ -1193,15 +1186,15 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.cuda_engine    = cuda_engine;
         gpu_info.cuda_msv       = cuda_msv;
         gpu_info.go             = go;
-        gpu_info.gpu_chunk_size = esl_opt_GetInteger(go, "--gpu-chunk-size");
+        gpu_info.gpu_chunk_size = 0;  /* falls back to NHMMER_GPU_CHUNK_SIZE */
         gpu_info.ncpus          = ncpus;
         gpu_info.do_gpu_batch   = TRUE;
         gpu_info.do_gpu_vit_lt  = TRUE;
-        gpu_info.do_gpu_fwd     = ! esl_opt_GetBoolean(go, "--gpu-no-fwd-prefilter");
-        gpu_info.do_cpu_postmsv = esl_opt_GetBoolean(go, "--gpu-cpu-postmsv");
-        gpu_info.do_compare     = esl_opt_GetBoolean(go, "--gpu-compare");
+        gpu_info.do_gpu_fwd     = TRUE;
+        gpu_info.do_cpu_postmsv = FALSE;
+        gpu_info.do_compare     = FALSE;
         gpu_info.do_domain_trace = (getenv("HMMER_NHMMER_GPU_DOMAIN_TRACE") != NULL);
-        gpu_info.nucdb_resident = (gpu_shared_nucdb != NULL);
+        gpu_info.nucdb_resident = TRUE;
         gpu_info.h_ssv_scores   = NULL;
         gpu_info.h_ssv_status   = NULL;
         gpu_info.h_null_scores  = NULL;
@@ -1300,19 +1293,15 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.t_worker_bck      = 0;
         gpu_info.t_worker_domain   = 0;
         gpu_info.t_worker_output   = 0;
-        /* Detect nucdb format: check for .nucdb extension or .nucdb file alongside target */
+        gpu_info.t_worker_wait     = 0;
+        gpu_info.t_overlap_saved   = 0;
+        /* .nucdb is mandatory under --gpu (enforced at open time) */
         {
           clock_gettime(CLOCK_MONOTONIC, &gpu_loop_ts0);
           gpu_info.t_query_presearch = elapsed_seconds(&query_ts0, &gpu_loop_ts0);
-          if (gpu_shared_nucdb != NULL) {
-            sstatus = nhmmer_gpu_nucdb_loop(&gpu_info, gpu_shared_nucdb, info[0].pli->strands,
-                                            gpu_idlen_cb, id_length_list,
-                                            &gpu_nseqs, &gpu_nres);
-          } else {
-            sstatus = nhmmer_gpu_serial_loop(&gpu_info, dbfp, info[0].pli->strands,
-                                             gpu_idlen_cb, id_length_list,
-                                             &gpu_nseqs, &gpu_nres);
-          }
+          sstatus = nhmmer_gpu_nucdb_loop(&gpu_info, gpu_shared_nucdb, info[0].pli->strands,
+                                          gpu_idlen_cb, id_length_list,
+                                          &gpu_nseqs, &gpu_nres);
           clock_gettime(CLOCK_MONOTONIC, &gpu_loop_ts1);
           gpu_info.t_gpu_loop_wall = elapsed_seconds(&gpu_loop_ts0, &gpu_loop_ts1);
         }
@@ -1586,6 +1575,8 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	            fprintf(stderr, "    parser kernels:  %7.3fs\n", gpu_info.t_gpu_fb_kernel);
 	            fprintf(stderr, "    parser D2H:      %7.3fs\n", gpu_info.t_gpu_fb_d2h);
 	            fprintf(stderr, "  CPU workers:       %7.3fs  (%4.1f%%)\n", gpu_info.t_cpu_workers, 100.0*gpu_info.t_cpu_workers/t_search);
+	            fprintf(stderr, "    main-thread wait:%7.3fs  (blocked on pthread_join)\n", gpu_info.t_worker_wait);
+	            fprintf(stderr, "    overlap saved:   %7.3fs  (worker work hidden behind next strand's GPU)\n", gpu_info.t_overlap_saved);
 	            fprintf(stderr, "    null scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_null, 100.0*gpu_info.t_worker_null/t_search);
 	            fprintf(stderr, "    bias scoring:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bias, 100.0*gpu_info.t_worker_bias/t_search);
 	            fprintf(stderr, "    CPU Backward:    %7.3fs  (%4.1f%%)\n", gpu_info.t_worker_bck, 100.0*gpu_info.t_worker_bck/t_search);

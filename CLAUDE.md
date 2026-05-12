@@ -47,26 +47,20 @@ src/hmmsearch --gpu --gpu-ssv-compare query.hmm target.gpudb
 
 ### Running GPU nhmmer
 
+`nhmmer --gpu` now requires an overlap `.nucdb` target (default overlap from
+`hmmnucdb`). FASTA targets and no-overlap `.nucdb` targets are rejected; there
+is no longer a CPU fallback inside the GPU path.
+
 ```sh
-# All GPU stages default-on with --gpu (SSV + batch filter + Viterbi)
-src/nhmmer --gpu --cpu 4 --noali query.hmm target.fa
-
-# With pre-built nucdb (eliminates FASTA parsing, ~20% faster)
+# Build an overlap .nucdb (hmmnucdb defaults to --overlap 2001)
 src/hmmnucdb target.fa target.nucdb
-src/nhmmer --gpu --cpu 4 --noali query.hmm target.nucdb.nucdb
-
-# Nucdb with overlap (enables GPU-resident path, zero H2D for SSV)
-src/hmmnucdb --overlap 2001 target.fa target-overlap.nucdb
-src/nhmmer --gpu --cpu 4 --noali query.hmm target-overlap.nucdb.nucdb
-
-# Tune chunk size (default 64K)
-src/nhmmer --gpu --cpu 4 --gpu-chunk-size 32768 query.hmm target.fa
+src/nhmmer --gpu --cpu 16 --noali query.hmm target.nucdb.nucdb
 ```
 
 ### Running nhmmer GPU Benchmarks
 
 ```sh
-# Full timing comparison (CPU-1, CPU-4, GPU-4 FASTA, GPU-4 nucdb)
+# Full timing comparison (CPU-1, CPU-N, GPU-N overlap-nucdb)
 test-speed/x-nhmmer-gpu-bench .
 
 # Quick parity check (MADE1 must match exactly)
@@ -137,21 +131,30 @@ Queries: MADE1 (M=80, ~1s), query_short (M=151, ~1.5s), query_medium (M=501, ~6.
 
 ### Current nhmmer GPU Performance (RTX 4090, chr22)
 
-Latest combined benchmark (all three queries, 16 CPU threads, audit 2026-05-11):
+Latest combined benchmark (all three queries, 16 CPU threads, 5 runs, audit 2026-05-12). Script `test-speed/x-nhmmer-gpu-bench` uses process-lifetime wall bracketed by `date +%s%N` around each `nhmmer` invocation; cross-checked against `/usr/bin/time -f "%e"`.
 
-| Path | Target | Hits | Wall |
-|------|--------|:---:|:---:|
-| CPU-1 | `chr22.fa` | 1476 | 8.157s |
-| CPU-16 | `chr22.fa` | 1476 | 1.089s |
-| GPU-16 FASTA | `chr22.fa` | 1476 | 1.829s |
-| GPU-16 no-overlap `.nucdb` | `chr22.nucdb.nucdb` | 1476 | 1.540s |
-| GPU-16 overlap `.nucdb` | `chr22-overlap.nucdb.nucdb` | 1476 | 1.297s |
+chr22 (50MB):
 
-On 5x chr22 (larger target): GPU-16 overlap `.nucdb` `4.348s` vs CPU-16 `4.893s`, both `6294` hits.
+| Path | Hits | min | median |
+|------|:---:|:---:|:---:|
+| CPU-1 | 1476 | 8.487s | — |
+| CPU-16 | 1476 | 0.963s | 1.077s |
+| GPU-16 overlap `.nucdb` | 1476 | 0.968s | 1.023s |
 
-`hmmnucdb` now defaults to overlap chunking (`--overlap 2001`), enabling the GPU-resident SSV path for typical queries; use `--overlap 0` only for ordinary no-overlap diagnostic databases. `nhmmer --gpu` defaults to GPU batch filtering, scanning Viterbi, exact-F3 Forward prefilter, and GPU Forward/Backward parser handoff with all filter/parser sequence data resident on device. `--gpu-fwd-prefilter` is retained only as compatibility spelling; `--gpu-no-fwd-prefilter` restores the older CPU Forward/Backward continuation for diagnostics.
+On chr22 the GPU result is essentially a tie with CPU-16 (median ~5% faster, within run-to-run jitter).
 
-The current bottleneck is CPU domain workflow after the GPU parser handoff. In a focused query_medium overlap `.nucdb` run: process elapsed 1.052s, GPU loop wall 0.599s, SSV 0.106s, batch filter 0.034s (0 bytes H2D), scanning Viterbi 0.111s (0 bytes H2D), GPU FB parser 0.024s (parser H2D 0 bytes, kernels 0.015s, matrix D2H 0.003s), CPU workers 0.264s (domain workflow 0.242s). The benchmark is volatile run-to-run; do not read one measurement as a stable wall-time win.
+chr22x5 (~250MB, 5x chr22):
+
+| Path | Hits | min | median |
+|------|:---:|:---:|:---:|
+| CPU-16 | 6294 | 3.882s | 4.019s |
+| GPU-16 overlap `.nucdb` | 6294 | 2.715s | 2.924s |
+
+GPU-16 is ~27% faster than CPU-16 on chr22x5 median. The async overlap win grows with dataset size because there are enough strands to keep both slots busy through the run.
+
+`hmmnucdb` defaults to overlap chunking (`--overlap 2001`), required by `nhmmer --gpu`; use `--overlap 0` only for diagnostic databases that the GPU path won't consume. `nhmmer --gpu` unconditionally runs GPU batch F1 filtering, scanning Viterbi (FromF1), exact-F3 Forward prefilter, and GPU Forward/Backward parser handoff, with all filter/parser sequence data resident on device. Pre-2026-05-12 the path was gated by `--gpu-batch` / `--gpu-vit-longtarget` / `--gpu-fwd-prefilter` / `--gpu-no-fwd-prefilter` / `--gpu-cpu-postmsv` / `--gpu-compare` / `--gpu-chunk-size`; those flags were removed along with their branches.
+
+The outer loop is now a 2-slot double-buffered strand pipeline: the main thread drives strand N+1's GPU pipeline while strand N's CPU domain workers finish in background threads. On chr22x5/query_medium, the breakdown shows `CPU workers 1.762s` with `main-thread wait 0.144s` and `overlap saved 1.618s` — roughly all of the worker time is hidden behind the next strand's GPU kernels. The remaining bottleneck is the unavoidable GPU kernel wall (SSV + scanning Viterbi dominate); see `agents_docs/nhmmer-gpu-todo.md` for the remaining intra-stage async opportunities.
 
 ## GPU Architecture Summary
 
@@ -191,15 +194,16 @@ These flags are not shown in `hmmsearch -h` output but are defined in `src/hmmse
 Nhmmer-specific expert flags (defined in `src/nhmmer.c`):
 
 ```
---gpu-fwd-prefilter      Deprecated compatibility spelling; GPU Fwd/Bwd parser handoff is default
---gpu-no-fwd-prefilter   Diagnostic: disable GPU Forward/Backward parser reuse, use CPU continuation
---gpu-batch              GPU batch SSV/bias filtering on merged windows (default-on with --gpu)
---gpu-vit-longtarget     GPU scanning Viterbi for sub-window detection (default-on with --gpu)
---gpu-cpu-postmsv        Bypass GPU scanning Viterbi/Fwd; use CPU postSSV
---gpu-compare            Debug: compare GPU filter scores to CPU per stage
---gpu-chunk-size N       Chunk size in residues (default 65536)
 --gpu-device N           CUDA device id
 ```
+
+The prior `--gpu-chunk-size`, `--gpu-batch`, `--gpu-vit-longtarget`,
+`--gpu-fwd-prefilter`, `--gpu-no-fwd-prefilter`, `--gpu-cpu-postmsv`, and
+`--gpu-compare` flags were removed together with the non-default GPU nhmmer
+paths (FASTA, no-overlap `.nucdb`, CPU-continuation post-SSV). `nhmmer --gpu`
+unconditionally runs the resident-overlap-`.nucdb` pipeline: SSV longtarget →
+batch F1 gate → scanning Viterbi (FromF1) → GPU Forward/Backward parser →
+CPU domain workers.
 
 ## Verification Checklist
 

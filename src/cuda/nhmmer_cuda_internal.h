@@ -209,16 +209,65 @@ int nhmmer_gpu_viterbi_longtarget(NHMMER_GPU_INFO *info, const ESL_SQ *sq,
                                   P7_HMM_WINDOWLIST *ret_vit_wl,
                                   char *errbuf, int errbuf_size);
 
-/* Per-strand orchestration drivers (cuda/p7_cuda_nhmmer_strand.c). */
-int nhmmer_gpu_process_strand(NHMMER_GPU_INFO *info, const ESL_SQ *sq, int complementarity,
-                              int64_t seq_id, uint8_t sc_thresh, int chunk_size, int overlap,
-                              char *errbuf, int errbuf_size);
+/* Per-strand orchestration driver (cuda/p7_cuda_nhmmer_strand.c). */
 int nhmmer_gpu_process_nucdb_strand(NHMMER_GPU_INFO *info,
                                     const P7_NUCDB *ndb,
                                     int chunk_start, int chunk_count,
                                     const ESL_SQ *sq, int complementarity,
                                     int64_t seq_id,
                                     char *errbuf, int errbuf_size);
+
+/* Async 2-slot pipeline: one strand runs the GPU pipeline in the main
+ * thread while the previous strand's CPU workers finish in background
+ * threads. A slot owns the FB-parser D2H output buffers, the worker
+ * thread pool, and the shell ESL_SQ for the strand it's carrying.
+ * Slots are reused; the engine and NHMMER_GPU_INFO host scratch arrays
+ * are NOT duplicated because only one slot touches the GPU at a time
+ * (lifecycle: retire -> gpu_phase -> launch_workers -> ...).
+ */
+typedef struct nhmmer_gpu_slot_s {
+  int     in_flight;               /* workers outstanding */
+  int     has_work;                /* GPU produced >=1 FB survivor */
+  int64_t seq_id;
+  int     complementarity;
+  ESL_SQ *sq_shell;                /* owned; freed on retire */
+  const P7_NUCDB *ndb;             /* borrowed; needed by workers for slice materialization */
+
+  /* FB parser outputs (owned, heap-allocated by forward_backward_compact) */
+  P7_HMM_WINDOW *fwd_survivors;
+  int            nfwd_surv;
+  float         *gpu_xf;
+  float         *gpu_xb;
+  float         *gpu_fb_scores;
+  int           *gpu_fb_statuses;
+  int           *gpu_fb_L_eff;
+  size_t        *gpu_fb_x_offsets;
+
+  /* Worker pool (sized at slot_init) */
+  NHMMER_GPU_WORKER *workers;
+#ifdef HMMER_THREADS
+  pthread_t         *threads;
+  pthread_mutex_t    work_mutex;
+  int                mutex_initialized;
+#endif
+  int                nworkers;
+  int                next_window;
+  int                status;
+
+  /* Timing */
+  struct timespec ts_launch;         /* when workers were dispatched */
+} NHMMER_GPU_SLOT;
+
+int  nhmmer_gpu_slot_init(NHMMER_GPU_SLOT *slot, NHMMER_GPU_INFO *info, int nworkers_max);
+void nhmmer_gpu_slot_destroy(NHMMER_GPU_SLOT *slot);
+void nhmmer_gpu_slot_reset(NHMMER_GPU_SLOT *slot);
+int  nhmmer_gpu_slot_launch_workers(NHMMER_GPU_SLOT *slot, NHMMER_GPU_INFO *info);
+int  nhmmer_gpu_slot_retire(NHMMER_GPU_SLOT *slot, NHMMER_GPU_INFO *info);
+int  nhmmer_gpu_run_strand_gpu_phase(NHMMER_GPU_INFO *info, NHMMER_GPU_SLOT *slot,
+                                     const P7_NUCDB *ndb,
+                                     int chunk_start, int chunk_count,
+                                     int complementarity,
+                                     char *errbuf, int errbuf_size);
 
 #endif /* HMMER_CUDA */
 

@@ -107,7 +107,7 @@ CPU workers are still the largest GPU timing bucket. The bottleneck is `p7_domai
 |------|--------|--------|-------|
 | GPU domain workflow | Very high | Reduce largest remaining bucket | Needs GPU posterior decoding/domain semantics |
 | OptAcc kernel parallelization | Medium | Small | Needs max-prefix scan |
-| Async strand overlap | Low | ~0.1-0.3s | Diminishing returns |
+| Async strand overlap | N/A | Already done (2026-05-12) | 2-slot double-buffered strand pipeline; CPU workers of strand N overlap with GPU of strand N+1. chr22x5 median CPU-16 4.019s → GPU-16 2.924s (~27% faster, 5-run). chr22 is a tie (~1.0s both). |
 | FM-index GPU path | High | Alternative to FASTA scanning | FM-index is CPU-optimized |
 | CUDA init amortization | N/A | Already done | Engine created once before query loop |
 | Redundant Forward elimination | N/A | Already done | Prefilter saves xf for Backward-only |
@@ -115,3 +115,59 @@ CPU workers are still the largest GPU timing bucket. The bottleneck is `p7_domai
 | Parallel-thread domain kernels | N/A | Already done | 4/6 kernels use T threads with prefix scan |
 | Domain rescore nj fix | N/A | Already done | GPU now uses nj=0 (unihit) matching CPU |
 | Overlap-nucdb GPU-resident path | N/A | Already done | Zero per-chunk H2D for SSV |
+
+## Remaining Async Opportunities (post strand-level pipelining)
+
+With strand-level overlap (2-slot double buffer) in place, the remaining
+per-strand GPU pipeline is still fully serial on the default stream with
+synchronous `cudaMemcpy` / `cudaEventSynchronize` at every stage boundary.
+Future async passes, in rough order of expected wall-time return vs
+implementation cost:
+
+1. **Intra-stage async H2D/D2H.** Convert all `cudaMemcpy` in SSV,
+   F1-resident, Viterbi FromF1, and FB-parser stages to
+   `cudaMemcpyAsync` on a per-engine compute stream. Replace host
+   `cudaEventSynchronize` barriers with `cudaStreamWaitEvent` between
+   stages. Estimated saving: tens of ms of host launch overhead per
+   strand on overlap `.nucdb`; larger on FASTA targets (not supported
+   here). Unlocks overlapping host prefix-sum work with prior stage D2H.
+
+2. **Per-slot compute stream.** Today one engine-global default stream
+   serializes everything. A per-slot stream lets slot N+1's GPU stages
+   begin while slot N's D2H is still draining; combined with (1),
+   enables `t_gpu_fb_d2h` ↔ `t_ssv_launch` overlap at slot boundaries.
+   Requires either duplicating subsets of device scratch per slot or a
+   disciplined single-stream ordering with cross-stream events.
+   Currently the single `P7_CUDA_ENGINE` serializes both slots — this
+   is the cleanest place to add true GPU-side pipelining.
+
+3. **On-GPU prefix sum for SSV / Viterbi counts.** The 2026-05 commits
+   moved `<<<1,1>>>` prefix sums to the host to kill kernel launch
+   overhead, but now the SSV / VLT stages round-trip
+   `d_*_win_count → host → h_*_win_offsets → d_*_win_offsets` via
+   synchronous `cudaMemcpy`. A cub block scan on a single warp would
+   eliminate the round-trip; would stack with (1)+(2) to keep the
+   stage fully on device.
+
+4. **Keep `xf`/`xb` on device during CPU domain definition.** The
+   parser currently D2Hs compact xf/xb matrices for all FB survivors
+   (~32KB to MB per strand) because the CPU worker's posterior-decoding
+   path needs them. Eliminating this transfer requires moving null2 +
+   domain envelope refinement onto GPU, which overlaps with the P1
+   item above.
+
+5. **Multi-GPU strand dispatch.** With 2-slot double buffering in place,
+   a per-GPU engine + round-robin strand dispatch is a natural next
+   step for HPC hosts.
+
+6. **Dead-code cleanup.** `nhmmer_gpu_forward_prefilter`,
+   `nhmmer_gpu_run_fb_parser_batch`, `nhmmer_gpu_batch_filter`
+   (host-packed), and the `nhmmer_gpu_window_batch_*` helpers are
+   no longer called after the Phase 1 path pruning. Deleting them
+   simplifies downstream async work and trims build time.
+
+7. **Thread-budget tuning.** Each slot currently gets `info->ncpus`
+   workers, so in async steady-state we peak at `2 * ncpus` worker
+   threads for brief windows at slot transitions. Evaluate
+   `ncpus_per_slot = (ncpus + 1) / 2` and expose a
+   `--gpu-async-workers-per-slot` flag if profiling shows contention.

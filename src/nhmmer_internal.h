@@ -147,11 +147,10 @@ typedef struct {
   double            t_worker_bck;     /* CPU Backward parser inside CPU workers */
   double            t_worker_domain;  /* domain definition workflow inside CPU workers */
   double            t_worker_output;  /* hit object construction/threshold prep */
+  /* Async strand pipeline (2-slot double buffer) */
+  double            t_worker_wait;    /* main thread blocked on pthread_join in slot_retire */
+  double            t_overlap_saved;  /* worker wall that ran while GPU was busy on next strand */
 } NHMMER_GPU_INFO;
-
-int nhmmer_gpu_serial_loop(NHMMER_GPU_INFO *info, ESL_SQFILE *dbfp,
-                           int strands, NHMMER_GPU_IDLEN_CB idlen_cb, void *idlen_data,
-                           int *ret_nseqs, int64_t *ret_nres);
 
 int nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
                           int strands, NHMMER_GPU_IDLEN_CB idlen_cb, void *idlen_data,

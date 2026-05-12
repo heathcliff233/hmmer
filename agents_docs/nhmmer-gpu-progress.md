@@ -1,6 +1,6 @@
 # nhmmer GPU Support - Progress
 
-Last updated: 2026-05-11
+Last updated: 2026-05-12
 
 This file records the current accepted `nhmmer --gpu` state. Older per-change
 benchmark logs were intentionally removed; use git history for that level of
@@ -20,16 +20,31 @@ Default `nhmmer --gpu` is a nucleotide long-target pipeline:
 8. Threaded CPU domain definition, null2, hit storage, thresholding, and output.
 
 The accepted path no longer has a separate single-score GPU Viterbi prefilter.
-Scanning Viterbi is the CPU-equivalent Viterbi boundary. `--gpu-fwd-prefilter`
-is retained as a deprecated no-op compatibility spelling; the GPU
-Forward/Backward parser handoff is default-on. Use hidden
-`--gpu-no-fwd-prefilter` only for diagnostics.
+Scanning Viterbi is the CPU-equivalent Viterbi boundary. GPU Forward/Backward
+parser handoff is default-on and unconditional; the previous `--gpu-fwd-prefilter`
+/ `--gpu-no-fwd-prefilter` diagnostic flags were removed along with all
+non-default branches in the 2026-05-12 async-pass cleanup.
 
 All serial `<<<1,1>>>` kernels (prefix sums, extend/merge, F1 compaction) have
 been replaced with host-side code. The pattern is: D2H per-chunk/window counts
 → host prefix sum → H2D offsets → device compact kernel → D2H results → host
 extend/merge. This eliminates kernel launch overhead and device synchronization
 points between main compute kernels.
+
+## Async 2-slot Strand Pipeline (landed 2026-05-12)
+
+The outer `.nucdb` loop is a 2-slot double buffer: the main thread drives
+strand N+1's GPU pipeline while strand N's CPU domain workers run in background
+pthreads. A single `P7_CUDA_ENGINE` still serializes all GPU stages (only one
+slot on the device at a time), but CPU worker time — previously dead time on
+the GPU — is now hidden behind the next strand's GPU kernels. On
+chr22x5/query_medium the breakdown reports `CPU workers 1.762s`,
+`main-thread wait 0.144s`, `overlap saved 1.618s`. New timing fields:
+`info->t_worker_wait` (wall spent in `pthread_join`) and
+`info->t_overlap_saved`.
+
+See `src/cuda/nhmmer_gpu_slot.{c,h}` for slot lifecycle, and
+`src/cuda/p7_cuda_nhmmer_search.c` for the 2-slot ring driver.
 
 ## Fast `.nucdb` Path
 
@@ -67,8 +82,9 @@ reconstruction.
 | `src/cuda/p7_cuda_nhmmer_filters.c` | Scratch arenas, batch SSV/bias/F1 filter, nucdb resident mapping |
 | `src/cuda/p7_cuda_nhmmer_viterbi.c` | Scanning Viterbi longtarget orchestration |
 | `src/cuda/p7_cuda_nhmmer_fwd.c` | GPU Forward prefilter + Forward/Backward parser dispatch |
-| `src/cuda/p7_cuda_nhmmer_strand.c` | Per-strand orchestration (FASTA and `.nucdb` paths) |
-| `src/cuda/p7_cuda_nhmmer_search.c` | Public outer loops (`serial_loop`, `nucdb_loop`, `nucdb_upload`) |
+| `src/cuda/p7_cuda_nhmmer_strand.c` | Per-strand GPU phase (`nhmmer_gpu_run_strand_gpu_phase`), slot-owned outputs |
+| `src/cuda/p7_cuda_nhmmer_search.c` | Outer `.nucdb` loop, 2-slot ring driver (`submit_strand`, `nhmmer_gpu_nucdb_loop`) |
+| `src/cuda/nhmmer_gpu_slot.c`, `nhmmer_cuda_internal.h` | Per-slot state, init/retire/launch-workers, pthread pool |
 | `src/cuda/p7_cuda_ssv_longtarget.cu` | SSV long-target kernels, host prefix sum + extend/merge |
 | `src/cuda/p7_cuda_viterbi_longtarget.cu` | Scanning Viterbi kernels, host prefix sum + extend/merge/split |
 | `src/cuda/p7_cuda_ssv.cu` | Fused SSV/null/bias/F1 gate kernel, host F1 compaction |
@@ -79,55 +95,44 @@ reconstruction.
 
 ## CLI Reference
 
-```sh
-# Default GPU nhmmer
-src/nhmmer --gpu --cpu 16 --noali query.hmm target.fa
+`nhmmer --gpu` requires an overlap `.nucdb` target; FASTA and no-overlap
+`.nucdb` are rejected with a diagnostic (no CPU fallback inside the GPU
+path). `hmmnucdb` defaults to `--overlap 2001`.
 
-# Fast resident .nucdb path
+```sh
 src/hmmnucdb target.fa target.nucdb
 src/nhmmer --gpu --cpu 16 --noali query.hmm target.nucdb.nucdb
-
-# No-overlap .nucdb diagnostic path
-src/hmmnucdb --overlap 0 target.fa target-o0.nucdb
-src/nhmmer --gpu --cpu 16 --noali query.hmm target-o0.nucdb.nucdb
 ```
 
-Hidden diagnostics:
+Hidden diagnostics (only one remains after the 2026-05-12 cleanup):
 
 | Option | Meaning |
 |--------|---------|
-| `--gpu-batch` | GPU SSV/bias batch gate; default-on with `--gpu` |
-| `--gpu-vit-longtarget` | GPU scanning Viterbi; default-on with `--gpu` |
-| `--gpu-no-fwd-prefilter` | Disable default GPU Forward/Backward parser reuse |
-| `--gpu-cpu-postmsv` | Bypass GPU scanning Viterbi/Fwd; CPU postSSV diagnostic |
-| `--gpu-compare` | Compare GPU and CPU scores/stages |
-| `--gpu-chunk-size N` | Runtime chunk size, default `65536` |
 | `--gpu-device N` | CUDA device selection |
 
 ## Current Benchmarks
 
-System: RTX 4090, 16 CPU threads unless stated otherwise.
+System: RTX 4090, 16 CPU threads. Numbers from `test-speed/x-nhmmer-gpu-bench`
+(process-lifetime wall via `date +%s%N`), 5 runs each, 2026-05-12.
 
-Standard chr22 combined benchmark:
+Standard chr22 combined benchmark (MADE1 + query_short + query_medium):
 
-```sh
-NHMMER_GPU_BENCH_CPU=16 test-speed/x-nhmmer-gpu-bench .
-```
-
-| Path | Time | Hits |
-|------|:---:|:---:|
-| CPU-1 | 9.962s | 1476 |
-| CPU-16 | 1.111s | 1476 |
-| GPU-16 FASTA | 1.955s | 1476 |
-| GPU-16 no-overlap `.nucdb` | 1.371s | 1476 |
-| GPU-16 overlap `.nucdb` | 1.196s | 1476 |
+| Path | Hits | min | median |
+|------|:---:|:---:|:---:|
+| CPU-1 | 1476 | 8.487s | — |
+| CPU-16 | 1476 | 0.963s | 1.077s |
+| GPU-16 overlap `.nucdb` | 1476 | 0.968s | 1.023s |
 
 Larger chr22x5 benchmark:
 
-| Path | Time | Hits |
-|------|:---:|:---:|
-| CPU-16 FASTA | 4.893s | 6294 |
-| GPU-16 overlap `.nucdb` | ~3.75s process / ~3.37s GPU loop (median of 3 runs) | 6294 |
+| Path | Hits | min | median |
+|------|:---:|:---:|:---:|
+| CPU-16 | 6294 | 3.882s | 4.019s |
+| GPU-16 overlap `.nucdb` | 6294 | 2.715s | 2.924s |
+
+On chr22 the GPU is effectively a tie (5% median edge is within jitter). On
+chr22x5, GPU-16 is ~27% faster than CPU-16 median — the async overlap win
+shows up clearly once there are enough strands to keep both slots busy.
 
 The chr22x5 target is local benchmark data:
 
@@ -196,18 +201,21 @@ Parity result: `4 passed, 0 failed`.
 
 ## Current Performance Conclusions
 
-- GPU-16 is hit-count clean against CPU-16 on the smoke benchmark.
-- On standard chr22, GPU-16 fast `.nucdb` is close to CPU-16 but not a stable
-  large win.
-- On chr22x5, GPU-16 fast `.nucdb` (~3.75s) is faster than CPU-16 (4.89s),
-  roughly 23% speedup.
-- CPU domain workflow remains a large bucket because domain definition, null2,
-  hit storage, thresholding, and output remain CPU-side.
+- GPU-16 is hit-count clean against CPU-16 on the smoke benchmark (1476 on
+  chr22, 6294 on chr22x5).
+- On standard chr22, GPU-16 and CPU-16 are a tie (~1.0s median both; GPU
+  median 5% better, within run-to-run jitter). The async overlap has too few
+  strands to fill both slots at this dataset size.
+- On chr22x5, GPU-16 median 2.924s vs CPU-16 median 4.019s (~27% faster). The
+  async pipeline hides almost all CPU worker time behind the next strand's
+  GPU kernels (`overlap saved 1.618s` on query_medium).
+- CPU domain workflow remains the largest bucket inside worker threads, but
+  it now runs concurrently with GPU kernels rather than gating them.
 - SSV and scanning Viterbi have enough grid coverage; low theoretical occupancy
   alone is not the root cause. SSV is one warp per block, and scanning Viterbi
   uses four 8-lane nucleotide DP groups per physical warp.
 - All serial `<<<1,1>>>` kernels have been eliminated; host-side prefix
   sum/extend/merge reduced SSV stage time by ~24%.
-- Further work should focus on GPU kernel throughput, reducing parser matrix D2H
-  or moving more domain workflow to GPU, and overlapping CPU domain work with
-  later GPU strand/query work where correctness allows.
+- Further work should focus on intra-stage async (`cudaMemcpyAsync`, per-slot
+  streams), on-GPU prefix sums, and keeping `xf`/`xb` device-resident into
+  domain definition — see `nhmmer-gpu-todo.md`.

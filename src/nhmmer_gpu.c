@@ -17,17 +17,6 @@
 #ifndef HMMER_CUDA
 
 int
-nhmmer_gpu_serial_loop(NHMMER_GPU_INFO *info, ESL_SQFILE *dbfp,
-                       int strands, NHMMER_GPU_IDLEN_CB idlen_cb, void *idlen_data,
-                       int *ret_nseqs, int64_t *ret_nres)
-{
-  ESL_UNUSED(info); ESL_UNUSED(dbfp); ESL_UNUSED(strands);
-  ESL_UNUSED(idlen_cb); ESL_UNUSED(idlen_data);
-  ESL_UNUSED(ret_nseqs); ESL_UNUSED(ret_nres);
-  return eslENORESULT;
-}
-
-int
 nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
                       int strands, NHMMER_GPU_IDLEN_CB idlen_cb, void *idlen_data,
                       int *ret_nseqs, int64_t *ret_nres)
