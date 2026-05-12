@@ -1,4 +1,5 @@
 #include "p7_cuda_internal.h"
+#include "p7_cuda_nucdb_pack.cuh"
 
 __device__ static inline uint8_t
 u8_sub_sat(uint8_t a, uint8_t b)
@@ -629,7 +630,8 @@ cuda_nhmmer_gather_windows_kernel(const uint8_t *src_dsq,
                                   const int *src1_offsets, const int *src1_lengths,
                                   const int *src2_offsets, const int *dst_offsets,
                                   const int *lengths, int nseq,
-                                  uint8_t *dst_dsq)
+                                  uint8_t *dst_dsq,
+                                  int packed_2bit = 0, int rc_flag = 0)
 {
   int seq = blockIdx.x;
   if (seq >= nseq) return;
@@ -643,7 +645,15 @@ cuda_nhmmer_gather_windows_kernel(const uint8_t *src_dsq,
   if (threadIdx.x == 0) dst_dsq[dst0] = eslDSQ_SENTINEL;
   for (int k = threadIdx.x; k < L; k += blockDim.x) {
     int sp = (k < len1) ? (src1 + k) : (src2 + (k - len1));
-    dst_dsq[dst0 + 1 + k] = src_dsq[sp];
+    uint8_t val;
+    if (packed_2bit) {
+      int pos = rc_flag ? (L - 1 - k) : k;
+      int actual_sp = (pos < len1) ? (src1 + pos) : (src2 + (pos - len1));
+      val = (uint8_t)p7_nucdb_fetch1(src_dsq, actual_sp, rc_flag);
+    } else {
+      val = src_dsq[sp];
+    }
+    dst_dsq[dst0 + 1 + k] = val;
   }
 }
 
@@ -1773,6 +1783,7 @@ p7_cuda_NhmmerF1GateResidentGather(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROF
                                    int *survivor_idx, int *ret_nsurv,
                                    float *survivor_filtersc, int *survivor_statuses,
                                    int warps_per_block,
+                                   int rc_flag,
                                    char *errbuf, int errbuf_size)
 {
   int status = eslOK;
@@ -1865,7 +1876,8 @@ p7_cuda_NhmmerF1GateResidentGather(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROF
                                                    engine->d_gather_dst_offsets,
                                                    engine->d_gather_lengths,
                                                    nseq,
-                                                   engine->d_dsq);
+                                                   engine->d_dsq,
+                                                   1, rc_flag);
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_nhmmer_gather_windows_kernel launch")) != eslOK) return status;
   cudaEventRecord(engine->evt_k1);
   cudaEventSynchronize(engine->evt_k1);
@@ -1883,7 +1895,7 @@ extern "C" int
 p7_cuda_PrepareResidentWindowBatch(P7_CUDA_ENGINE *engine, const uint8_t *d_dsq_base,
                                    const int *h_src1_offsets, const int *h_src1_lengths,
                                    const int *h_src2_offsets, const int *h_lengths,
-                                   int nseq, const void *batch_owner,
+                                   int nseq, const void *batch_owner, int rc_flag,
                                    char *errbuf, int errbuf_size)
 {
   int status = eslOK;
@@ -1988,7 +2000,8 @@ p7_cuda_PrepareResidentWindowBatch(P7_CUDA_ENGINE *engine, const uint8_t *d_dsq_
                                                    engine->d_gather_dst_offsets,
                                                    engine->d_gather_lengths,
                                                    nseq,
-                                                   engine->d_dsq);
+                                                   engine->d_dsq,
+                                                   1, rc_flag);
   if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_nhmmer_gather_windows_kernel resident batch launch")) != eslOK) return status;
   cudaEventRecord(engine->evt_k1);
   cudaEventSynchronize(engine->evt_k1);

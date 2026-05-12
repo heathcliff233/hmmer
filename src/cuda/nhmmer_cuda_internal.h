@@ -160,6 +160,7 @@ int    nhmmer_gpu_batch_filter_resident(NHMMER_GPU_INFO *info, const uint8_t *d_
 int    nhmmer_gpu_batch_filter_resident_gather(NHMMER_GPU_INFO *info, const uint8_t *d_dsq_base,
                                                const int *h_offsets, const int *h_src1_lengths,
                                                const int *h_src2_offsets, const int *h_lengths,
+                                               int rc_flag,
                                                P7_HMM_WINDOWLIST *wl, int *ret_nsurv,
                                                char *errbuf, int errbuf_size);
 int    nhmmer_gpu_try_map_nucdb_windows(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,

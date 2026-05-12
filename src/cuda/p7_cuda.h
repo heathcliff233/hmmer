@@ -232,12 +232,12 @@ extern int  p7_cuda_NhmmerF1GateResidentGather(P7_CUDA_ENGINE *engine, const P7_
                                                 double ev_mu, double ev_lambda, double F1,
                                                 int *survivor_idx, int *ret_nsurv,
                                                 float *survivor_filtersc, int *survivor_statuses,
-                                                int warps_per_block,
+                                                int warps_per_block, int rc_flag,
                                                 char *errbuf, int errbuf_size);
 extern int  p7_cuda_PrepareResidentWindowBatch(P7_CUDA_ENGINE *engine, const uint8_t *d_dsq_base,
                                                 const int *h_src1_offsets, const int *h_src1_lengths,
                                                 const int *h_src2_offsets, const int *h_lengths,
-                                                int nseq, const void *batch_owner,
+                                                int nseq, const void *batch_owner, int rc_flag,
                                                 char *errbuf, int errbuf_size);
 
 extern int  p7_cuda_engine_UploadDatabase(P7_CUDA_ENGINE *engine, const uint8_t *seq_data, int64_t dsq_size,
@@ -343,7 +343,7 @@ extern int  p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_
                                           const int *h_offsets, const int *h_lengths,
                                           const uint8_t *ssv_scores_host, int Kp,
                                           uint8_t sc_thresh, float scale_b,
-                                          int step,
+                                          int step, int rc_flag,
                                           P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
                                           P7_CUDA_SSV_LT_STATS *stats,
                                           char *errbuf, int errbuf_size);
@@ -354,7 +354,7 @@ extern int  p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P
                                                  const int *h_offsets, const int *h_lengths,
                                                  const uint8_t *ssv_scores_host, int Kp,
                                                  uint8_t sc_thresh, float scale_b,
-                                                 int max_length, int step, int target_len,
+                                                 int max_length, int step, int target_len, int rc_flag,
                                                  P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
                                                  P7_CUDA_SSV_LT_STATS *stats,
                                                  char *errbuf, int errbuf_size);

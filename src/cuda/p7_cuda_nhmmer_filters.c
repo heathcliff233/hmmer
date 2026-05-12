@@ -332,6 +332,7 @@ int
 nhmmer_gpu_batch_filter_resident_gather(NHMMER_GPU_INFO *info, const uint8_t *d_dsq_base,
                                         const int *h_offsets, const int *h_src1_lengths,
                                         const int *h_src2_offsets, const int *h_lengths,
+                                        int rc_flag,
                                         P7_HMM_WINDOWLIST *wl, int *ret_nsurv,
                                         char *errbuf, int errbuf_size)
 {
@@ -357,7 +358,7 @@ nhmmer_gpu_batch_filter_resident_gather(NHMMER_GPU_INFO *info, const uint8_t *d_
                                               om->evparam[p7_MMU], om->evparam[p7_MLAMBDA], pli->F1,
                                               survivor_idx, &nsurv,
                                               survivor_bias, NULL,
-                                              4, errbuf, errbuf_size);
+                                              4, rc_flag, errbuf, errbuf_size);
   if (status != eslOK) goto ERROR;
 
   {
@@ -398,7 +399,7 @@ nhmmer_gpu_try_map_nucdb_windows(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,
 {
   int status;
   int64_t step;
-  int needs_gather = FALSE;
+  int needs_gather = TRUE; /* v2 packed: always gather to unpack 2-bit → byte */
 
   if (!info || !ndb || !wl || !ret_offsets || !ret_lengths || !ret_src1_lengths ||
       !ret_src2_offsets || !ret_needs_gather) return eslEINVAL;
@@ -418,13 +419,27 @@ nhmmer_gpu_try_map_nucdb_windows(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,
 
   for (int i = 0; i < wl->count; i++) {
     const P7_HMM_WINDOW *w = &wl->windows[i];
-    int64_t start0 = (int64_t)w->n - 1;
+    int64_t start0;
     int64_t end0;
     int64_t guess;
     int found = FALSE;
 
-    if (start0 < 0 || w->length <= 0) return eslFAIL;
+    if (w->length <= 0) return eslFAIL;
+
+    /* For RC strand, convert scan-space window to forward positions.
+     * RC scan position p (1-based) → forward 0-based position: L - p.
+     * Window covers RC positions w->n .. w->n + w->length - 1.
+     * Forward 0-based range: [L - (w->n + length - 1), L - w->n].
+     * start0 = L - w->n - length + 1. */
+    if (complementarity == p7_COMPLEMENT) {
+      int64_t L = (int64_t)w->target_len;
+      start0 = L - (int64_t)w->n - (int64_t)w->length + 1;
+      if (start0 < 0) start0 = 0;
+    } else {
+      start0 = (int64_t)w->n - 1;
+    }
     end0 = start0 + (int64_t)w->length;
+    if (start0 < 0) return eslFAIL;
     guess = start0 / step;
     if (guess < 0) guess = 0;
     if (guess >= chunk_count) guess = chunk_count - 1;
@@ -442,9 +457,9 @@ nhmmer_gpu_try_map_nucdb_windows(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,
 
         if (start0 < ci_start || end0 > ci_end) continue;
         rel = start0 - ci_start;
-        if (ci->data_offset + 1 + rel > INT32_MAX || w->length > INT32_MAX)
+        if ((int64_t)ci->data_offset * 4 + rel > INT32_MAX || w->length > INT32_MAX)
           return eslFAIL;
-        info->h_nucdb_window_offsets[i] = (int)(ci->data_offset + 1 + rel);
+        info->h_nucdb_window_offsets[i] = (int)((int64_t)ci->data_offset * 4 + rel);
         info->h_nucdb_window_lengths[i] = (int)w->length;
         info->h_nucdb_window_src1_lengths[i] = (int)w->length;
         info->h_nucdb_window_src2_offsets[i] = 0;
@@ -460,9 +475,9 @@ nhmmer_gpu_try_map_nucdb_windows(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,
 
       if (start0 < ci_start || end0 > ci_end) continue;
       rel = start0 - ci_start;
-      if (ci->data_offset + 1 + rel > INT32_MAX || w->length > INT32_MAX)
+      if ((int64_t)ci->data_offset * 4 + rel > INT32_MAX || w->length > INT32_MAX)
         return eslFAIL;
-      info->h_nucdb_window_offsets[i] = (int)(ci->data_offset + 1 + rel);
+      info->h_nucdb_window_offsets[i] = (int)((int64_t)ci->data_offset * 4 + rel);
       info->h_nucdb_window_lengths[i] = (int)w->length;
       info->h_nucdb_window_src1_lengths[i] = (int)w->length;
       info->h_nucdb_window_src2_offsets[i] = 0;
@@ -485,14 +500,14 @@ nhmmer_gpu_try_map_nucdb_windows(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,
         len1 = ci_end - start0;
         rel2 = ci_end - cj_start;
         if (len1 <= 0 || len1 >= (int64_t)w->length || rel2 < 0) continue;
-        if (ci->data_offset + 1 + rel1 > INT32_MAX ||
-            cj->data_offset + 1 + rel2 > INT32_MAX ||
+        if ((int64_t)ci->data_offset * 4 + rel1 > INT32_MAX ||
+            (int64_t)cj->data_offset * 4 + rel2 > INT32_MAX ||
             w->length > INT32_MAX || len1 > INT32_MAX)
           return eslFAIL;
-        info->h_nucdb_window_offsets[i] = (int)(ci->data_offset + 1 + rel1);
+        info->h_nucdb_window_offsets[i] = (int)((int64_t)ci->data_offset * 4 + rel1);
         info->h_nucdb_window_lengths[i] = (int)w->length;
         info->h_nucdb_window_src1_lengths[i] = (int)len1;
-        info->h_nucdb_window_src2_offsets[i] = (int)(cj->data_offset + 1 + rel2);
+        info->h_nucdb_window_src2_offsets[i] = (int)((int64_t)cj->data_offset * 4 + rel2);
         found = TRUE;
         needs_gather = TRUE;
       }
@@ -532,7 +547,7 @@ nhmmer_gpu_prepare_parser_resident_batch(NHMMER_GPU_INFO *info, const P7_NUCDB *
   int *lengths = NULL;
   int *src1_lengths = NULL;
   int *src2_offsets = NULL;
-  int needs_gather = FALSE;
+  int needs_gather = TRUE; /* v2 packed: always gather */
   int status;
 
   if (!info || !ndb || !d_nucdb || !windows || nwindows <= 0) return eslEINVAL;
@@ -555,6 +570,7 @@ nhmmer_gpu_prepare_parser_resident_batch(NHMMER_GPU_INFO *info, const P7_NUCDB *
                                             offsets, src1_lengths,
                                             src2_offsets, lengths, nwindows,
                                             batch_owner,
+                                            (complementarity == p7_COMPLEMENT) ? 1 : 0,
                                             errbuf, errbuf_size);
 }
 

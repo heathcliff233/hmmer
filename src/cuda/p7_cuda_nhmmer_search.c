@@ -162,17 +162,6 @@ nhmmer_gpu_nucdb_loop(NHMMER_GPU_INFO *info, P7_NUCDB *ndb,
     return eslEINCOMPAT;
   }
 
-  /* PHASE 1 GATE: GPU kernels have not yet been ported to the v2
-   * 2-bit packed .nucdb layout. The host-side driver (this file) and
-   * CPU slice-fill have been updated, but the device kernels still
-   * assume byte-per-residue bytes. Running them would silently produce
-   * wrong scores. Fail cleanly until Phase 2 lands. */
-  fprintf(stderr,
-          "GPU nhmmer: .nucdb v2 (2-bit packed) is not yet supported on the "
-          "device side. Run with the CPU path for now; the GPU kernel port "
-          "is tracked as Phase 2 of the v2 .nucdb migration.\n");
-  return eslEINCOMPAT;
-
   /* Initialize the 2-slot ring. */
   NHMMER_GPU_SLOT slots[2];
   memset(slots, 0, sizeof(slots));

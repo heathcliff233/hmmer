@@ -1,4 +1,5 @@
 #include "p7_cuda_internal.h"
+#include "p7_cuda_nucdb_pack.cuh"
 
 /* GPU SSV longtarget kernel for nhmmer.
  *
@@ -52,7 +53,8 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
                            uint8_t tbm_b, uint8_t tec_b, uint8_t tjb_b,
                            uint8_t base_b, uint8_t bias_b,
                            uint8_t sc_thresh, float scale_b,
-                           P7_CUDA_LT_WINDOW *d_windows, int *d_win_count, int max_windows)
+                           P7_CUDA_LT_WINDOW *d_windows, int *d_win_count, int max_windows,
+                           int packed_2bit = 0, int rc_flag = 0)
 {
   int chunk = blockIdx.x;
   int tid   = threadIdx.x;
@@ -90,7 +92,13 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
   for (int i = 1; i <= L; i++) {
     if (i <= s_skip_to) continue;
 
-    uint8_t x = sdsq[i];
+    uint8_t x;
+    if (packed_2bit) {
+      int pos = rc_flag ? (L - i) : (i - 1);
+      x = (uint8_t)p7_nucdb_fetch1(sdsq, pos, rc_flag);
+    } else {
+      x = sdsq[i];
+    }
 
     uint8_t from_left = __shfl_up_sync(0xffffffff, last_prev, 1);
     if (tid == 0) from_left = 0;
@@ -146,7 +154,10 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
          * Threshold: base_b - tjb_b - tbm_b (same as CPU) */
         int walk_threshold = (int)base_b - (int)tjb_b - (int)tbm_b;
         while (rem_sc > walk_threshold && target_start > 0) {
-          rem_sc -= (int)bias_b - (int)ssv_scores[start * Kp + (int)sdsq[target_start]];
+          int rx;
+          if (packed_2bit) { int rp = rc_flag ? (L - target_start) : (target_start - 1); rx = p7_nucdb_fetch1(sdsq, rp, rc_flag); }
+          else { rx = (int)sdsq[target_start]; }
+          rem_sc -= (int)bias_b - (int)ssv_scores[start * Kp + rx];
           --start;
           --target_start;
         }
@@ -160,7 +171,10 @@ cuda_ssv_longtarget_kernel(const uint8_t *dsq, const int *offsets, const int *le
         int max_sc = sc;
         int pos_since_max = 0;
         while (k < M && n <= L) {
-          sc += (int)bias_b - (int)ssv_scores[k * Kp + (int)sdsq[n]];
+          int fx;
+          if (packed_2bit) { int fp = rc_flag ? (L - n) : (n - 1); fx = p7_nucdb_fetch1(sdsq, fp, rc_flag); }
+          else { fx = (int)sdsq[n]; }
+          sc += (int)bias_b - (int)ssv_scores[k * Kp + fx];
           if (sc >= max_sc) {
             max_sc = sc;
             max_end = n;
@@ -932,7 +946,7 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
                               const int *h_offsets, const int *h_lengths,
                               const uint8_t *ssv_scores_host, int Kp,
                               uint8_t sc_thresh, float scale_b,
-                              int step,
+                              int step, int rc_flag,
                               P7_CUDA_LT_WINDOW **ret_windows, int *ret_nwindows,
                               P7_CUDA_SSV_LT_STATS *stats,
                               char *errbuf, int errbuf_size)
@@ -1004,7 +1018,8 @@ p7_cuda_SSVLongtargetResident(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,
-      engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
+      engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc,
+      1, rc_flag);
     cudaEventRecord(engine->evt_k1);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
   }
@@ -1035,7 +1050,7 @@ p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPR
                                      const int *h_offsets, const int *h_lengths,
                                      const uint8_t *ssv_scores_host, int Kp,
                                      uint8_t sc_thresh, float scale_b,
-                                     int max_length, int step, int target_len,
+                                     int max_length, int step, int target_len, int rc_flag,
                                      P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
                                      P7_CUDA_SSV_LT_STATS *stats,
                                      char *errbuf, int errbuf_size)
@@ -1103,7 +1118,8 @@ p7_cuda_SSVLongtargetResidentWindows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPR
       cuom->tbm_b, cuom->tec_b, cuom->tjb_b,
       cuom->base_b, cuom->bias_b,
       sc_thresh, scale_b,
-      engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc);
+      engine->d_lt_windows, engine->d_lt_win_count, engine->lt_win_alloc,
+      1, rc_flag);
     cudaEventRecord(engine->evt_k1);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_ssv_longtarget_kernel launch")) != eslOK) goto ERROR;
   }

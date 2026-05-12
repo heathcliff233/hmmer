@@ -107,6 +107,7 @@ nhmmer_gpu_run_strand_gpu_phase(NHMMER_GPU_INFO *info, NHMMER_GPU_SLOT *slot,
                                                 info->scoredata->ssv_scores, om->abc->Kp,
                                                 sc_thresh, om->scale_b,
                                                 om->max_length, ndb_step, sq->n,
+                                                (complementarity == p7_COMPLEMENT) ? 1 : 0,
                                                 &gpu_merged_windows, &gpu_nwindows,
                                                 &ssv_stats,
                                                 errbuf, errbuf_size);
@@ -159,6 +160,7 @@ nhmmer_gpu_run_strand_gpu_phase(NHMMER_GPU_INFO *info, NHMMER_GPU_SLOT *slot,
                                                        resident_f1_src1_lengths,
                                                        resident_f1_src2_offsets,
                                                        resident_f1_lengths,
+                                                       (complementarity == p7_COMPLEMENT) ? 1 : 0,
                                                        &msv_windowlist, &nsurv,
                                                        errbuf, errbuf_size);
     } else {
