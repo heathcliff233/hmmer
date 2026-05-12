@@ -432,8 +432,8 @@ nhmmer_gpu_try_map_nucdb_windows(NHMMER_GPU_INFO *info, const P7_NUCDB *ndb,
      * Forward 0-based range: [L - (w->n + length - 1), L - w->n].
      * start0 = L - w->n - length + 1. */
     if (complementarity == p7_COMPLEMENT) {
-      int64_t L = (int64_t)w->target_len;
-      start0 = L - (int64_t)w->n - (int64_t)w->length + 1;
+      int64_t tL = (int64_t)w->target_len;
+      start0 = tL - (int64_t)w->n - (int64_t)w->length + 1;
       if (start0 < 0) start0 = 0;
     } else {
       start0 = (int64_t)w->n - 1;
