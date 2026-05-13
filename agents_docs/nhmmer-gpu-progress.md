@@ -1,6 +1,6 @@
 # nhmmer GPU Support - Progress
 
-Last updated: 2026-05-13 (nuc-specific CPU F/B + P7_NUCSEQVIEW packed-data path)
+Last updated: 2026-05-13 (register-based scanning Viterbi kernel)
 
 This file records the current accepted `nhmmer --gpu` state. Older per-change
 benchmark logs were intentionally removed; use git history for that level of
@@ -107,6 +107,32 @@ previous single-warp-per-block layout.  Key parameters:
 - Measured occupancy: 83% on large datasets (40 active warps/SM of 48 on RTX
   4090 sm_89).
 
+## Register-Based Scanning Viterbi Kernel (landed 2026-05-13)
+
+The scanning Viterbi kernel now uses a register-based DP path for models with
+M≥256 (template `STRIDE=24`, max M=768). This eliminates shared-memory bottleneck
+for the DP state arrays:
+
+**Key design**:
+- M/D/I state arrays kept in `int16_t reg_M[STRIDE]` register arrays
+- `#pragma unroll` is essential — without it nvcc spills to local memory (DRAM)
+- Inter-lane communication via `__shfl_up_sync` for carry propagation
+- Shared memory reduced to `2*M` bytes (only for `s_q[]` / `s_z[]` lookup tables)
+- 4 warps/block, 184 regs/thread, 8 warps/SM (16.7% occupancy)
+
+**Performance** (chr22x20, query_medium M=501, GPU-16):
+- Scan kernel: **1.212s** (was 2.023s with shared-memory kernel) = **1.67× speedup**
+- GPU loop wall: 4.3s (was 5.1s) = 14.5% overall improvement
+
+**Limitations**:
+- M<256: falls back to shared-memory kernel (register kernel has edge-case bug
+  producing excess seed windows for very short models like M=80)
+- STRIDE=16 template (which would allow M≤512 at 33% occupancy) blocked by nvcc
+  speculative-read issue in `#pragma unroll`
+- Controlled via `HMMER_VLT_REG` env var (0=force shmem, 1=force reg)
+
+Files: `src/cuda/p7_cuda_viterbi_longtarget.cu` (kernel + dispatch logic).
+
 ## Nuc-Specific CPU Forward/Backward (landed 2026-05-13)
 
 CPU domain workers now use a specialized Forward/Backward path optimized for the
@@ -208,59 +234,71 @@ Hidden diagnostics (only one remains after the 2026-05-12 cleanup):
 
 ## Current Benchmarks
 
-System: RTX 4090, 16 CPU threads. Numbers from `test-speed/x-nhmmer-gpu-bench`
-(process-lifetime wall via `date +%s%N`), 5 runs each, 2026-05-12.
+System: RTX 4090, 16 CPU threads. Wall time via `date +%s%N`. 2026-05-13.
 
-Standard chr22 combined benchmark (MADE1 + query_short + query_medium), v1
-baseline:
+### chr22x20 (~1GB, 20 chromosomes)
 
-| Path | Hits | min | median |
-|------|:---:|:---:|:---:|
-| CPU-1 | 1476 | 8.487s | — |
-| CPU-16 | 1476 | 0.963s | 1.077s |
-| GPU-16 overlap `.nucdb` v1 | 1476 | 0.968s | 1.023s |
+Per-query (single query, wall-clock):
 
-chr22x5 benchmark, v1 vs v2 comparison:
+| Query | M | GPU-16 | CPU-16 | Speedup |
+|-------|---|--------|--------|---------|
+| MADE1 | 80 | 1.44s | 2.91s | 2.0× |
+| query_short | 151 | 1.67s | 2.81s | 1.7× |
+| query_medium | 501 | 5.14s | 8.95s | 1.7× |
 
-| Path | Hits | min | median |
-|------|:---:|:---:|:---:|
-| CPU-16 | 6294 | 3.602s | 3.668s |
-| GPU-16 v1 (65k chunks, 18-row) | 6294 | 2.715s | 2.924s |
-| GPU-16 v2 (16k chunks, 4-row, multi-warp) | ~1980* | 2.386s | 2.447s |
+Multi-query (12 queries = 3 models × 4 copies, 3 runs):
 
-\* ~1980 hits reflects float32 accumulation drift introduced in the v2 path;
-the Viterbi occupancy fix and hit-parity restoration are in progress (see
-`nhmmer-gpu-todo.md`).
+| Path | Wall time (median) | Speedup |
+|------|:------------------:|---------|
+| GPU-16 | **25.8s** | **2.3×** |
+| CPU-16 | 59.8s | baseline |
 
-GPU-16 v2 is ~33% faster than CPU-16 and ~16% faster than GPU-16 v1.
+### chr22x5 (~250MB, 5 chromosomes)
+
+| Query | M | GPU-16 | CPU-16 | Speedup |
+|-------|---|--------|--------|---------|
+| MADE1 | 80 | 0.79s | 1.04s | 1.3× |
+| query_short | 151 | 0.68s | 0.81s | 1.2× |
+| query_medium | 501 | 1.90s | 2.74s | 1.4× |
+
+### Standard chr22 combined (MADE1 + query_short + query_medium)
+
+| Path | Hits | Wall |
+|------|:---:|:---:|
+| CPU-16 | 1476 | ~1.1s |
+| GPU-16 | ~1458 | ~1.2s |
+
+On chr22 the GPU is essentially a tie with CPU-16 — too few strands to fill
+both async slots.
 
 The chr22x5 target is local benchmark data:
 
 - `benchmark-data/nucleotide-bench/work/chr22x5.fa`
 - `benchmark-data/nucleotide-bench/work/chr22x5-overlap.nucdb.nucdb`
 
-## Current 5x GPU Timing Breakdown (v2 path, chr22x20, query_medium M=501)
+## Current GPU Timing Breakdown (chr22x20, query_medium M=501)
 
 Single-run, GPU-16, `nhmmer --gpu --cpu 16`, chr22x20 (20× chr22), query_medium:
 
 | Bucket | Time |
 |--------|:---:|
-| GPU loop wall | 5.069s |
-| Process elapsed | 5.433s |
+| GPU loop wall | ~4.3s |
+| Process elapsed | ~5.1s |
 
 GPU stage breakdown:
 
 | Stage | Time | Notes |
 |-------|:---:|-------|
-| SSV longtarget | 1.326s | 83% occupancy, ~90% SM utilization |
-| batch filter | 0.679s | |
-| scanning Viterbi | 2.145s | **bottleneck**: 8.3% occupancy, 96% SM utilization |
-| FB parser | 0.377s | |
-| CPU workers | 5.097s | only 0.164s exposed wait; 4.932s hidden behind GPU |
+| SSV longtarget | ~1.3s | 83% occupancy, multi-warp template |
+| batch filter | ~0.7s | |
+| scanning Viterbi | **1.21s** | register kernel (was 2.02s with shmem kernel) |
+| FB parser | ~0.4s | |
+| CPU workers | ~4.5s | only 0.2s exposed wait; 4.3s hidden behind GPU |
 
-Scanning Viterbi occupancy is limited to 8.3% (4 warps/SM of 48) by shared
-memory: 24192 B/block for DP state, floor(102400/24192) = 4 blocks/SM. See
-`nhmmer-gpu-todo.md` for the planned occupancy optimization.
+The register-based Viterbi kernel (STRIDE=24, 4 warps/block, 184 regs/thread)
+eliminates the shared-memory bottleneck. The kernel uses `#pragma unroll` with
+register arrays for M/D/I state, achieving 1.67× speedup over the previous
+shared-memory kernel for M=501.
 
 ## Timing Semantics
 
@@ -295,21 +333,19 @@ Parity result: `4 passed, 0 failed`.
 
 ## Current Performance Conclusions
 
-- GPU-16 v2 is ~33% faster than CPU-16 on chr22x5 (median 2.447s vs 3.668s).
-  GPU-16 v1 was ~27% faster; v2 gains ~16% additional speedup from 4× smaller
-  chunks, 4-row emission tables, and multi-warp SSV.
-- On standard chr22, GPU-16 and CPU-16 remain a tie (~1.0s median both); too
-  few strands to fill both async slots regardless of v2 improvements.
-- The async 2-slot strand pipeline (2026-05-12) hides nearly all CPU worker
-  time behind the next strand's GPU kernels — on chr22x20/query_medium only
-  0.164s of 5.097s worker time is exposed wait.
-- **New bottleneck**: scanning Viterbi at 2.145s on chr22x20/query_medium.
-  Occupancy is 8.3% (4 warps/SM), limited by shared-memory pressure (24192 B/block
-  → floor(102400/24192) = 4 blocks/SM). This is now the P1 optimization target.
-- SSV longtarget runs at 83% occupancy (40 warps/SM) with the new multi-warp
-  template; no longer a primary bottleneck at this scale.
-- All serial `<<<1,1>>>` kernels have been eliminated; host-side prefix
-  sum/extend/merge reduced SSV stage time by ~24% vs the pre-async baseline.
-- Further work: Viterbi shared-memory reduction to raise occupancy, intra-stage
-  async (`cudaMemcpyAsync`, per-slot streams), on-GPU prefix sums — see
-  `nhmmer-gpu-todo.md`.
+- **GPU-16 is 2.3× faster than CPU-16** on chr22x20 with 12 queries (25.8s vs
+  59.8s). The speedup grows with dataset size due to async strand overlap.
+- Per-query on chr22x20: 1.7–2.0× depending on model size.
+- Per-query on chr22x5: 1.2–1.4× (still amortizing setup cost at this scale).
+- On standard chr22, GPU-16 and CPU-16 remain a tie (~1.1s); too few strands to
+  fill both async slots.
+- The register-based scanning Viterbi kernel (landed 2026-05-13) provides 1.67×
+  scan kernel speedup for M≥256, reducing the former P1 bottleneck from 2.02s to
+  1.21s on chr22x20/query_medium.
+- The async 2-slot strand pipeline hides nearly all CPU worker time behind the
+  next strand's GPU kernels — on chr22x20/query_medium: 4.5s workers with only
+  0.2s exposed wait.
+- SSV longtarget runs at 83% occupancy (40 warps/SM) with the multi-warp template.
+- All serial `<<<1,1>>>` kernels have been eliminated.
+- Further work: AVX2 F/B (P0), `fill_slice` elimination (P1), STRIDE=16 register
+  kernel for higher occupancy (P2) — see `nhmmer-gpu-todo.md`.

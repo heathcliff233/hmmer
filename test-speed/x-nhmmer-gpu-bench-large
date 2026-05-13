@@ -1,0 +1,92 @@
+#!/bin/bash
+# x-nhmmer-gpu-bench-large — benchmark GPU nhmmer on large datasets
+#
+# Usage: test-speed/x-nhmmer-gpu-bench-large [HMMER_SRC_DIR]
+#
+# Benchmarks GPU-16 vs CPU-16 on chr22x20 with 12 queries (3 models × 4 copies).
+# Reports wall-clock times and speedup ratio.
+#
+# Prerequisites:
+#   - benchmark-data/nucleotide-bench/work/chr22.fa exists
+#   - benchmark-data/nucleotide-bench/work/*.hmm exist
+#
+set -euo pipefail
+
+SRCDIR="${1:-.}"
+NHMMER="$SRCDIR/src/nhmmer"
+HMMNUCDB="$SRCDIR/src/hmmnucdb"
+WORKDIR="$SRCDIR/benchmark-data/nucleotide-bench/work"
+NCPU=16
+NRUNS=3
+QUERY_COPIES=4
+
+CHR22="$WORKDIR/chr22.fa"
+CHR22X20="$WORKDIR/chr22x20.fa"
+NUCDB="$WORKDIR/chr22x20.nucdb.nucdb"
+QUERIES="$WORKDIR/queries-x${QUERY_COPIES}.hmm"
+
+echo "=== nhmmer GPU large-scale benchmark ==="
+echo "  CPU threads: $NCPU"
+echo "  Query copies: $QUERY_COPIES ($(( 3 * QUERY_COPIES )) total queries)"
+echo "  Database: chr22x20 (~1GB, 20 chromosomes)"
+echo "  Runs: $NRUNS"
+echo ""
+
+# Build chr22x20 if needed
+if [ ! -f "$CHR22X20" ]; then
+    echo "Building chr22x20.fa..."
+    python3 -c "
+with open('$CHR22') as f:
+    lines = f.readlines()
+seq_lines = lines[1:]
+with open('$CHR22X20', 'w') as out:
+    for i in range(1, 21):
+        out.write(f'>chr22_copy{i}\n')
+        for line in seq_lines:
+            out.write(line)
+"
+fi
+
+# Build nucdb if needed
+if [ ! -f "$NUCDB" ]; then
+    echo "Building chr22x20.nucdb..."
+    "$HMMNUCDB" "$CHR22X20" "$WORKDIR/chr22x20.nucdb"
+fi
+
+# Build combined query file
+> "$QUERIES"
+for ((c=0; c<QUERY_COPIES; c++)); do
+    cat "$WORKDIR/MADE1.hmm" "$WORKDIR/query_short.hmm" "$WORKDIR/query_medium.hmm" >> "$QUERIES"
+done
+echo "  Queries: $(grep -c '^NAME' "$QUERIES")"
+echo ""
+
+echo "--- GPU-$NCPU ---"
+for ((r=1; r<=NRUNS; r++)); do
+    ts0=$(date +%s%N)
+    "$NHMMER" --gpu --cpu "$NCPU" --noali "$QUERIES" "$NUCDB" > /dev/null 2>/dev/null
+    ts1=$(date +%s%N)
+    echo "  run $r: $(echo "scale=3; ($ts1 - $ts0)/1000000000" | bc)s"
+done
+echo ""
+
+echo "--- CPU-$NCPU ---"
+for ((r=1; r<=NRUNS; r++)); do
+    ts0=$(date +%s%N)
+    "$NHMMER" --cpu "$NCPU" --noali "$QUERIES" "$CHR22X20" > /dev/null 2>/dev/null
+    ts1=$(date +%s%N)
+    echo "  run $r: $(echo "scale=3; ($ts1 - $ts0)/1000000000" | bc)s"
+done
+echo ""
+
+echo "--- Per-query GPU timing ---"
+"$NHMMER" --gpu --cpu "$NCPU" --noali "$QUERIES" "$NUCDB" 2>&1 | grep -E "query elapsed"
+echo ""
+
+echo "--- Hit counts ---"
+echo -n "  GPU: "
+"$NHMMER" --gpu --cpu "$NCPU" --noali "$QUERIES" "$NUCDB" 2>/dev/null | grep "Total number of hits" | awk '{sum += $5} END {print sum, "total hits"}'
+echo -n "  CPU: "
+"$NHMMER" --cpu "$NCPU" --noali "$QUERIES" "$CHR22X20" 2>/dev/null | grep "Total number of hits" | awk '{sum += $5} END {print sum, "total hits"}'
+echo ""
+echo "=== Done ==="

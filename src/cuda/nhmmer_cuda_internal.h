@@ -29,6 +29,10 @@
 #define NHMMER_GPU_BLOCK_SIZE  (512 * 1024 * 1024)
 #define NHMMER_GPU_BATCH_MIN   32
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern char nhmmer_empty_str[];
 
 /* Nucdb sequence slice helpers (nhmmer_gpu_seqhelpers.c).
@@ -272,6 +276,10 @@ int  nhmmer_gpu_run_strand_gpu_phase(NHMMER_GPU_INFO *info, NHMMER_GPU_SLOT *slo
                                      int chunk_start, int chunk_count,
                                      int complementarity,
                                      char *errbuf, int errbuf_size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HMMER_CUDA */
 

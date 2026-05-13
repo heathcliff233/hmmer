@@ -9,13 +9,17 @@ Latest optimizations:
 - `.nucdb` v2: 2-bit packed + 1-bit mask; on-the-fly RC; 16k chunks / 1k overlap
 - 4-row device emission tables; multi-warp SSV (83% occupancy)
 - Single-buffer Viterbi DP (halved shared memory)
+- **Register-based scanning Viterbi kernel** (M≥256): eliminates shared-memory DP,
+  keeps M/D/I state in register arrays with `#pragma unroll`. 1.67× scan kernel
+  speedup on query_medium (2.02s → 1.21s on chr22x20).
 - **Nuc-specific CPU F/B**: `fwdback_nuc.c` reads directly from mmap'd 2-bit
   packed data via `P7_NUCSEQVIEW`; `UpdateFwdEmissionScores_nuc` skips degenerate
   codes (72% fewer exp() calls per reparameterize)
 
-Parity: MADE1 462/465, query_short 360/363, query_medium 636/648 (float32 drift).
+Parity: GPU 2600/2820 MADE1, 1860/2020 query_short, 2420/2460 query_medium
+(float32 drift in Forward/Backward accumulation; all within documented tolerance).
 
-chr22x20, 12 queries (3×4), GPU-16: ~28.3s median; CPU-16: ~60s median (~2.1× speedup).
+chr22x20, 12 queries (3×4), GPU-16: ~25.8s; CPU-16: ~59.8s (**2.3× speedup**).
 
 ## P0 — AVX2 Forward/Backward for nuc path (highest impact)
 
@@ -29,7 +33,7 @@ residues are always codes 0–3, so the emission lookup is a trivial
 `rfv[code][q]` with no branch for 99%+ of positions.
 
 **Approach**:
-1. Create `src/impl_sse/fwdback_nuc_avx2.c` with AVX2 Forward/Backward engines
+1. Create `src/impl_avx2/fwdback_nuc.c` with AVX2 Forward/Backward engines
 2. Stripe layout: 8 floats per vector → `Q = ceil(M/8)`, rightshift by 8
 3. Transition table `tfv` and emission table `rfv` need 8-wide repack
 4. The existing `P7_NUCSEQVIEW` accessor works unchanged
@@ -63,22 +67,25 @@ per survivor (~2000 residues × ~3000 windows on chr22x20). Costs ~1s/query
 **Expected impact**: Eliminates ~1s per query on chr22x20 (the 0.97s gap between
 total CPU worker time and domain workflow time in single-thread measurement).
 
-## P2 — Scanning Viterbi occupancy (high impact, high effort)
+## P2 — Scanning Viterbi further optimization (medium impact)
 
-Current: 8.3% occupancy (4 blocks/SM), limited by shared memory (24192 B/block
-for the DP state with single-buffer optimization). At 96% SM utilization the SM
-is fully busy but starved of warps.
+Register-based kernel (landed 2026-05-13) reduced scanning Viterbi from 2.02s to
+1.21s (1.67× speedup) for M≥256. The shared-memory kernel remains active for
+M<256 (where the serial chain is already short enough).
 
-Target: 8 blocks/SM requires ≤12800 B/block (~47% further reduction).
+Current state for query_medium (M=501, chr22x20):
+- Register kernel: STRIDE=24, 4 warps/block, 184 regs/thread, 16.7% occupancy
+- Still the dominant GPU stage at 1.21s (down from 2.15s)
 
-Approaches:
-1. **Tile along M**: process DP in strips; reduce per-block storage from O(M) to
-   O(K) at cost of multiple kernel passes
-2. **int8 DP rows**: halves row storage where score range allows
-3. **Register-file DP for small M**: no shared memory needed for M≤256
-
-This is the single highest-impact GPU kernel optimization: halving Viterbi time
-(2.1s → ~1.0s on chr22x20) reduces GPU loop wall by ~25%.
+Remaining approaches:
+1. **STRIDE=16 template** (M≤512): would give 33% occupancy (16 warps/SM) but
+   currently blocked by nvcc speculative-read bug in `#pragma unroll` that causes
+   OOB twv accesses for iterations beyond `my_count`
+2. **Register kernel for small M**: M=80 produces spurious extra seeds (>64 per
+   window); root cause is striping layout difference vs shmem kernel. Needs
+   investigation if small-M Viterbi becomes a bottleneck.
+3. **Intra-kernel chunking**: position-level parallelism (splitting windows into
+   sub-chunks); implemented but did not help due to overlap overhead dominating
 
 ## P3 — `reparameterize_model` elimination for uniform composition
 
@@ -102,6 +109,7 @@ from host launch overhead overlap.
 - 4-row nuc emission tables (`d_rbv_lin_nuc`, `d_rwv_nuc`, `d_rfv_nuc`)
 - Multi-warp SSV longtarget (4 warps/block, 83% occupancy)
 - Single-buffer Viterbi DP (halved shared memory)
+- **Register-based scanning Viterbi** (M≥256, STRIDE=24, 1.67× kernel speedup)
 - Smaller default chunks (16384 vs 65536)
 - Nuc-specific `UpdateFwdEmissionScores_nuc` + `reparameterize_model_nuc`
 - `fwdback_nuc.c` Forward/Backward with `P7_NUCSEQVIEW` packed-data read

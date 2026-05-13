@@ -166,6 +166,15 @@ struct p7_cuda_msv_engine_s {
   cudaStream_t        vlt_stream_copy;
   cudaStream_t        vlt_stream_thresh;
 
+  /* Chunked Viterbi virtual window expansion */
+  int                *d_vlt_virt_offsets;
+  int                *d_vlt_virt_lengths;
+  int16_t            *d_vlt_virt_thresholds;
+  int                 vlt_virt_alloc;
+  int                *h_vlt_virt_parent_id;
+  int                *h_vlt_virt_chunk_start;
+  int                 h_vlt_virt_remap_alloc;
+
   const struct p7_cuda_msv_profile_s *last_cuom;
   P7_CUDA_MSV_STATS   stats;
 

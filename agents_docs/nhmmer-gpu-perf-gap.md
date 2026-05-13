@@ -1,6 +1,6 @@
 # nhmmer GPU vs CPU Performance Breakdown
 
-Last updated: 2026-05-13 (nuc F/B + P7_NUCSEQVIEW; fill_slice still present)
+Last updated: 2026-05-13 (register-based scanning Viterbi; fill_slice still present)
 
 This file explains the current GPU/CPU performance gap. Historical run logs and
 obsolete hypotheses were removed; use git history for old intermediate numbers.
@@ -18,9 +18,9 @@ Current gap drivers are:
   (Q=63) would halve this.
 - **`fill_slice` decode** — still called per window for `p7_alidisplay_Create`.
   Costs ~1s/query on chr22x20. Planned for elimination.
-- **Scanning Viterbi kernel time** — 8.3% occupancy on sm_89, the dominant GPU
-  stage (2.1s on chr22x20/query_medium).
-- GPU SSV kernel time (83% occupancy; secondary).
+- **Scanning Viterbi kernel time** — 1.21s on chr22x20/query_medium (reduced
+  from 2.02s by register-based kernel, still the dominant GPU stage).
+- GPU SSV kernel time (~1.3s, 83% occupancy; secondary).
 - F1 batch filter and FB parser kernel time.
 
 Recent non-causes:
@@ -37,71 +37,50 @@ Recent non-causes:
 
 ## Current Benchmarks
 
-System: RTX 4090, `--cpu 16` unless stated otherwise.
+System: RTX 4090, `--cpu 16` unless stated otherwise. 2026-05-13.
 
-Standard chr22 combined benchmark (2026-05-12, 5 runs, v1 path):
+### chr22x20 (~1GB, 20 chromosomes)
 
-| Path | Hits | min | median |
-|------|:---:|:---:|:---:|
-| CPU-1 | 1476 | 8.487s | — |
-| CPU-16 | 1476 | 0.963s | 1.077s |
-| GPU-16 overlap `.nucdb` v1 | 1476 | 0.968s | 1.023s |
+Per-query:
 
-chr22x5 benchmark, v1 vs v2 (5 runs):
+| Query | M | GPU-16 | CPU-16 | Speedup |
+|-------|---|--------|--------|---------|
+| MADE1 | 80 | 1.44s | 2.91s | 2.0× |
+| query_short | 151 | 1.67s | 2.81s | 1.7× |
+| query_medium | 501 | 5.14s | 8.95s | 1.7× |
 
-| Path | Hits | min | median |
-|------|:---:|:---:|:---:|
-| CPU-16 | 6294 | 3.602s | 3.668s |
-| GPU-16 v1 (65k chunks, 18-row, 1 warp/block) | 6294 | 2.715s | 2.924s |
-| GPU-16 v2 (16k chunks, 4-row, multi-warp SSV) | ~1980* | 2.386s | 2.447s |
+Multi-query (12 queries = 3 models × 4 copies):
 
-\* Hit-count drift from float32 accumulation in the v2 path; parity restoration
-is the P1 task in `nhmmer-gpu-todo.md`.
+| Path | Wall time (median of 3) | Speedup |
+|------|:-----------------------:|---------|
+| GPU-16 | **25.8s** | **2.3×** |
+| CPU-16 | 59.8s | baseline |
 
-GPU-16 v2 is ~33% faster than CPU-16 median and ~16% faster than GPU-16 v1.
+### chr22x5 (~250MB, 5 chromosomes)
 
-## Current 5x GPU Breakdown
+| Query | M | GPU-16 | CPU-16 | Speedup |
+|-------|---|--------|--------|---------|
+| MADE1 | 80 | 0.79s | 1.04s | 1.3× |
+| query_short | 151 | 0.68s | 0.81s | 1.2× |
+| query_medium | 501 | 1.90s | 2.74s | 1.4× |
 
-### chr22x5 v1 baseline (three queries combined, async path, median)
-
-| Bucket | Time |
-|--------|:---:|
-| Internal process elapsed | ~2.92s (async) |
-| GPU loop wall (serial snapshot) | ~3.37s |
-| Process outside search | ~0.38s |
-| CUDA engine create | ~0.21s |
-| Shared `.nucdb` upload | ~0.10s |
-| `.nucdb` reconstruct | 0.000s |
-
-GPU loop stage totals (v1):
-
-| Stage | Time |
-|-------|:---:|
-| SSV longtarget | ~0.90s |
-| extend+merge | ~0.003s |
-| batch filter | ~0.17s |
-| scanning Viterbi | ~0.70s |
-| GPU Forward/Backward parser | ~0.15s |
-| CPU workers | ~1.65s |
-| CPU domain workflow inside workers | ~1.53s |
-
-### chr22x20 v2 (query_medium M=501, single run, GPU-16)
+## Current GPU Breakdown (chr22x20, query_medium M=501, GPU-16)
 
 | Bucket | Time |
 |--------|:---:|
-| GPU loop wall | 5.069s |
-| Process elapsed | 5.433s |
+| GPU loop wall | ~4.3s |
+| Process elapsed | ~5.1s |
 
 GPU stage breakdown:
 
-| Stage | Time | Occupancy | SM util |
-|-------|:---:|:---:|:---:|
-| SSV longtarget | 1.326s | 83% | ~90% |
-| batch filter | 0.679s | — | — |
-| scanning Viterbi | **2.145s** | **8.3%** | 96% |
-| FB parser | 0.377s | — | — |
-| CPU workers | 5.097s | — | — |
-| exposed CPU wait | 0.164s | — | — |
+| Stage | Time | Notes |
+|-------|:---:|-------|
+| SSV longtarget | ~1.3s | 83% occupancy, multi-warp |
+| batch filter | ~0.7s | |
+| scanning Viterbi | **1.21s** | register kernel (was 2.02s with shmem) |
+| FB parser | ~0.4s | |
+| CPU workers | ~4.5s | |
+| exposed CPU wait | ~0.2s | 4.3s hidden behind GPU |
 
 ## What Was Fixed
 
@@ -195,14 +174,13 @@ SSV:
 
 Scanning Viterbi:
 
-- Nucleotide DP uses four 8-lane groups per physical warp.
-- 8.3% occupancy on sm_89 (4 warps/SM of 48), limited by shared memory:
-  24192 B/block for DP state; floor(102400/24192) = 4 blocks/SM.
-- 96% SM utilization despite low warp occupancy — the SM is busy, but 92% of
-  theoretical warp slots are idle.
-- This is now the P1 optimization target (see `nhmmer-gpu-todo.md`).
-- Reducing the per-block shared memory footprint (e.g., tiling along M or
-  reducing DP row storage) would increase blocks/SM and improve throughput.
+- **Register kernel** (M≥256): STRIDE=24 template, 4 warps/block, 184 regs/thread,
+  8 warps/SM (16.7% occupancy). DP state held in register arrays; shared memory
+  reduced to 2*M bytes (lookup tables only). Achieves 1.67× speedup over shmem
+  kernel for M=501.
+- **Shared-memory kernel** (M<256 or M>768): nucleotide DP with four 8-lane groups
+  per physical warp. 8.3% occupancy (4 blocks/SM, limited by 24192 B/block shmem).
+- STRIDE=16 template (33% occupancy) blocked by nvcc speculative-read bug.
 
 Conclusion: low theoretical occupancy is not sufficient evidence of starvation
 (SSV was effective at 50% before the multi-warp upgrade; Viterbi at 96% SM util
@@ -214,30 +192,30 @@ time, kernel wall time, and occupancy limiters from the profiler.
 For small chr22, GPU-16 only narrowly trails or matches CPU-16 because fixed
 CUDA setup/upload and CPU domain workflow are large relative to total work.
 
-For chr22x5, GPU-16 v2 is faster (median 2.447s vs CPU-16 median 3.668s, ~33%
-speedup). The async 2-slot strand pipeline hides nearly all CPU worker time
-behind the next strand's GPU kernels — on chr22x20/query_medium the breakdown
-reports 5.097s CPU workers with only 0.164s exposed wait (4.932s hidden).
+For larger databases, the GPU advantage grows with dataset size because the async
+2-slot pipeline keeps both slots busy through the run:
+- chr22x5: 1.2–1.4× per query
+- chr22x20: 1.7–2.0× per query, **2.3× for 12-query batch**
 
-The remaining wall is dominated by GPU kernels themselves, with a clear
-hierarchy as of the v2 path on chr22x20/query_medium:
+The remaining wall is dominated by GPU kernels themselves, with current hierarchy
+on chr22x20/query_medium (register kernel active):
 
-1. **Scanning Viterbi: 2.145s** — the P1 bottleneck. 8.3% occupancy (4
-   blocks/SM, limited by 24192 B/block shared memory). High SM utilization
-   (96%) means the SM is fully active but starved of warps.
-2. **SSV longtarget: 1.326s** — reduced but still significant at scale.
-3. **Batch filter: 0.679s** — secondary.
-4. **FB parser: 0.377s** — small.
+1. **SSV longtarget: ~1.3s** — the largest GPU stage at this scale.
+2. **Scanning Viterbi: 1.21s** — reduced from 2.02s by register kernel (1.67×).
+3. **Batch filter: ~0.7s** — secondary.
+4. **FB parser: ~0.4s** — small.
 
-The next meaningful improvements are therefore:
+CPU worker time (~4.5s) is almost fully hidden behind the next strand's GPU work
+(only ~0.2s exposed wait).
 
-1. **Reduce Viterbi shared-memory footprint** to allow more blocks/SM (P1).
-   Floor(102400/24192)=4 → floor(102400/X) with X≤12800 would allow ≥8 blocks.
-2. Reduce SSV and other kernel wall time (further warp tuning, tiling).
-3. Restore hit parity in the v2 path (float32 accumulation drift, ~1980 vs 6294
-   on chr22x5 — see `nhmmer-gpu-todo.md`).
-4. Reduce parser matrix D2H or consume more parser/domain data on GPU.
-5. Keep engine/setup amortized with multi-query or larger-target runs.
+The next meaningful improvements are:
+
+1. **AVX2 Forward/Backward** (P0): Q=126→63 would halve CPU domain F/B time,
+   further reducing the remaining exposed CPU wait.
+2. **Eliminate `fill_slice`** (P1): saves ~1s/query in CPU worker decode overhead.
+3. **STRIDE=16 register kernel** (P2): would raise Viterbi occupancy from 16.7%
+   to 33% if the nvcc speculative-read bug can be worked around.
+4. Keep engine/setup amortized with multi-query or larger-target runs.
 
 ## Reproducing
 

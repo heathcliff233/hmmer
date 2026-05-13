@@ -154,6 +154,11 @@ p7_cuda_engine_Destroy(P7_CUDA_ENGINE *engine)
   if (engine->d_vlt_win_offsets) cudaFree(engine->d_vlt_win_offsets);
   free(engine->h_vlt_win_counts);
   if (engine->d_vlt_hmm_count) cudaFree(engine->d_vlt_hmm_count);
+  if (engine->d_vlt_virt_offsets) cudaFree(engine->d_vlt_virt_offsets);
+  if (engine->d_vlt_virt_lengths) cudaFree(engine->d_vlt_virt_lengths);
+  if (engine->d_vlt_virt_thresholds) cudaFree(engine->d_vlt_virt_thresholds);
+  free(engine->h_vlt_virt_parent_id);
+  free(engine->h_vlt_virt_chunk_start);
   if (engine->d_resident_nucdb) cudaFree(engine->d_resident_nucdb);
   /* Domain rescore grow-only buffers */
   for (int i = 0; i < 4; i++) {
