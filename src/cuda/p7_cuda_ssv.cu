@@ -366,6 +366,32 @@ cuda_ssv_null_bias_gate_kernel(
   int L = lengths[seq];
   uint8_t seq_tjb_b = tjb_by_seq[seq];
 
+  /* Precompute packed-mode traversal: sp_cur is the absolute residue-position
+   * in the packed buffer for the FIRST iteration (i=1). sp_step is +1 (fwd)
+   * or -1 (RC). For spanning windows, a discontinuity at the chunk boundary
+   * is handled by an unlikely branch inside the loop. */
+  int sp_cur  = 0;
+  int sp_step = 0;
+  int sp_split = 0; /* iteration count at which chunk-span discontinuity occurs (0 = never) */
+  int sp_jump  = 0; /* address jump at the discontinuity */
+  if (packed_2bit) {
+    if (rc_flag) {
+      sp_cur  = s_offset + L - 1;
+      sp_step = -1;
+      if (s_src1_len < L) {
+        sp_split = s_src1_len;
+        sp_jump  = s_src2_off - (s_offset - 1);
+      }
+    } else {
+      sp_cur  = s_offset;
+      sp_step = 1;
+      if (s_src1_len < L) {
+        sp_split = s_src1_len;
+        sp_jump  = s_src2_off - (s_offset + s_src1_len);
+      }
+    }
+  }
+
   int stride = (M + 31) / 32;
   int my_start = lane * stride;
   int my_count = stride;
@@ -404,10 +430,13 @@ cuda_ssv_null_bias_gate_kernel(
     for (int i = 1; i <= L; i++) {
       uint8_t x;
       if (packed_2bit) {
-        int k = i - 1;
-        int pos = rc_flag ? (L - 1 - k) : k;
-        int sp  = (pos < s_src1_len) ? (s_offset + pos) : (s_src2_off + (pos - s_src1_len));
-        x = (uint8_t)p7_nucdb_fetch1(sdsq, sp, rc_flag);
+        if (__builtin_expect(sp_split && i - 1 == sp_split, 0))
+          sp_cur += sp_jump;
+        int b = sp_cur >> 2;
+        int s = (sp_cur & 3) << 1;
+        x = ((sdsq[b] >> s) & 0x3);
+        if (rc_flag) x ^= 0x3;
+        sp_cur += sp_step;
       } else {
         x = sdsq[i];
       }
@@ -477,14 +506,24 @@ cuda_ssv_null_bias_gate_kernel(
     uint8_t tjbm_b = (uint8_t)(seq_tjb_b + tbm_b);
     uint8_t xB = u8_sub_sat(base_b, tjbm_b);
 
+    /* Reset packed counter for MSV fallback pass */
+    int msv_sp_cur = sp_cur - sp_step * L;  /* rewind: sp_cur was advanced L times in SSV fast path */
+    /* Actually, sp_cur after the SSV loop is at L steps past start. For MSV we re-traverse from start. */
+    if (packed_2bit) {
+      msv_sp_cur = rc_flag ? (s_offset + L - 1) : s_offset;
+    }
+
     for (int i = 1; i <= L; i++) {
       uint8_t xE_pos = 0;
       uint8_t x;
       if (packed_2bit) {
-        int k2 = i - 1;
-        int pos = rc_flag ? (L - 1 - k2) : k2;
-        int sp  = (pos < s_src1_len) ? (s_offset + pos) : (s_src2_off + (pos - s_src1_len));
-        x = (uint8_t)p7_nucdb_fetch1(sdsq, sp, rc_flag);
+        if (__builtin_expect(sp_split && i - 1 == sp_split, 0))
+          msv_sp_cur += sp_jump;
+        int b = msv_sp_cur >> 2;
+        int s = (msv_sp_cur & 3) << 1;
+        x = ((sdsq[b] >> s) & 0x3);
+        if (rc_flag) x ^= 0x3;
+        msv_sp_cur += sp_step;
       } else {
         x = sdsq[i];
       }
@@ -557,12 +596,17 @@ SSV_DONE:
       float t12 = bias_t[5];  /* fhmm->t[1][2] (end) */
 
       uint8_t x1;
+      int bias_sp_cur;
       if (packed_2bit) {
-        int pos = rc_flag ? (L - 1) : 0;
-        int sp  = (pos < s_src1_len) ? (s_offset + pos) : (s_src2_off + (pos - s_src1_len));
-        x1 = (uint8_t)p7_nucdb_fetch1(sdsq, sp, rc_flag);
+        bias_sp_cur = rc_flag ? (s_offset + L - 1) : s_offset;
+        int b = bias_sp_cur >> 2;
+        int s = (bias_sp_cur & 3) << 1;
+        x1 = ((sdsq[b] >> s) & 0x3);
+        if (rc_flag) x1 ^= 0x3;
+        bias_sp_cur += sp_step;
       } else {
         x1 = sdsq[1];
+        bias_sp_cur = 0;
       }
       float p0  = bias_eo[(int) x1 * 2 + 0] * bias_pi[0];
       float p1s = bias_eo[(int) x1 * 2 + 1] * bias_pi[1];
@@ -574,10 +618,13 @@ SSV_DONE:
       for (int i = 2; i <= L; i++) {
         uint8_t x;
         if (packed_2bit) {
-          int k2 = i - 1;
-          int pos = rc_flag ? (L - 1 - k2) : k2;
-          int sp  = (pos < s_src1_len) ? (s_offset + pos) : (s_src2_off + (pos - s_src1_len));
-          x = (uint8_t)p7_nucdb_fetch1(sdsq, sp, rc_flag);
+          if (__builtin_expect(sp_split && i - 1 == sp_split, 0))
+            bias_sp_cur += sp_jump;
+          int b = bias_sp_cur >> 2;
+          int s = (bias_sp_cur & 3) << 1;
+          x = ((sdsq[b] >> s) & 0x3);
+          if (rc_flag) x ^= 0x3;
+          bias_sp_cur += sp_step;
         } else {
           x = sdsq[i];
         }

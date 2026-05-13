@@ -151,6 +151,18 @@ cuda_viterbi_longtarget_reg_kernel(
   float pmove = (2.0f + nj) / ((float)loc_L + 2.0f + nj);
   int16_t xw_move = (int16_t)roundf(scale_w * logf(pmove));
 
+  /* Precompute packed traversal */
+  int sp_cur = 0, sp_step = 0, sp_split = 0, sp_jump = 0;
+  if (packed_2bit) {
+    if (rc_flag) {
+      sp_cur = s_offset + L - 1; sp_step = -1;
+      if (s_src1_len < L) { sp_split = s_src1_len; sp_jump = s_src2_off - (s_offset - 1); }
+    } else {
+      sp_cur = s_offset; sp_step = 1;
+      if (s_src1_len < L) { sp_split = s_src1_len; sp_jump = s_src2_off - (s_offset + s_src1_len); }
+    }
+  }
+
   int16_t reg_M[STRIDE];
   int16_t reg_D[STRIDE];
   int16_t reg_I[STRIDE];
@@ -165,10 +177,13 @@ cuda_viterbi_longtarget_reg_kernel(
   for (int i = 1; i <= L; i++) {
     uint8_t x;
     if (packed_2bit) {
-      int k = i - 1;
-      int pos = rc_flag ? (L - 1 - k) : k;
-      int sp  = (pos < s_src1_len) ? (s_offset + pos) : (s_src2_off + (pos - s_src1_len));
-      x = (uint8_t)p7_nucdb_fetch1(s, sp, rc_flag);
+      if (__builtin_expect(sp_split && i - 1 == sp_split, 0))
+        sp_cur += sp_jump;
+      int b = sp_cur >> 2;
+      int sh = (sp_cur & 3) << 1;
+      x = ((s[b] >> sh) & 0x3);
+      if (rc_flag) x ^= 0x3;
+      sp_cur += sp_step;
     } else {
       x = s[i];
     }
@@ -343,6 +358,18 @@ cuda_viterbi_longtarget_kernel(
   float pmove = (2.0f + nj) / ((float)loc_L + 2.0f + nj);
   int16_t xw_move = (int16_t)roundf(scale_w * logf(pmove));
 
+  /* Precompute packed traversal */
+  int sp_cur = 0, sp_step = 0, sp_split = 0, sp_jump = 0;
+  if (packed_2bit) {
+    if (rc_flag) {
+      sp_cur = s_offset + L - 1; sp_step = -1;
+      if (s_src1_len < L) { sp_split = s_src1_len; sp_jump = s_src2_off - (s_offset - 1); }
+    } else {
+      sp_cur = s_offset; sp_step = 1;
+      if (s_src1_len < L) { sp_split = s_src1_len; sp_jump = s_src2_off - (s_offset + s_src1_len); }
+    }
+  }
+
   for (int q = 0; q < Q; q++) {
     int cell = (q + lane * Q) * 3;
     dp[cell + 0] = -32768;
@@ -358,10 +385,13 @@ cuda_viterbi_longtarget_kernel(
   for (int i = 1; i <= L; i++) {
     uint8_t x;
     if (packed_2bit) {
-      int k = i - 1;
-      int pos = rc_flag ? (L - 1 - k) : k;
-      int sp  = (pos < s_src1_len) ? (s_offset + pos) : (s_src2_off + (pos - s_src1_len));
-      x = (uint8_t)p7_nucdb_fetch1(s, sp, rc_flag);
+      if (__builtin_expect(sp_split && i - 1 == sp_split, 0))
+        sp_cur += sp_jump;
+      int b = sp_cur >> 2;
+      int sh = (sp_cur & 3) << 1;
+      x = ((s[b] >> sh) & 0x3);
+      if (rc_flag) x ^= 0x3;
+      sp_cur += sp_step;
     } else {
       x = s[i];
     }
