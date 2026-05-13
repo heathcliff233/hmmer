@@ -50,24 +50,7 @@ wall (~5s) would clearly dominate, shifting bottleneck back to GPU.
   wrap-around needs ceil(M/8) passes regardless of vector width)
 - Could template on vector width for maintainability
 
-## P1 — Eliminate `fill_slice` decode (medium impact)
-
-**Problem**: `nhmmer_gpu_nucdb_fill_slice` decodes the full 2-bit→byte window
-per survivor (~2000 residues × ~3000 windows on chr22x20). Costs ~1s/query
-(~20% of CPU worker time). The decoded dsq is used only by:
-1. `esl_sq_CountResidues` → already handled by nuc-mode packed counting
-2. `p7_alidisplay_Create` → reads trace positions only (50–200 residues)
-
-**Approach**:
-1. `p7_alidisplay_Create_nuc`: reads `nsv[tr->i[z]]` on the fly for each
-   aligned position instead of `sq->dsq[tr->i[z]]`
-2. Remove `fill_slice` call entirely from the worker loop
-3. `slice_sq` becomes metadata-only (name/length, no dsq allocation)
-
-**Expected impact**: Eliminates ~1s per query on chr22x20 (the 0.97s gap between
-total CPU worker time and domain workflow time in single-thread measurement).
-
-## P2 — Scanning Viterbi further optimization (medium impact)
+## P1 — Scanning Viterbi further optimization (medium impact)
 
 Register-based kernel (landed 2026-05-13) reduced scanning Viterbi from 2.02s to
 1.21s (1.67× speedup) for M≥256. The shared-memory kernel remains active for
@@ -87,7 +70,7 @@ Remaining approaches:
 3. **Intra-kernel chunking**: position-level parallelism (splitting windows into
    sub-chunks); implemented but did not help due to overlap overhead dominating
 
-## P3 — `reparameterize_model` elimination for uniform composition
+## P2 — `reparameterize_model` elimination for uniform composition
 
 Each `rescore_isolated_domain` call runs `reparameterize_model_nuc` 2–3 times
 (rebuild emission scores) + one Forward just to estimate bias correction. For
@@ -97,7 +80,7 @@ reparameterization changes scores by < 0.01 nats.
 Skip reparameterize when: `max(|obs_freq[x] - 0.25|) < threshold` for all x.
 Saves 1–2 full emission score rebuilds + 1 Forward per domain.
 
-## P4 — Intra-stage async (low-medium impact)
+## P3 — Intra-stage async (low-medium impact)
 
 Convert synchronous `cudaMemcpy` / `cudaEventSynchronize` at stage boundaries to
 `cudaMemcpyAsync` on compute streams. Estimated: tens of ms saved per strand
@@ -122,3 +105,8 @@ from host launch overhead overlap.
   now read directly from 2-bit packed nucdb data via `p7_nucdb_fetch1()`. The
   legacy `cuda_nhmmer_gather_windows_kernel` (byte-unpack) is dead code. Eliminates
   per-strand gather kernel launches and ~350MB intermediate device memory traffic.
+- **`fill_slice` elimination**: CPU domain workers now use `P7_NUCSEQVIEW` for all
+  downstream code: `p7_alidisplay_Create_nuc` reads trace positions directly from
+  packed data, `region_trace_ensemble` uses nsv for null2 scoring, multi-domain
+  Forward uses `p7_Forward_nuc`. The legacy `nhmmer_gpu_nucdb_fill_slice` decode
+  is only called as a fallback for chunk-spanning windows (rare).

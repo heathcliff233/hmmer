@@ -20,6 +20,7 @@
 
 #include "easel.h"
 #include "hmmer.h"
+#include "p7_nucdb.h"
 
 // Define bit-vector constants used in the _Serialize() and _Deserialize routines
 #define RFLINE_PRESENT (1 << 0)
@@ -250,6 +251,146 @@ p7_alidisplay_Create(const P7_TRACE *tr, int which, const P7_OPROFILE *om, const
   esl_sq_Destroy(ntorfseqtxt);  
 
 	
+  return ad;
+
+ ERROR:
+  p7_alidisplay_Destroy(ad);
+  return NULL;
+}
+
+/* Nucleotide variant: reads residues from a P7_NUCSEQVIEW instead of sq->dsq.
+ * The sq is only used for metadata (name, acc, desc, n). */
+P7_ALIDISPLAY *
+p7_alidisplay_Create_nuc(const P7_TRACE *tr, int which, const P7_OPROFILE *om,
+                         const ESL_SQ *sq, const P7_NUCSEQVIEW *nsv)
+{
+  P7_ALIDISPLAY *ad       = NULL;
+  char          *Alphabet = om->abc->sym;
+  int            n, pos, z;
+  int            z1,z2;
+  int            k,x,i,s;
+  int            hmm_namelen, hmm_acclen, hmm_desclen;
+  int            sq_namelen,  sq_acclen,  sq_desclen;
+  int            status;
+
+  if (tr->ndom > 0) {
+    for (z1 = tr->tfrom[which]; z1 < tr->N; z1++) if (tr->st[z1] == p7T_M) break;
+    if (z1 == tr->N) return NULL;
+    for (z2 = tr->tto[which];   z2 >= 0 ;   z2--) if (tr->st[z2] == p7T_M) break;
+    if (z2 == -1) return NULL;
+  } else {
+    for (z1 = 0; which >= 0 && z1 < tr->N; z1++) if (tr->st[z1] == p7T_B) which--;
+    if (z1 == tr->N) return NULL;
+    for (; z1 < tr->N; z1++) if (tr->st[z1] == p7T_M) break;
+    if (z1 == tr->N) return NULL;
+    for (z2 = z1; z2 < tr->N; z2++) if (tr->st[z2] == p7T_E) break;
+    for (; z2 >= 0;    z2--) if (tr->st[z2] == p7T_M) break;
+    if (z2 == -1) return NULL;
+  }
+
+  n = (z2-z1+2) * 3;
+  if (om->rf[0]  != 0)    n += z2-z1+2;
+  if (om->mm[0]  != 0)    n += z2-z1+2;
+  if (om->cs[0]  != 0)    n += z2-z1+2;
+  if (tr->pp     != NULL) n += z2-z1+2;
+  hmm_namelen = strlen(om->name);                           n += hmm_namelen + 1;
+  hmm_acclen  = (om->acc  != NULL ? strlen(om->acc)  : 0);  n += hmm_acclen  + 1;
+  hmm_desclen = (om->desc != NULL ? strlen(om->desc) : 0);  n += hmm_desclen + 1;
+  sq_namelen  = strlen(sq->name);                           n += sq_namelen  + 1;
+  sq_acclen   = strlen(sq->acc);                            n += sq_acclen   + 1;
+  sq_desclen  = strlen(sq->desc);                           n += sq_desclen  + 1;
+
+  ESL_ALLOC(ad, sizeof(P7_ALIDISPLAY));
+  ad->mem = NULL;
+  pos = 0;
+  ad->memsize = sizeof(char) * n;
+  ESL_ALLOC(ad->mem, ad->memsize);
+  if (om->rf[0]  != 0) { ad->rfline = ad->mem + pos; pos += z2-z1+2; } else { ad->rfline = NULL; }
+  ad->mmline = NULL;
+  if (om->cs[0]  != 0) { ad->csline = ad->mem + pos; pos += z2-z1+2; } else { ad->csline = NULL; }
+  ad->model   = ad->mem + pos;  pos += z2-z1+2;
+  ad->mline   = ad->mem + pos;  pos += z2-z1+2;
+  ad->aseq    = ad->mem + pos;  pos += z2-z1+2;
+  if (tr->pp != NULL)  { ad->ppline = ad->mem + pos;  pos += z2-z1+2;} else { ad->ppline = NULL; }
+  ad->hmmname = ad->mem + pos;  pos += hmm_namelen +1;
+  ad->hmmacc  = ad->mem + pos;  pos += hmm_acclen +1;
+  ad->hmmdesc = ad->mem + pos;  pos += hmm_desclen +1;
+  ad->sqname  = ad->mem + pos;  pos += sq_namelen +1;
+  ad->sqacc   = ad->mem + pos;  pos += sq_acclen +1;
+  ad->sqdesc  = ad->mem + pos;  pos += sq_desclen +1;
+
+  strcpy(ad->hmmname, om->name);
+  if (om->acc  != NULL) strcpy(ad->hmmacc,  om->acc);  else ad->hmmacc[0]  = 0;
+  if (om->desc != NULL) strcpy(ad->hmmdesc, om->desc); else ad->hmmdesc[0] = 0;
+  strcpy(ad->sqname,  sq->name);
+  strcpy(ad->sqacc,   sq->acc);
+  strcpy(ad->sqdesc,  sq->desc);
+
+  ad->hmmfrom = tr->k[z1];
+  ad->hmmto   = tr->k[z2];
+  ad->M       = om->M;
+  ad->sqfrom  = tr->i[z1];
+  ad->sqto    = tr->i[z2];
+  ad->L       = sq->n;
+
+  if (ad->rfline != NULL) {
+    for (z = z1; z <= z2; z++) ad->rfline[z-z1] = ((tr->st[z] == p7T_I) ? '.' : om->rf[tr->k[z]]);
+    ad->rfline[z-z1] = '\0';
+  }
+  if (ad->mmline != NULL) {
+    for (z = z1; z <= z2; z++) ad->mmline[z-z1] = ((tr->st[z] == p7T_I) ? '.' : om->mm[tr->k[z]]);
+    ad->mmline[z-z1] = '\0';
+  }
+  if (ad->csline != NULL) {
+    for (z = z1; z <= z2; z++) ad->csline[z-z1] = ((tr->st[z] == p7T_I) ? '.' : om->cs[tr->k[z]]);
+    ad->csline[z-z1] = '\0';
+  }
+  if (ad->ppline != NULL) {
+    for (z = z1; z <= z2; z++) ad->ppline[z-z1] = ( (tr->st[z] == p7T_D) ? '.' : p7_alidisplay_EncodePostProb(tr->pp[z]));
+    ad->ppline[z-z1] = '\0';
+  }
+
+  for (z = z1; z <= z2; z++)
+    {
+      k = tr->k[z];
+      i = tr->i[z];
+      s = tr->st[z];
+
+      switch (s) {
+      case p7T_M:
+      case p7T_I:
+        {
+          int code = p7_nucseqview_residue(nsv, i);
+          x = (code >= 0) ? code : esl_abc_XGetUnknown(om->abc);
+        }
+        if (s == p7T_M) {
+          ad->model[z-z1] = om->consensus[k];
+          if      (x == esl_abc_DigitizeSymbol(om->abc, om->consensus[k])) ad->mline[z-z1] = ad->model[z-z1];
+          else if (p7_oprofile_FGetEmission(om, k, x) > 1.0)               ad->mline[z-z1] = '+';
+          else                                                             ad->mline[z-z1] = ' ';
+          ad->aseq[z-z1] = toupper(Alphabet[x]);
+        } else {
+          ad->model [z-z1] = '.';
+          ad->mline [z-z1] = ' ';
+          ad->aseq  [z-z1] = tolower(Alphabet[x]);
+        }
+        break;
+
+      case p7T_D:
+        ad->model [z-z1] = om->consensus[k];
+        ad->mline [z-z1] = ' ';
+        ad->aseq  [z-z1] = '-';
+        break;
+
+      default: ESL_XEXCEPTION(eslEINVAL, "invalid state in trace: not M,D,I");
+      }
+    }
+  ad->model [z2-z1+1] = '\0';
+  ad->mline [z2-z1+1] = '\0';
+  ad->aseq  [z2-z1+1] = '\0';
+  ad->N = z2-z1+1;
+  ad->ntseq = NULL;
+
   return ad;
 
  ERROR:

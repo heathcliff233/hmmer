@@ -345,23 +345,28 @@ nhmmer_gpu_worker_process_post_fb(NHMMER_GPU_WORKER *w)
     p7_oprofile_ReconfigRestLength(w->om, window_len);
 
     if (w->ndb != NULL && w->sq->dsq == NULL) {
-      /* Build zero-copy nucseqview for nuc Forward/Backward */
+      /* Build zero-copy nucseqview — all downstream code reads packed data directly */
       P7_NUCSEQVIEW nsv_local;
       int nsv_ok = nhmmer_gpu_nucdb_build_nsv(w->ndb, w->seq_id,
                                               w->complementarity, window->n,
                                               window_len, &nsv_local);
       if (nsv_ok == eslOK) {
         w->pli->ddef->nsv = &nsv_local;
-        /* Decode the window for alidisplay/CountResidues use */
-        w->status = nhmmer_gpu_nucdb_fill_slice(w->ndb, w->om->abc, w->seq_id,
-                                                w->complementarity, window->n,
-                                                window_len, w->sq->name,
-                                                &w->slice_sq, &w->slice_dsq,
-                                                &w->slice_alloc);
-        if (w->status != eslOK) return;
+        /* Set up metadata-only sq shell (no dsq materialization) */
+        if (w->slice_sq == NULL) {
+          w->slice_sq = esl_sq_CreateDigital(w->om->abc);
+          free(w->slice_sq->dsq);
+          w->slice_sq->dsq = NULL;
+        }
+        esl_sq_SetName(w->slice_sq, w->sq->name);
+        w->slice_sq->n     = window_len;
+        w->slice_sq->L     = w->sq->L;
+        w->slice_sq->start = w->sq->start;
+        w->slice_sq->abc   = w->om->abc;
         seq_for_window = w->slice_sq;
-        subseq = w->slice_sq->dsq;
+        subseq = NULL;
       } else {
+        /* nsv build failed (window spans chunks) — fall back to decode */
         w->pli->ddef->nsv = NULL;
         w->status = nhmmer_gpu_nucdb_fill_slice(w->ndb, w->om->abc, w->seq_id,
                                                 w->complementarity, window->n,

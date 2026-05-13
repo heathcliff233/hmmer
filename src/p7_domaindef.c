@@ -49,6 +49,8 @@ static int is_multidomain_region  (P7_DOMAINDEF *ddef, int i, int j);
 static int region_trace_ensemble  (P7_DOMAINDEF *ddef, const P7_OPROFILE *om, const ESL_DSQ *dsq, int ireg, int jreg, const P7_OMX *fwd, P7_OMX *wrk, int *ret_nc);
 static int rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OMX *ox1, P7_OMX *ox2,
 				   int i, int j, int null2_is_done, P7_BG *bg, int long_target, P7_BG *bg_tmp, float *scores_arr, float *fwd_emissions_arr, int nuc_mode);
+static int reparameterize_model_nuc(P7_BG *bg, P7_OPROFILE *om, const ESL_SQ *sq, const P7_NUCSEQVIEW *nsv, int start, int L,
+				    float *fwd_emissions, float *bgf_arr, float *sc_arr, __m128 *rfv_N);
 
 
 /*****************************************************************
@@ -443,7 +445,14 @@ p7_domaindef_ByPosteriorHeuristics(const ESL_SQ *sq, const ESL_SQ *ntsq, P7_OPRO
              * works
              */
             p7_oprofile_ReconfigMultihit(om, saveL);
-            p7_Forward(sq->dsq+i-1, j-i+1, om, fwd, NULL);
+            if (ddef->nuc_mode && ddef->nsv) {
+              __m128 rfv_N_tmp[p7O_NQF(om->M)];
+              reparameterize_model_nuc(bg, om, NULL, NULL, 0, 0, fwd_emissions_arr, bg_tmp->f, scores_arr, rfv_N_tmp);
+              P7_NUCSEQVIEW sub_multi = p7_nucseqview_subview(ddef->nsv, i, j-i+1);
+              p7_Forward_nuc(&sub_multi, om, rfv_N_tmp, fwd, NULL);
+            } else {
+              p7_Forward(sq->dsq+i-1, j-i+1, om, fwd, NULL);
+            }
 
             region_trace_ensemble(ddef, om, sq->dsq, i, j, fwd, bck, &nc);
             p7_oprofile_ReconfigUnihit(om, saveL);
@@ -637,7 +646,7 @@ is_multidomain_region(P7_DOMAINDEF *ddef, int i, int j)
  * <wrk> has had its zero row clobbered as working space for a null2 calculation.
  */
 static int
-region_trace_ensemble(P7_DOMAINDEF *ddef, const P7_OPROFILE *om, const ESL_DSQ *dsq, int ireg, int jreg, 
+region_trace_ensemble(P7_DOMAINDEF *ddef, const P7_OPROFILE *om, const ESL_DSQ *dsq, int ireg, int jreg,
 		      const P7_OMX *fwd, P7_OMX *wrk, int *ret_nc)
 {
   int    Lr  = jreg-ireg+1;
@@ -646,19 +655,20 @@ region_trace_ensemble(P7_DOMAINDEF *ddef, const P7_OPROFILE *om, const ESL_DSQ *
   int    nc;
   int    pos;
   float  null2[p7_MAXCODE];
+  const P7_NUCSEQVIEW *nsv = ddef->nsv;
 
   esl_vec_FSet(ddef->n2sc+ireg, Lr, 0.0); /* zero the null2 scores in region */
 
   /* By default, we make results reproducible by forcing a reset of
    * the RNG to its originally seeded state.
    */
-  if (ddef->do_reseeding) 
+  if (ddef->do_reseeding)
     esl_randomness_Init(ddef->r, esl_randomness_GetSeed(ddef->r));
 
   /* Collect an ensemble of sampled traces; calculate null2 odds ratios from these */
   for (t = 0; t < ddef->nsamples; t++)
     {
-      p7_StochasticTrace(ddef->r, dsq+ireg-1, Lr, om, fwd, ddef->tr);
+      p7_StochasticTrace(ddef->r, (dsq ? dsq+ireg-1 : NULL), Lr, om, fwd, ddef->tr);
       p7_trace_Index(ddef->tr);
 
       pos = 1;
@@ -667,12 +677,19 @@ region_trace_ensemble(P7_DOMAINDEF *ddef, const P7_OPROFILE *om, const ESL_DSQ *
 	  p7_spensemble_Add(ddef->sp, t, ddef->tr->sqfrom[d]+ireg-1, ddef->tr->sqto[d]+ireg-1, ddef->tr->hmmfrom[d], ddef->tr->hmmto[d]);
 
 	  p7_Null2_ByTrace(om, ddef->tr, ddef->tr->tfrom[d], ddef->tr->tto[d], wrk, null2);
-	  
+
 	  /* residues outside domains get bumped +1: because f'(x) = f(x), so f'(x)/f(x) = 1 in these segments */
 	  for (; pos <= ddef->tr->sqfrom[d]; pos++) ddef->n2sc[ireg+pos-1] += 1.0;
 
 	  /* Residues inside domains get bumped by their null2 ratio */
-	  for (; pos <= ddef->tr->sqto[d];   pos++) ddef->n2sc[ireg+pos-1] += null2[dsq[ireg+pos-1]];
+	  if (ddef->nuc_mode && nsv) {
+	    for (; pos <= ddef->tr->sqto[d]; pos++) {
+	      int code = p7_nucseqview_residue(nsv, ireg+pos-1);
+	      ddef->n2sc[ireg+pos-1] += (code >= 0) ? null2[code] : 1.0f;
+	    }
+	  } else {
+	    for (; pos <= ddef->tr->sqto[d]; pos++) ddef->n2sc[ireg+pos-1] += null2[dsq[ireg+pos-1]];
+	  }
 	}
       /* the remaining residues in the region outside any domains get +1 */
       for (; pos <= Lr; pos++)  ddef->n2sc[ireg+pos-1] += 1.0;
@@ -968,7 +985,10 @@ rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, c
     ddef->nalloc *= 2;
   }
   dom = &(ddef->dcl[ddef->ndom]);
-  dom->ad             = p7_alidisplay_Create(ddef->tr, 0, om, sq, ntsq);
+  if (nuc_mode && ddef->nsv)
+    dom->ad = p7_alidisplay_Create_nuc(ddef->tr, 0, om, sq, ddef->nsv);
+  else
+    dom->ad = p7_alidisplay_Create(ddef->tr, 0, om, sq, ntsq);
   dom->scores_per_pos = NULL;
 
 
@@ -1032,7 +1052,10 @@ rescore_isolated_domain(P7_DOMAINDEF *ddef, P7_OPROFILE *om, const ESL_SQ *sq, c
 
        /* store the results in it, first destroying the old alidisplay object */
        p7_alidisplay_Destroy(dom->ad);
-       dom->ad            = p7_alidisplay_Create(ddef->tr, 0, om, sq, NULL);
+       if (nuc_mode && ddef->nsv)
+         dom->ad = p7_alidisplay_Create_nuc(ddef->tr, 0, om, sq, ddef->nsv);
+       else
+         dom->ad = p7_alidisplay_Create(ddef->tr, 0, om, sq, NULL);
     }
 
     /* Estimate bias correction, by computing what the score would've been without
