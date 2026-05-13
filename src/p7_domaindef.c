@@ -840,6 +840,8 @@ reparameterize_model_nuc(P7_BG *bg, P7_OPROFILE *om, const ESL_SQ *sq,
   p7_oprofile_UpdateFwdEmissionScores_nuc(om, bg, fwd_emissions, sc_arr, rfv_N);
   return eslOK;
 }
+
+/* rescore_isolated_domain()
  * SRE, Fri Feb  8 09:18:33 2008 [Janelia]
  *
  * We have isolated a single domain's envelope from <i>..<j> in

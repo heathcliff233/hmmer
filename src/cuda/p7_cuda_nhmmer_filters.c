@@ -204,6 +204,7 @@ nhmmer_gpu_batch_filter(NHMMER_GPU_INFO *info, NHMMER_GPU_WINDOW_BATCH *wb,
   {
 	    P7_CUDA_MSV_STATS stats;
 	    p7_cuda_engine_GetStats(info->cuda_engine, &stats);
+	    info->t_batch_gather  = stats.gather_kernel_seconds;
 	    info->t_batch_h2d    = stats.h2d_seconds;
 	    info->t_batch_kernel = stats.kernel_seconds;
 	    info->t_batch_f1_gate = stats.f1_gate_kernel_seconds;
@@ -298,12 +299,14 @@ nhmmer_gpu_batch_filter_resident(NHMMER_GPU_INFO *info, const uint8_t *d_dsq_bas
                                         om->evparam[p7_MMU], om->evparam[p7_MLAMBDA], pli->F1,
                                         survivor_idx, &nsurv,
                                         survivor_bias, NULL,
-                                        4, errbuf, errbuf_size);
+                                        4, errbuf, errbuf_size,
+                                        NULL, NULL, 0);
   if (status != eslOK) goto ERROR;
 
   {
     P7_CUDA_MSV_STATS stats;
     p7_cuda_engine_GetStats(info->cuda_engine, &stats);
+    info->t_batch_gather  = stats.gather_kernel_seconds;
     info->t_batch_h2d     = stats.h2d_seconds;
     info->t_batch_kernel  = stats.kernel_seconds;
     info->t_batch_f1_gate = stats.f1_gate_kernel_seconds;
@@ -364,6 +367,7 @@ nhmmer_gpu_batch_filter_resident_gather(NHMMER_GPU_INFO *info, const uint8_t *d_
   {
     P7_CUDA_MSV_STATS stats;
     p7_cuda_engine_GetStats(info->cuda_engine, &stats);
+    info->t_batch_gather  = stats.gather_kernel_seconds;
     info->t_batch_h2d     = stats.h2d_seconds;
     info->t_batch_kernel  = stats.kernel_seconds;
     info->t_batch_f1_gate = stats.f1_gate_kernel_seconds;

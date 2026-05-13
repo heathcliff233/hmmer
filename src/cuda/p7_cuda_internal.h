@@ -49,6 +49,9 @@ struct p7_cuda_msv_engine_s {
   int                *d_gather_lengths;
   int                *d_gather_dst_offsets;
   int                 gather_alloc;
+  int                 batch_packed_2bit;
+  int                 batch_rc_flag;
+  const uint8_t      *d_batch_packed_base;
   int                *h_meta_offsets;
   int                *h_meta_lengths;
   uint8_t            *h_meta_tjb_by_seq;

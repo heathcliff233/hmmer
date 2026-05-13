@@ -690,7 +690,7 @@ typedef struct p7_domaindef_s {
 
   int    nuc_mode;      /* TRUE: use nuc-optimized emission score rebuild (skip degenerate codes) */
   struct p7_nucseqview_s *nsv;  /* non-NULL in nuc_mode: zero-copy view for packed F/B (borrowed, not owned) */
-  __m128                 *rfv_N; /* pre-computed N emission scores (nqf vectors, owned by ddef) */
+  void                   *rfv_N; /* pre-computed N emission scores (nqf __m128 vectors, owned by ddef) */
   int                     rfv_N_nq; /* allocated size of rfv_N in vectors */
 } P7_DOMAINDEF;
 

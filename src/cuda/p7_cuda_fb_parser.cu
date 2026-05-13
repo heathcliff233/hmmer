@@ -1,4 +1,15 @@
 #include "p7_cuda_internal.h"
+#include "p7_cuda_nucdb_pack.cuh"
+
+__device__ static inline uint8_t
+fb_parser_fetch_residue(const uint8_t *dsq, int i, int offset, int L,
+                        int src1_len, int src2_offset, int rc_flag)
+{
+  int k = i - 1;
+  int pos = rc_flag ? (L - 1 - k) : k;
+  int sp  = (pos < src1_len) ? (offset + pos) : (src2_offset + (pos - src1_len));
+  return (uint8_t)p7_nucdb_fetch1(dsq, sp, rc_flag);
+}
 
 __device__ static inline int
 fwd_tfv_idx(int t, int q, int lane, int Q)
@@ -136,7 +147,8 @@ cuda_forward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, con
                                      const float *rfv, const float *tfv, int M, int Q, int Kp,
                                      float xf_e_loop, float xf_e_move, float xf_n_loop_base, float xf_n_move_base,
                                      float xf_c_loop_base, float xf_c_move_base, float xf_j_loop_base, float xf_j_move_base,
-                                     float nj, float *xmx, float *scores, int *statuses)
+                                     float nj, float *xmx, float *scores, int *statuses,
+                                     const int *src1_lengths = NULL, const int *src2_offsets = NULL, int rc_flag = 0)
 {
   extern __shared__ float fwd_parser_mem[];
   int b = blockIdx.x;
@@ -145,6 +157,7 @@ cuda_forward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, con
   float *curr = prev + (size_t) N * 3;
   int si, L;
   const uint8_t *sdsq;
+  int s_offset, s_src1_len, s_src2_off;
   float *sxmx;
   float pmove, ploop;
   float xf_n_loop, xf_n_move, xf_c_loop, xf_c_move, xf_j_loop, xf_j_move;
@@ -159,7 +172,10 @@ cuda_forward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, con
   if (threadIdx.x != 0) return;
   si = seqidx ? seqidx[b] : b;
   L = lengths[si];
-  sdsq = dsq + offsets[si];
+  sdsq = dsq + (src1_lengths ? 0 : offsets[si]);
+  s_offset   = src1_lengths ? offsets[si]       : 0;
+  s_src1_len = src1_lengths ? src1_lengths[si]  : 0;
+  s_src2_off = src1_lengths ? src2_offsets[si]  : 0;
   sxmx = xmx + x_offsets[b];
 
   pmove = (2.0f + nj) / ((float) L + 2.0f + nj);
@@ -181,7 +197,7 @@ cuda_forward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, con
   sxmx[p7X_SCALE] = 1.0f;
 
   for (int i = 1; i <= L; i++) {
-    uint8_t x = sdsq[i];
+    uint8_t x = src1_lengths ? fb_parser_fetch_residue(sdsq, i, s_offset, L, s_src1_len, s_src2_off, rc_flag) : sdsq[i];
     if (x >= Kp) {
       scores[b * 2 + 0] = 0.0f;
       statuses[b * 2 + 0] = eslEINVAL;
@@ -261,7 +277,8 @@ cuda_forward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *off
                                               const float *rfv, const float *tfv, int M, int Q, int Kp,
                                               float xf_e_loop, float xf_e_move, float xf_n_loop_base, float xf_n_move_base,
                                               float xf_c_loop_base, float xf_c_move_base, float xf_j_loop_base, float xf_j_move_base,
-                                              float nj, float *xmx, float *scores, int *statuses)
+                                              float nj, float *xmx, float *scores, int *statuses,
+                                              const int *src1_lengths = NULL, const int *src2_offsets = NULL, int rc_flag = 0)
 {
   extern __shared__ float fwd_parser_parallel_mem[];
   int b = blockIdx.x;
@@ -275,6 +292,7 @@ cuda_forward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *off
   float *scanB = scanA + T;
   __shared__ int si, L;
   __shared__ const uint8_t *sdsq;
+  __shared__ int s_offset, s_src1_len, s_src2_off;
   __shared__ float *sxmx;
   __shared__ float sxN, sxJ, sxB, sxC, sxE, stotscale;
   __shared__ float sscale, sinv;
@@ -285,7 +303,10 @@ cuda_forward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *off
   if (tid == 0) {
     si = seqidx ? seqidx[b] : b;
     L = lengths[si];
-    sdsq = dsq + offsets[si];
+    sdsq = dsq + (src1_lengths ? 0 : offsets[si]);
+    s_offset   = src1_lengths ? offsets[si]       : 0;
+    s_src1_len = src1_lengths ? src1_lengths[si]  : 0;
+    s_src2_off = src1_lengths ? src2_offsets[si]  : 0;
     sxmx = xmx + x_offsets[b];
 
     {
@@ -319,7 +340,7 @@ cuda_forward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *off
   __syncthreads();
 
   for (int i = 1; i <= L; i++) {
-    uint8_t x = sdsq[i];
+    uint8_t x = src1_lengths ? fb_parser_fetch_residue(sdsq, i, s_offset, L, s_src1_len, s_src2_off, rc_flag) : sdsq[i];
     if (x >= Kp) {
       if (tid == 0) {
         scores[b * 2 + 0] = 0.0f;
@@ -657,7 +678,8 @@ cuda_backward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, co
                                       const float *rfv, const float *tfv, int M, int Q, int Kp,
                                       float xf_e_loop, float xf_e_move, float xf_n_loop_base, float xf_n_move_base,
                                       float xf_c_loop_base, float xf_c_move_base, float xf_j_loop_base, float xf_j_move_base,
-                                      float nj, const float *xfwd, float *xbck, float *scores, int *statuses)
+                                      float nj, const float *xfwd, float *xbck, float *scores, int *statuses,
+                                      const int *src1_lengths = NULL, const int *src2_offsets = NULL, int rc_flag = 0)
 {
   extern __shared__ float bck_parser_mem[];
   int b = blockIdx.x;
@@ -666,6 +688,7 @@ cuda_backward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, co
   float *curr = next + (size_t) N * 3;
   int si, L;
   const uint8_t *sdsq;
+  int s_offset, s_src1_len, s_src2_off;
   const float *sxfwd;
   float *sxbck;
   float pmove, ploop;
@@ -682,7 +705,10 @@ cuda_backward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, co
   if (threadIdx.x != 0) return;
   si = seqidx ? seqidx[b] : b;
   L = lengths[si];
-  sdsq = dsq + offsets[si];
+  sdsq = dsq + (src1_lengths ? 0 : offsets[si]);
+  s_offset   = src1_lengths ? offsets[si]       : 0;
+  s_src1_len = src1_lengths ? src1_lengths[si]  : 0;
+  s_src2_off = src1_lengths ? src2_offsets[si]  : 0;
   sxfwd = xfwd + x_offsets[b];
   sxbck = xbck + x_offsets[b];
 
@@ -732,7 +758,7 @@ cuda_backward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, co
   sxbck[L * p7X_NXCELLS + p7X_SCALE] = scale;
 
   for (int i = L - 1; i >= 1; i--) {
-    uint8_t x = sdsq[i + 1];
+    uint8_t x = src1_lengths ? fb_parser_fetch_residue(sdsq, i + 1, s_offset, L, s_src1_len, s_src2_off, rc_flag) : sdsq[i + 1];
     if (x >= Kp) {
       scores[b * 2 + 1] = 0.0f;
       statuses[b * 2 + 1] = eslEINVAL;
@@ -814,7 +840,7 @@ cuda_backward_parser_xmx_batch_kernel(const uint8_t *dsq, const int *offsets, co
   }
 
   if (L >= 1) {
-    uint8_t x = sdsq[1];
+    uint8_t x = src1_lengths ? fb_parser_fetch_residue(sdsq, 1, s_offset, L, s_src1_len, s_src2_off, rc_flag) : sdsq[1];
     if (x >= Kp) {
       scores[b * 2 + 1] = 0.0f;
       statuses[b * 2 + 1] = eslEINVAL;
@@ -852,7 +878,8 @@ cuda_backward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *of
                                                const float *rfv, const float *tfv, int M, int Q, int Kp,
                                                float xf_e_loop, float xf_e_move, float xf_n_loop_base, float xf_n_move_base,
                                                float xf_c_loop_base, float xf_c_move_base, float xf_j_loop_base, float xf_j_move_base,
-                                               float nj, const float *xfwd, float *xbck, float *scores, int *statuses)
+                                               float nj, const float *xfwd, float *xbck, float *scores, int *statuses,
+                                               const int *src1_lengths = NULL, const int *src2_offsets = NULL, int rc_flag = 0)
 {
   extern __shared__ float bck_parser_parallel_mem[];
   int b = blockIdx.x;
@@ -868,6 +895,7 @@ cuda_backward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *of
   __shared__ float sscale, sinv;
   __shared__ int si, L;
   __shared__ const uint8_t *sdsq;
+  __shared__ int s_offset, s_src1_len, s_src2_off;
   __shared__ const float *sxfwd;
   __shared__ float *sxbck;
   __shared__ float xf_n_loop, xf_n_move, xf_c_loop, xf_c_move, xf_j_loop, xf_j_move;
@@ -876,7 +904,10 @@ cuda_backward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *of
   if (tid == 0) {
     si = seqidx ? seqidx[b] : b;
     L = lengths[si];
-    sdsq = dsq + offsets[si];
+    sdsq = dsq + (src1_lengths ? 0 : offsets[si]);
+    s_offset   = src1_lengths ? offsets[si]       : 0;
+    s_src1_len = src1_lengths ? src1_lengths[si]  : 0;
+    s_src2_off = src1_lengths ? src2_offsets[si]  : 0;
     sxfwd = xfwd + x_offsets[b];
     sxbck = xbck + x_offsets[b];
     float pmove = (2.0f + nj) / ((float) L + 2.0f + nj);
@@ -989,7 +1020,7 @@ cuda_backward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *of
   __syncthreads();
 
   for (int i = L - 1; i >= 1; i--) {
-    uint8_t x = sdsq[i + 1];
+    uint8_t x = src1_lengths ? fb_parser_fetch_residue(sdsq, i + 1, s_offset, L, s_src1_len, s_src2_off, rc_flag) : sdsq[i + 1];
     if (x >= Kp) {
       if (tid == 0) {
         scores[b * 2 + 1] = 0.0f;
@@ -1134,7 +1165,7 @@ cuda_backward_parser_xmx_batch_parallel_kernel(const uint8_t *dsq, const int *of
 
   if (tid == 0) {
     if (L >= 1) {
-      uint8_t x = sdsq[1];
+      uint8_t x = src1_lengths ? fb_parser_fetch_residue(sdsq, 1, s_offset, L, s_src1_len, s_src2_off, rc_flag) : sdsq[1];
       if (x >= Kp) {
         scores[b * 2 + 1] = 0.0f;
         statuses[b * 2 + 1] = eslEINVAL;
@@ -1536,6 +1567,17 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
     const uint8_t *d_dsq_ptr = use_resident ? engine->d_resident_dsq : active_dsq;
     int     *d_off_ptr = use_resident ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
     int     *d_len_ptr = use_resident ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+    int     *d_src1_len_ptr = NULL;
+    int     *d_src2_off_ptr = NULL;
+    int      packed_rc = 0;
+    if (engine->batch_packed_2bit) {
+      d_dsq_ptr      = engine->d_batch_packed_base;
+      d_off_ptr      = engine->d_offsets;
+      d_len_ptr      = engine->d_lengths;
+      d_src1_len_ptr = engine->d_gather_src1_lengths;
+      d_src2_off_ptr = engine->d_gather_src2_offsets;
+      packed_rc      = engine->batch_rc_flag;
+    }
   if (run_modes & FB_RUN_FORWARD) {
   if (use_prefix_fwd) {
     if (fwd_shmem > 48 * 1024) {
@@ -1552,7 +1594,8 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                                                     cuom->xf_c_loop, cuom->xf_c_move,
                                                                                     cuom->xf_j_loop, cuom->xf_j_move,
                                                                                     cuom->nj, engine->d_parser_xf,
-                                                                                    engine->d_parser_scores, engine->d_parser_statuses);
+                                                                                    engine->d_parser_scores, engine->d_parser_statuses,
+                                                                                    d_src1_len_ptr, d_src2_off_ptr, packed_rc);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_forward_parser_xmx_batch_parallel_kernel launch")) != eslOK) goto CUDA_ERROR;
   } else {
     if (shmem > 48 * 1024) {
@@ -1569,7 +1612,8 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                              cuom->xf_c_loop, cuom->xf_c_move,
                                                              cuom->xf_j_loop, cuom->xf_j_move,
                                                              cuom->nj, engine->d_parser_xf,
-                                                             engine->d_parser_scores, engine->d_parser_statuses);
+                                                             engine->d_parser_scores, engine->d_parser_statuses,
+                                                             d_src1_len_ptr, d_src2_off_ptr, packed_rc);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_forward_parser_xmx_batch_kernel launch")) != eslOK) goto CUDA_ERROR;
   }
 	  }  /* end if (run_modes & FB_RUN_FORWARD) */
@@ -1592,7 +1636,8 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                                                      cuom->xf_c_loop, cuom->xf_c_move,
                                                                                      cuom->xf_j_loop, cuom->xf_j_move,
                                                                                      cuom->nj, d_xf_use, engine->d_parser_xb,
-                                                                                     engine->d_parser_scores, engine->d_parser_statuses);
+                                                                                     engine->d_parser_scores, engine->d_parser_statuses,
+                                                                                     d_src1_len_ptr, d_src2_off_ptr, packed_rc);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_backward_parser_xmx_batch_parallel_kernel launch")) != eslOK) goto CUDA_ERROR;
   } else {
     if (shmem > 48 * 1024) {
@@ -1609,7 +1654,8 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                               cuom->xf_c_loop, cuom->xf_c_move,
                                                               cuom->xf_j_loop, cuom->xf_j_move,
                                                               cuom->nj, d_xf_use, engine->d_parser_xb,
-                                                              engine->d_parser_scores, engine->d_parser_statuses);
+                                                              engine->d_parser_scores, engine->d_parser_statuses,
+                                                              d_src1_len_ptr, d_src2_off_ptr, packed_rc);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_backward_parser_xmx_batch_kernel launch")) != eslOK) goto CUDA_ERROR;
 	  }
 	  }  /* end if (run_modes & FB_RUN_BACKWARD) */
@@ -1654,11 +1700,12 @@ fb_parser_subset_ex(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
       engine->stats.fwd_parser_nres += slen;
     }
   }
-  if (!use_resident) {
+  if (!use_resident && !reuse_batch) {
     engine->batch_owner = chu;
     engine->batch_nseq  = nseq;
     engine->batch_total = total;
     engine->d_batch_dsq = engine->d_dsq;
+    engine->batch_packed_2bit = 0;
   }
 
 CUDA_ERROR:
@@ -1714,7 +1761,8 @@ cuda_parser_f3_gate_kernel(const uint8_t *dsq, const int *offsets, const int *le
                            const float *scores, const int *statuses,
                            int do_biasfilter, int B3,
                            float ev_mu, float ev_lambda, float F3,
-                           int *survivor_idx, float *survivor_fwdsc, int *counter)
+                           int *survivor_idx, float *survivor_fwdsc, int *counter,
+                           const int *src1_lengths = NULL, const int *src2_offsets = NULL, int rc_flag = 0)
 {
   int bi = blockIdx.x * blockDim.x + threadIdx.x;
   if (bi >= nidx) return;
@@ -1735,7 +1783,10 @@ cuda_parser_f3_gate_kernel(const uint8_t *dsq, const int *offsets, const int *le
     float filtersc = nullsc;
 
     if (do_biasfilter) {
-      const uint8_t *sdsq = dsq + offsets[seq];
+      const uint8_t *sdsq = dsq + (src1_lengths ? 0 : offsets[seq]);
+      int f3_offset   = src1_lengths ? offsets[seq]       : 0;
+      int f3_src1_len = src1_lengths ? src1_lengths[seq]  : 0;
+      int f3_src2_off = src1_lengths ? src2_offsets[seq]  : 0;
       float bias_filtersc;
 
       if (L == 0) {
@@ -1750,15 +1801,16 @@ cuda_parser_f3_gate_kernel(const uint8_t *dsq, const int *offsets, const int *le
         float p0, p1s, n0, n1, maxv;
         float sc = 0.0f;
 
-        p0  = eo[(int)sdsq[1] * 2 + 0] * pi[0];
-        p1s = eo[(int)sdsq[1] * 2 + 1] * pi[1];
+        uint8_t x1 = src1_lengths ? fb_parser_fetch_residue(sdsq, 1, f3_offset, L, f3_src1_len, f3_src2_off, rc_flag) : sdsq[1];
+        p0  = eo[(int)x1 * 2 + 0] * pi[0];
+        p1s = eo[(int)x1 * 2 + 1] * pi[1];
         maxv = fmaxf(fmaxf(p0, p1s), 0.0f);
         p0  /= maxv;
         p1s /= maxv;
         sc  += (float)log((double)maxv);
 
         for (int i = 2; i <= L; i++) {
-          uint8_t x = sdsq[i];
+          uint8_t x = src1_lengths ? fb_parser_fetch_residue(sdsq, i, f3_offset, L, f3_src1_len, f3_src2_off, rc_flag) : sdsq[i];
           n0 = (p0 * t00 + p1s * t10) * eo[(int)x * 2 + 0];
           n1 = (p0 * t01 + p1s * t11) * eo[(int)x * 2 + 1];
           maxv = fmaxf(fmaxf(n0, n1), 0.0f);
@@ -1890,9 +1942,20 @@ p7_cuda_ForwardParserDsqdataSubsetF3Survivors(P7_CUDA_ENGINE *engine, const P7_C
   if ((status = cuda_status(cudaMemcpy(engine->d_f1_counter, &h_counter, sizeof(int), cudaMemcpyHostToDevice), errbuf, errbuf_size, "cudaMemcpy(parser f3 counter reset)")) != eslOK) return status;
 
   {
-    uint8_t *d_dsq_ptr = engine->resident_active ? engine->d_resident_dsq : engine->d_dsq;
+    const uint8_t *d_dsq_ptr = engine->resident_active ? engine->d_resident_dsq : engine->d_dsq;
     int     *d_off_ptr = engine->resident_active ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
     int     *d_len_ptr = engine->resident_active ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+    int     *d_f3_src1_ptr = NULL;
+    int     *d_f3_src2_ptr = NULL;
+    int      f3_packed_rc = 0;
+    if (engine->batch_packed_2bit) {
+      d_dsq_ptr      = engine->d_batch_packed_base;
+      d_off_ptr      = engine->d_offsets;
+      d_len_ptr      = engine->d_lengths;
+      d_f3_src1_ptr  = engine->d_gather_src1_lengths;
+      d_f3_src2_ptr  = engine->d_gather_src2_offsets;
+      f3_packed_rc   = engine->batch_rc_flag;
+    }
     cuda_parser_f3_gate_kernel<<<(nidx + 127) / 128, 128>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
                                                             engine->d_parser_seqidx, nidx,
                                                             engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo,
@@ -1901,7 +1964,8 @@ p7_cuda_ForwardParserDsqdataSubsetF3Survivors(P7_CUDA_ENGINE *engine, const P7_C
                                                             (float)ev_mu, (float)ev_lambda, (float)F3,
                                                             engine->d_parser_surv_idx,
                                                             engine->d_f1_survivor_usc,
-                                                            engine->d_f1_counter);
+                                                            engine->d_f1_counter,
+                                                            d_f3_src1_ptr, d_f3_src2_ptr, f3_packed_rc);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_parser_f3_gate_kernel launch")) != eslOK) return status;
   }
 
@@ -1992,9 +2056,20 @@ p7_cuda_ForwardParserDsqdataSubsetF3SurvivorsDevice(P7_CUDA_ENGINE *engine, cons
   if ((status = cuda_status(cudaMemset(engine->d_f1_counter, 0, sizeof(int)), errbuf, errbuf_size, "cudaMemset(parser f3 counter reset)")) != eslOK) return status;
 
   {
-    uint8_t *d_dsq_ptr = engine->resident_active ? engine->d_resident_dsq : engine->d_dsq;
+    const uint8_t *d_dsq_ptr = engine->resident_active ? engine->d_resident_dsq : engine->d_dsq;
     int     *d_off_ptr = engine->resident_active ? (engine->d_resident_offsets + engine->resident_batch_seq0) : engine->d_offsets;
     int     *d_len_ptr = engine->resident_active ? (engine->d_resident_lengths + engine->resident_batch_seq0) : engine->d_lengths;
+    int     *d_f3_src1_ptr = NULL;
+    int     *d_f3_src2_ptr = NULL;
+    int      f3_packed_rc = 0;
+    if (engine->batch_packed_2bit) {
+      d_dsq_ptr      = engine->d_batch_packed_base;
+      d_off_ptr      = engine->d_offsets;
+      d_len_ptr      = engine->d_lengths;
+      d_f3_src1_ptr  = engine->d_gather_src1_lengths;
+      d_f3_src2_ptr  = engine->d_gather_src2_offsets;
+      f3_packed_rc   = engine->batch_rc_flag;
+    }
     cuda_parser_f3_gate_kernel<<<(nidx + 127) / 128, 128>>>(d_dsq_ptr, d_off_ptr, d_len_ptr,
                                                             engine->d_parser_seqidx, nidx,
                                                             engine->d_bias_pi, engine->d_bias_t, engine->d_bias_eo,
@@ -2003,7 +2078,8 @@ p7_cuda_ForwardParserDsqdataSubsetF3SurvivorsDevice(P7_CUDA_ENGINE *engine, cons
                                                             (float)ev_mu, (float)ev_lambda, (float)F3,
                                                             engine->d_parser_surv_idx,
                                                             engine->d_f1_survivor_usc,
-                                                            engine->d_f1_counter);
+                                                            engine->d_f1_counter,
+                                                            d_f3_src1_ptr, d_f3_src2_ptr, f3_packed_rc);
     if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_parser_f3_gate_kernel launch")) != eslOK) return status;
   }
 

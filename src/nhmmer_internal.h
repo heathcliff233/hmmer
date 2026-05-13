@@ -66,6 +66,7 @@ typedef struct {
   int               h_nucdb_chunk_alloc;
   int               h_nucdb_window_alloc;
   /* Instrumentation counters (accumulated across strands/blocks) */
+  int64_t           n_f1_in_windows;       /* windows entering F1 filter (pre-filter, post-SSV) */
   int64_t           n_vit_lt_windows_in;   /* windows entering scanning Viterbi */
   int64_t           n_vit_lt_windows_out;  /* sub-windows from scanning Viterbi */
   int64_t           n_post_vit_windows;    /* windows entering GPU Forward prefilter / post-Vit continuation */
@@ -87,6 +88,7 @@ typedef struct {
   double            ssv_kernel_seconds;
   double            t_merge;         /* window extend + merge */
   double            t_batch_filter;  /* GPU batch SSV/bias/F1 filter */
+  double            t_batch_gather;  /* CUDA gather kernel inside GPU batch F1 filter */
   double            t_batch_h2d;     /* CUDA H2D inside GPU batch F1 filter */
   double            t_batch_kernel;  /* CUDA kernels inside GPU batch F1 filter */
   double            t_batch_f1_gate; /* CUDA fused SSV/null/bias/F1 gate kernel */
@@ -120,6 +122,7 @@ typedef struct {
   double            vit_device_active_seconds;
   double            t_fwd_prefilter; /* GPU Forward pre-filter */
   double            t_gpu_fb_parser; /* GPU ForwardBackward parser batch */
+  double            t_gpu_fb_gather; /* CUDA gather kernel inside GPU FB parser prep */
   double            t_gpu_fb_pack;   /* host metadata/sequence packing before GPU FB parser */
   double            t_gpu_fb_h2d;    /* CUDA H2D inside GPU FB parser */
   double            t_gpu_fb_kernel; /* CUDA kernels inside GPU FB parser */

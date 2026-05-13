@@ -46,6 +46,7 @@ typedef struct p7_cuda_msv_stats_s {
   double   host_score_convert_seconds;
   double   host_sync_seconds;
   double   host_cudamemcpy_seconds;
+  double   gather_kernel_seconds;
   double   f1_gate_kernel_seconds;
   double   f1_compact_kernel_seconds;
   uint64_t nseqs;
@@ -224,7 +225,9 @@ extern int  p7_cuda_NhmmerF1GateResident(P7_CUDA_ENGINE *engine, const P7_CUDA_M
                                           int *survivor_idx, int *ret_nsurv,
                                           float *survivor_filtersc, int *survivor_statuses,
                                           int warps_per_block,
-                                          char *errbuf, int errbuf_size);
+                                          char *errbuf, int errbuf_size,
+                                          const int *h_src1_lengths, const int *h_src2_offsets,
+                                          int packed_rc_flag);
 extern int  p7_cuda_NhmmerF1GateResidentGather(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE *cuom,
                                                 const P7_BG *bg, const uint8_t *d_dsq_base,
                                                 const int *h_src1_offsets, const int *h_src1_lengths,

@@ -118,3 +118,7 @@ from host launch overhead overlap.
 - GPU Forward/Backward parser handoff (CPU skips Fwd/Bwd recomputation)
 - Forward-Backward split (Backward-only after prefilter saves xf)
 - Dynamic CPU worker scheduling (work-stealing queue)
+- **Gather elimination**: All GPU stages (SSV, F1 gate, scanning Viterbi, FB parser)
+  now read directly from 2-bit packed nucdb data via `p7_nucdb_fetch1()`. The
+  legacy `cuda_nhmmer_gather_windows_kernel` (byte-unpack) is dead code. Eliminates
+  per-strand gather kernel launches and ~350MB intermediate device memory traffic.

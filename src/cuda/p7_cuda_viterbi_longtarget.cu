@@ -1,4 +1,5 @@
 #include "p7_cuda_internal.h"
+#include "p7_cuda_nucdb_pack.cuh"
 #include "nhmmer_cuda_internal.h"
 #include <stdlib.h>
 
@@ -112,7 +113,8 @@ cuda_viterbi_longtarget_reg_kernel(
     int16_t xw_e_loop, int16_t xw_e_move,
     int16_t base_w, int16_t ddbound_w,
     const int16_t *sc_thresholds,
-    P7_CUDA_VIT_LT_WINDOW *d_windows, int *d_win_count, int max_windows)
+    P7_CUDA_VIT_LT_WINDOW *d_windows, int *d_win_count, int max_windows,
+    const int *src1_lengths = NULL, const int *src2_offsets = NULL, int rc_flag = 0)
 {
   extern __shared__ uint8_t vlt_reg_mem[];
   int lane = threadIdx.x & 31;
@@ -138,7 +140,11 @@ cuda_viterbi_longtarget_reg_kernel(
 
   int src_i = seqidx ? seqidx[bi] : bi;
   int L = lengths[src_i];
-  const uint8_t *s = dsq + offsets[src_i];
+  int packed_2bit = (src1_lengths != NULL);
+  const uint8_t *s = packed_2bit ? dsq : (dsq + offsets[src_i]);
+  int s_offset   = packed_2bit ? offsets[src_i]       : 0;
+  int s_src1_len = packed_2bit ? src1_lengths[src_i]  : 0;
+  int s_src2_off = packed_2bit ? src2_offsets[src_i]  : 0;
   int16_t my_thresh = sc_thresholds[bi];
 
   int loc_L = (L < max_length) ? L : max_length;
@@ -157,7 +163,15 @@ cuda_viterbi_longtarget_reg_kernel(
   int16_t xC = -32768;
 
   for (int i = 1; i <= L; i++) {
-    uint8_t x = s[i];
+    uint8_t x;
+    if (packed_2bit) {
+      int k = i - 1;
+      int pos = rc_flag ? (L - 1 - k) : k;
+      int sp  = (pos < s_src1_len) ? (s_offset + pos) : (s_src2_off + (pos - s_src1_len));
+      x = (uint8_t)p7_nucdb_fetch1(s, sp, rc_flag);
+    } else {
+      x = s[i];
+    }
     xB = (int16_t) __shfl_sync(0xffffffff, (int) xB, 0);
 
     int16_t km1_M = (my_count > 0) ? reg_M[my_count - 1] : (int16_t)-32768;
@@ -300,7 +314,8 @@ cuda_viterbi_longtarget_kernel(
     int16_t xw_e_loop, int16_t xw_e_move,
     int16_t base_w, int16_t ddbound_w,
     const int16_t *sc_thresholds,
-    P7_CUDA_VIT_LT_WINDOW *d_windows, int *d_win_count, int max_windows)
+    P7_CUDA_VIT_LT_WINDOW *d_windows, int *d_win_count, int max_windows,
+    const int *src1_lengths = NULL, const int *src2_offsets = NULL, int rc_flag = 0)
 {
   extern __shared__ int16_t vlt_mem[];
   int groups_per_block = blockDim.x / VIT_LT_LANES;
@@ -316,7 +331,11 @@ cuda_viterbi_longtarget_kernel(
 
   int src_i = seqidx ? seqidx[bi] : bi;
   int L = lengths[src_i];
-  const uint8_t *s = dsq + offsets[src_i];
+  int packed_2bit = (src1_lengths != NULL);
+  const uint8_t *s = packed_2bit ? dsq : (dsq + offsets[src_i]);
+  int s_offset   = packed_2bit ? offsets[src_i]       : 0;
+  int s_src1_len = packed_2bit ? src1_lengths[src_i]  : 0;
+  int s_src2_off = packed_2bit ? src2_offsets[src_i]  : 0;
   int16_t my_thresh = sc_thresholds[bi];
 
   /* Per-window length reconfiguration (matches CPU ReconfigRestLength) */
@@ -337,7 +356,15 @@ cuda_viterbi_longtarget_kernel(
   int16_t xC = -32768;
 
   for (int i = 1; i <= L; i++) {
-    uint8_t x = s[i];
+    uint8_t x;
+    if (packed_2bit) {
+      int k = i - 1;
+      int pos = rc_flag ? (L - 1 - k) : k;
+      int sp  = (pos < s_src1_len) ? (s_offset + pos) : (s_src2_off + (pos - s_src1_len));
+      x = (uint8_t)p7_nucdb_fetch1(s, sp, rc_flag);
+    } else {
+      x = s[i];
+    }
 
     xB = (int16_t) __shfl_sync(mask, (int) xB, 0, VIT_LT_LANES);
     int16_t mpv = dp[((Q - 1) + lane * Q) * 3 + 0];
@@ -677,7 +704,8 @@ p7_cuda_viterbi_longtarget_launch(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
                                   float nj, float scale_w,
                                   P7_CUDA_VIT_LT_WINDOW **ret_windows, int *ret_nwindows,
                                   P7_CUDA_VIT_LT_STATS *local_stats,
-                                  char *errbuf, int errbuf_size)
+                                  char *errbuf, int errbuf_size,
+                                  const int *d_src1_lengths = NULL, const int *d_src2_offsets = NULL, int vlt_rc_flag = 0)
 {
   int status = eslOK;
   int Q = cuom->Qw;
@@ -835,6 +863,9 @@ p7_cuda_viterbi_longtarget_launch(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
     const int     *launch_lengths    = use_chunking ? engine->d_vlt_virt_lengths    : d_lengths;
     const int     *launch_seqidx     = use_chunking ? NULL                          : d_seqidx;
     const int16_t *launch_thresholds = use_chunking ? engine->d_vlt_virt_thresholds : engine->d_vlt_thresholds;
+    const int     *launch_src1_lengths = use_chunking ? NULL : d_src1_lengths;
+    const int     *launch_src2_offsets = use_chunking ? NULL : d_src2_offsets;
+    int            launch_rc_flag      = use_chunking ? 0    : vlt_rc_flag;
 
     const int16_t *launch_rwv = cuom->d_rwv_nuc ? cuom->d_rwv_nuc : cuom->d_rwv;
     const int16_t *launch_twv = cuom->d_twv;
@@ -893,7 +924,8 @@ p7_cuda_viterbi_longtarget_launch(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
         cuom->xw_e_loop, cuom->xw_e_move,
         cuom->base_w, cuom->ddbound_w,
         launch_thresholds,
-        engine->d_vlt_windows, engine->d_vlt_win_count, engine->vlt_win_alloc);
+        engine->d_vlt_windows, engine->d_vlt_win_count, engine->vlt_win_alloc,
+        launch_src1_lengths, launch_src2_offsets, launch_rc_flag);
       cudaEventRecord(engine->evt_k1);
       if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_longtarget_reg_kernel launch")) != eslOK) goto ERROR;
       if ((status = cuda_status(cudaEventSynchronize(engine->evt_k1), errbuf, errbuf_size, "cudaEventSynchronize(vlt reg kernel)")) != eslOK) goto ERROR;
@@ -933,7 +965,8 @@ p7_cuda_viterbi_longtarget_launch(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFI
         cuom->xw_e_loop, cuom->xw_e_move,
         cuom->base_w, cuom->ddbound_w,
         launch_thresholds,
-        engine->d_vlt_windows, engine->d_vlt_win_count, engine->vlt_win_alloc);
+        engine->d_vlt_windows, engine->d_vlt_win_count, engine->vlt_win_alloc,
+        launch_src1_lengths, launch_src2_offsets, launch_rc_flag);
       cudaEventRecord(engine->evt_k1);
       if ((status = cuda_status(cudaGetLastError(), errbuf, errbuf_size, "cuda_viterbi_longtarget_kernel launch")) != eslOK) goto ERROR;
       if ((status = cuda_status(cudaEventSynchronize(engine->evt_k1), errbuf, errbuf_size, "cudaEventSynchronize(vlt kernel)")) != eslOK) goto ERROR;
@@ -1035,7 +1068,8 @@ p7_cuda_viterbi_longtarget_launch_windows(P7_CUDA_ENGINE *engine, const P7_CUDA_
                                           float nj, float scale_w,
                                           P7_HMM_WINDOW **ret_windows, int *ret_nwindows,
                                           P7_CUDA_VIT_LT_STATS *local_stats,
-                                          char *errbuf, int errbuf_size)
+                                          char *errbuf, int errbuf_size,
+                                          const int *d_src1_lengths = NULL, const int *d_src2_offsets = NULL, int vlt_rc_flag = 0)
 {
   int status = eslOK;
   int raw_count = 0;
@@ -1048,7 +1082,8 @@ p7_cuda_viterbi_longtarget_launch_windows(P7_CUDA_ENGINE *engine, const P7_CUDA_
   status = p7_cuda_viterbi_longtarget_launch(engine, cuom, d_dsq, d_offsets, d_lengths,
                                              d_seqidx, nwindows, max_length, nj, scale_w,
                                              &raw_windows, &raw_count, local_stats,
-                                             errbuf, errbuf_size);
+                                             errbuf, errbuf_size,
+                                             d_src1_lengths, d_src2_offsets, vlt_rc_flag);
   if (status != eslOK) goto ERROR;
   if (raw_count == 0) {
     *ret_windows = NULL;
@@ -1553,7 +1588,10 @@ p7_cuda_ViterbiLongtargetFromF1(P7_CUDA_ENGINE *engine, const P7_CUDA_MSVPROFILE
                                              d_batch_dsq, engine->d_offsets, engine->d_lengths, engine->d_f1_survivor_idx,
                                              nwindows, max_length, nj, scale_w,
                                              &h_windows, ret_nwindows, &local_stats,
-                                             errbuf, errbuf_size);
+                                             errbuf, errbuf_size,
+                                             engine->batch_packed_2bit ? engine->d_gather_src1_lengths : NULL,
+                                             engine->batch_packed_2bit ? engine->d_gather_src2_offsets : NULL,
+                                             engine->batch_packed_2bit ? engine->batch_rc_flag : 0);
   if (status != eslOK) goto ERROR;
 
   engine->stats.vit_h2d_seconds    += local_stats.h2d_seconds;
@@ -1653,7 +1691,10 @@ p7_cuda_ViterbiLongtargetFromF1Windows(P7_CUDA_ENGINE *engine, const P7_CUDA_MSV
                                                      engine->d_f1_survivor_idx,
                                                      nwindows, max_length, nj, scale_w,
                                                      ret_windows, ret_nwindows, &local_stats,
-                                                     errbuf, errbuf_size);
+                                                     errbuf, errbuf_size,
+                                                     engine->batch_packed_2bit ? engine->d_gather_src1_lengths : NULL,
+                                                     engine->batch_packed_2bit ? engine->d_gather_src2_offsets : NULL,
+                                                     engine->batch_packed_2bit ? engine->batch_rc_flag : 0);
   if (status != eslOK) goto ERROR;
 
   engine->stats.vit_h2d_seconds    += local_stats.h2d_seconds;

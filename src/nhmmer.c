@@ -1216,6 +1216,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.h_parser_alloc = 0;
         gpu_info.h_nucdb_chunk_alloc = 0;
         gpu_info.h_nucdb_window_alloc = 0;
+        gpu_info.n_f1_in_windows      = 0;
         gpu_info.n_vit_lt_windows_in  = 0;
         gpu_info.n_vit_lt_windows_out = 0;
         gpu_info.n_post_vit_windows   = 0;
@@ -1236,6 +1237,7 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
         gpu_info.ssv_kernel_seconds = 0;
         gpu_info.t_merge         = 0;
         gpu_info.t_batch_filter  = 0;
+        gpu_info.t_batch_gather  = 0;
 	        gpu_info.t_batch_h2d     = 0;
 	        gpu_info.t_batch_kernel  = 0;
 	        gpu_info.t_batch_f1_gate = 0;
@@ -1539,9 +1541,14 @@ serial_master(ESL_GETOPTS *go, struct cfg_s *cfg)
 	            fprintf(stderr, "  batch filter:      %7.3fs  (%4.1f%%)\n", gpu_info.t_batch_filter, 100.0*gpu_info.t_batch_filter/t_search);
 	            fprintf(stderr, "    batch H2D:       %7.3fs  (%" PRId64 " bytes)\n", gpu_info.t_batch_h2d, gpu_info.batch_packed_bytes);
 	            fprintf(stderr, "    batch kernels:   %7.3fs\n", gpu_info.t_batch_kernel);
+	            fprintf(stderr, "      gather:        %7.3fs\n", gpu_info.t_batch_gather);
 	            fprintf(stderr, "      f1 gate:       %7.3fs\n", gpu_info.t_batch_f1_gate);
 	            fprintf(stderr, "      f1 compact:    %7.3fs\n", gpu_info.t_batch_compact);
 	            fprintf(stderr, "    batch D2H:       %7.3fs\n", gpu_info.t_batch_d2h);
+	            if (gpu_info.n_f1_in_windows > 0)
+	              fprintf(stderr, "    F1 selectivity:  %" PRId64 " in -> %" PRId64 " out (%.1f%% pass)\n",
+	                      gpu_info.n_f1_in_windows, gpu_info.n_vit_lt_windows_in,
+	                      100.0 * gpu_info.n_vit_lt_windows_in / gpu_info.n_f1_in_windows);
 		            fprintf(stderr, "  scanning Viterbi:  %7.3fs  (%4.1f%%)\n", gpu_info.t_vit_lt, 100.0*gpu_info.t_vit_lt/t_search);
 	            if (gpu_info.t_vit_lt > 0.0) {
 	              fprintf(stderr, "    vit bias pass:   %7.3fs\n", gpu_info.t_vit_bias);

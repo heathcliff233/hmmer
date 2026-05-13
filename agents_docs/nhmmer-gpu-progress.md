@@ -51,8 +51,9 @@ See `src/cuda/nhmmer_gpu_slot.{c,h}` for slot lifecycle, and
 
 `hmmnucdb` v2 packs nucleotides at 2 bits/residue (A=0, C=1, G=2, T=3) plus a
 1-bit/residue mask for non-ACGT ambiguity characters.  Reverse complement is
-computed on-the-fly by the GPU gather kernel (index inversion + XOR with 3) —
-no pre-stored RC strand is written to disk or uploaded to the device.
+computed on-the-fly by each GPU kernel inline (index inversion + XOR with 3 via
+`p7_nucdb_fetch1()`) — no pre-stored RC strand is written to disk or uploaded to
+the device.
 
 Disk layout:
 
@@ -85,9 +86,10 @@ residue A/C/G/T) instead of the full Kp=18-row protein table:
 | `d_rwv_nuc` | 4×Qw×8×int16 | proportional |
 | `d_rfv_nuc` | 4×Qf×4×float | proportional |
 
-The gather kernel unpacks 2-bit residue codes (0–3) directly into the 4-row
-table index.  All kernel launch sites pass the nuc tables when available (i.e.,
-when the profile alphabet is DNA/RNA and a v2 `.nucdb` is in use).
+Each kernel reads 2-bit residue codes (0–3) inline via `p7_nucdb_fetch1()` and
+uses them directly as 4-row table indices.  All kernel launch sites pass the nuc
+tables when available (i.e., when the profile alphabet is DNA/RNA and a v2 `.nucdb`
+is in use).
 
 Relevant files: `src/cuda/p7_cuda_internal.h` (struct fields), 
 `src/cuda/p7_cuda_runtime.cu` (`CreateNucTables`), `src/cuda/p7_cuda.h`
@@ -174,11 +176,12 @@ unchanged — it remains the dominant cost and the target for AVX2 widening
 The default resident overlap `.nucdb` path:
 
 - Uploads `.nucdb` v2 chunk data once per process (forward strand only, 2 bits/residue).
-- Computes RC on-the-fly in the gather kernel; no RC storage on disk or device.
-- Runs SSV directly from resident device chunks using `d_rbv_lin_nuc` (4-row).
-- Maps F1 and parser windows back to resident chunks.
-- Uses device gather for boundary-spanning windows.
-- Keeps F1-to-Viterbi sequence bytes device-resident.
+- Computes RC on-the-fly inline in each kernel via `p7_nucdb_fetch1()`; no RC storage on disk or device.
+- All GPU stages (SSV, F1 gate, scanning Viterbi, FB parser) read directly from
+  2-bit packed resident data — no gather/unpack intermediate step.
+- Maps F1 and parser windows back to resident chunks via three-array packed-mode
+  descriptor: `offsets[i]` (residue-position base), `src1_lengths[i]` (first-chunk
+  residues), `src2_offsets[i]` (second-chunk base, 0 if single-chunk).
 - Keeps Forward xmx device-resident through F3 gate, survivor offset creation,
   survivor compaction, and Backward.
 - Avoids full host forward/reverse `ESL_SQ` reconstruction. The top-level

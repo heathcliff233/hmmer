@@ -132,6 +132,8 @@ nhmmer_gpu_run_strand_gpu_phase(NHMMER_GPU_INFO *info, NHMMER_GPU_SLOT *slot,
   int *resident_f1_src2_offsets = NULL;
   int use_resident_f1_gather = FALSE;
 
+  info->n_f1_in_windows += msv_windowlist.count;
+
   clock_gettime(CLOCK_MONOTONIC, &ts0);
   if (msv_windowlist.count >= NHMMER_GPU_BATCH_MIN) {
     int nsurv = 0;
